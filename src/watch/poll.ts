@@ -41,6 +41,8 @@ export type WatchEvent = {
   branch?: string;
   // every check on the head of an open pr completed; number is the pr
   settled?: boolean;
+  // mechanical findings of the issue pack on a new issue
+  findings?: string[];
   // set when the event is new
   isNew: boolean;
 };

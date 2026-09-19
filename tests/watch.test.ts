@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Gh } from '../src/github/gh.ts';
-import { DEFAULT_CONFIG } from '../src/github/config.ts';
+import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { diffItems, diffRuns, hashOf, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
@@ -212,5 +212,49 @@ describe('watcher', () => {
     expect(delivered[0]).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks)');
     expect(delivered[0]).toContain('https://x/pull/3 · ci settled on pr');
     expect(watcher.snapshot().settled).toEqual({ '3@abc1234def': 'success' });
+  });
+
+  it('checks a new issue against the issue pack, the filer\'s own included, and delivers its findings', async () => {
+    const gh = fakeGh([
+      page({ login: 'me' }),
+      // tick 1: seed
+      page([issue(1)]),
+      page([slim(1)]),
+      page({ workflow_runs: [] }),
+      // tick 2: me filed issue 2 with no labels and a task label but no parent
+      page([issue(2)], '"f"'),
+      page([slim(2, { u: 'me', l: 'task', cr: '2026-06-01T00:00:00Z', up: '2026-06-01T00:00:00Z' })]),
+      notModified,
+      // the issue subject: item, comments, open issues, parent
+      page(issue(2, { user: { login: 'me' }, labels: [{ name: 'task' }], body: '## Summary\nthe summary' })),
+      page([]),
+      page([issue(2)]),
+      page(null),
+    ]);
+    const delivered: string[] = [];
+    const config = resolveConfig({ issues: { requiredLabelGroups: [['bug', 'enhancement']], childLabels: ['task'], templateSections: ['Summary', 'Acceptance'] } });
+    const watcher = new Watcher(
+      {
+        gh,
+        store: { get: async () => undefined, set: async () => {} },
+        judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) },
+        pack: BUILTIN_PACKS['triage']!,
+        issuePack: BUILTIN_PACKS['issue']!,
+        config,
+        now: () => 1_750_000_000_000,
+        deliver: async (t) => void delivered.push(t),
+        log: () => {},
+        status: () => {},
+        schedule: () => ({ cancel: () => {} }),
+      },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'] } },
+    );
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('issue #2 new [open]: Issue 2');
+    expect(delivered[0]).toContain('· filed with 3 findings');
+    expect(delivered[0]).toContain('filing: issue.labels: needs one of: bug, enhancement; issue.template: missing section: Acceptance; issue.parent: labeled as a child but has no parent sub-issue link');
   });
 });

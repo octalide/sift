@@ -285,6 +285,7 @@ export const register: Register = (on, rawOptions) => {
           store,
           judge,
           pack: triagePack,
+          issuePack: rt.packs['issue'],
           config,
           now: () => Date.now(),
           deliver: async (text) => {
