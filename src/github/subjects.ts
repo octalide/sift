@@ -1,6 +1,7 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
-import { LOG_FORMAT, parseLog, parseSemver, requiredBump, type ParsedCommit } from './commits.ts';
+import { LOG_FORMAT, maxBump, parseLog, parseSemver, requiredBump, type Bump, type ParsedCommit } from './commits.ts';
+import { manifestChanges, type ManifestChange } from './manifest.ts';
 import type { RepoConfig } from './config.ts';
 import type { Gh } from './gh.ts';
 
@@ -208,8 +209,15 @@ export async function releaseSubject(gh: Gh, config: RepoConfig, read: ReadLike,
   const lastTag = await lastReleaseTag(gh, config.release.tagPrefix);
   const range = lastTag ? `${lastTag}..HEAD` : 'HEAD';
   const commits = parseLog(await gh.git(['log', LOG_FORMAT, '--no-merges', range]));
-  const bump = requiredBump(commits);
   const version = lastTag ? parseSemver(lastTag, config.release.tagPrefix) : undefined;
+  const commitBump = requiredBump(commits, version, config.release.zeroVerBreaking);
+  const manifests: ManifestChange[] = [];
+  for (const rule of config.release.manifests) {
+    const at = async (ref: string) => gh.git(['show', `${ref}:${rule.path}`]).catch(() => undefined);
+    manifests.push(...manifestChanges(rule, lastTag ? await at(lastTag) : undefined, await at('HEAD')));
+  }
+  const manifestBump = manifests.reduce<Bump>((acc, m) => maxBump(acc, m.bump), 'none');
+  const bump = maxBump(commitBump, manifestBump);
   const changelogPath = config.release.changelog && (await exists(config.release.changelog)) ? config.release.changelog : undefined;
   const changelog = changelogPath ? await read(changelogPath) : '';
   const unreleased = topSection(changelog);
@@ -220,9 +228,10 @@ export async function releaseSubject(gh: Gh, config: RepoConfig, read: ReadLike,
       last_tag: lastTag ?? null,
       commits: commits.map((c) => ({ sha: c.sha.slice(0, 7), subject: c.subject, breaking: c.breaking, body: truncate(c.body, 1500) })),
       required_bump: bump,
+      manifest_changes: manifests.map((m) => ({ path: m.path, key: m.key, from: m.from, to: m.to })),
       changelog_top: truncate(unreleased, 8000),
     },
-    facts: { lastTag, version, commits, bump, changelogPath, unreleased, has_commits: commits.length > 0 },
+    facts: { lastTag, version, commits, bump, commitBump, manifestBump, manifests, changelogPath, unreleased, has_commits: commits.length > 0 || manifests.length > 0 },
     options: {},
   };
 }

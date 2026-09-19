@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Gh } from '../src/github/gh.ts';
 import { bumpVersion, parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
+import { flattenToml, manifestChanges } from '../src/github/manifest.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
 import { lastReleaseTag, linkedIssues, ruleParagraphs, sectionsOf, topSection } from '../src/github/subjects.ts';
@@ -28,7 +29,10 @@ describe('conventional commits', () => {
     expect(requiredBump(log)).toBe('minor');
     expect(requiredBump([parseCommit('x', 'refactor!: y')])).toBe('major');
     expect(requiredBump([parseCommit('x', 'docs: y')])).toBe('none');
-    expect(bumpVersion([0, 3, 1], 'major')).toEqual([0, 4, 0]);
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], [0, 17, 2])).toBe('minor');
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], [0, 17, 2], 'major')).toBe('major');
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], [1, 0, 0])).toBe('major');
+    expect(bumpVersion([0, 3, 1], 'minor')).toEqual([0, 4, 0]);
     expect(bumpVersion([1, 3, 1], 'major')).toEqual([2, 0, 0]);
   });
 });
@@ -64,7 +68,26 @@ describe('mechanical checks', () => {
     const release: Subject = { kind: 'release', ref: 'HEAD', state: {}, facts: { has_commits: true, bump: 'minor', version: [1, 2, 3], proposed: 'v1.2.4' }, options: {} };
     expect(runChecks(BUILTIN_PACKS['release']!, release, resolveConfig(undefined))).toEqual([]);
     const semver = runChecks(BUILTIN_PACKS['release']!, release, resolveConfig({ release: { scheme: 'semver' } }));
-    expect(semver.map((f) => f.message)).toEqual(['required bump: minor, next version v1.3.0', 'v1.2.4 is a patch bump, commits require minor']);
+    expect(semver.map((f) => f.message)).toEqual(['required bump: minor, next version v1.3.0, from commits minor', 'v1.2.4 is a patch bump, the changes require minor']);
+  });
+
+  it('reads dependency floors out of a manifest and names the changed keys', () => {
+    const before = '[project]\nid = "hedge"\nversion = "0.7.0"\nmach = "^5.3"\n\n[dep.std]\ngit = "https://x/std"\nref = "tag/v5.7.0"\n';
+    const after = '[project]\nid = "hedge"\nversion = "0.7.1"\nmach = "^5.9" # floor\n\n[dep.std]\ngit = "https://x/std"\nref = "tag/v6.0.0"\n\n[dep.tls]\ngit = "https://x/tls"\nref = "tag/v0.8.1"\n';
+    expect(flattenToml(after)['project.mach']).toBe('"^5.9"');
+    const rule = { path: 'mach.toml', keys: ['^project\\.mach$', '^dep\\.[^.]+\\.(git|ref)$'], bump: 'minor' as const };
+    const changes = manifestChanges(rule, before, after);
+    expect(changes.map((c) => `${c.key} ${c.from} -> ${c.to}`)).toEqual(['project.mach "^5.3" -> "^5.9"', 'dep.std.ref "tag/v5.7.0" -> "tag/v6.0.0"', 'dep.tls.git null -> "https://x/tls"', 'dep.tls.ref null -> "tag/v0.8.1"']);
+    expect(manifestChanges(rule, before, before)).toEqual([]);
+    const release: Subject = {
+      kind: 'release',
+      ref: 'HEAD',
+      state: {},
+      facts: { has_commits: true, bump: 'minor', commitBump: 'none', manifestBump: 'minor', manifests: changes.slice(0, 1), version: [0, 7, 0] },
+      options: {},
+    };
+    const findings = runChecks(BUILTIN_PACKS['release']!, release, resolveConfig({ release: { scheme: 'semver' } }));
+    expect(findings.map((f) => f.message)).toEqual(['required bump: minor, next version v0.8.0, from mach.toml project.mach "^5.3" -> "^5.9" (minor)']);
   });
 
   it('layers config sources in order', () => {

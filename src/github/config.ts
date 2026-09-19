@@ -33,6 +33,10 @@ export type RepoConfig = {
     // unset: no changelog is read or checked
     changelog?: string;
     tagPrefix: string;
+    // what a breaking change requires below 1.0.0
+    zeroVerBreaking: 'major' | 'minor';
+    // manifests whose changed keys (regexes over dotted toml keys) require a bump on their own
+    manifests: { path: string; keys: string[]; bump: 'major' | 'minor' | 'patch' }[];
   };
 };
 
@@ -47,7 +51,7 @@ export const DEFAULT_CONFIG: RepoConfig = {
   issues: { requiredLabelGroups: [], milestone: false, templateSections: [], childLabels: [] },
   prs: { linkIssue: false, templateSections: [] },
   rules: { docs: ['CONTRIBUTING.md', 'CLAUDE.md', 'AGENTS.md', '.github/PULL_REQUEST_TEMPLATE.md'] },
-  release: { tagPrefix: 'v' },
+  release: { tagPrefix: 'v', zeroVerBreaking: 'minor', manifests: [] },
 };
 
 export const CONFIG_PATH = '.sift/config.json';

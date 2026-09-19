@@ -90,18 +90,23 @@ export const CHECKS: Record<string, Check> = {
     if (!c.release.scheme) return [];
     const bump = s.facts['bump'] as Bump;
     const version = s.facts['version'] as [number, number, number] | undefined;
+    const manifests = (s.facts['manifests'] as { path: string; key: string; from: string | null; to: string | null }[]) ?? [];
+    const commitBump = (s.facts['commitBump'] as Bump | undefined) ?? bump;
+    const manifestBump = (s.facts['manifestBump'] as Bump | undefined) ?? 'none';
     if (!s.facts['has_commits']) return [info('release.bump', 'no commits since the last tag')];
-    if (bump === 'none') return [warn('release.bump', 'nothing since the last tag calls for a release (no feat, fix or breaking change)')];
-    if (!version) return [info('release.bump', `required bump: ${bump} (no previous semver tag to compute from)`)];
+    if (bump === 'none') return [warn('release.bump', 'nothing since the last tag calls for a release (no feat, fix, breaking change or manifest change)')];
+    const because = [
+      commitBump !== 'none' ? `commits ${commitBump}` : '',
+      ...manifests.map((m) => `${m.path} ${m.key} ${m.from ?? 'unset'} -> ${m.to ?? 'unset'} (${manifestBump})`),
+    ].filter(Boolean);
+    if (!version) return [info('release.bump', `required bump: ${bump} (no previous semver tag to compute from), from ${because.join('; ')}`)];
     const next = bumpVersion(version, bump);
-    const findings = [info('release.bump', `required bump: ${bump}, next version ${c.release.tagPrefix}${next.join('.')}`)];
+    const findings = [info('release.bump', `required bump: ${bump}, next version ${c.release.tagPrefix}${next.join('.')}, from ${because.join('; ')}`)];
     const proposed = s.facts['proposed'] as string | undefined;
     if (proposed) {
       const p = parseSemver(proposed, c.release.tagPrefix);
       if (!p) findings.push(fail('release.bump', `${proposed} is not semver`));
-      else if (bumpBetween(version, p) !== bump && !(version[0] === 0 && bump === 'major' && bumpBetween(version, p) === 'minor')) {
-        findings.push(fail('release.bump', `${proposed} is a ${bumpBetween(version, p)} bump, commits require ${bump}`));
-      }
+      else if (bumpBetween(version, p) !== bump) findings.push(fail('release.bump', `${proposed} is a ${bumpBetween(version, p)} bump, the changes require ${bump}`));
     }
     return findings;
   },

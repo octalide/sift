@@ -93,11 +93,19 @@ To apply one set of conventions across many repos, set the `config` option to a 
   "issues": { "requiredLabelGroups": [["bug", "feat", "docs", "chore"]], "milestone": true, "templateSections": ["Summary", "Acceptance"], "childLabels": ["task"] },
   "prs": { "linkIssue": true, "target": "dev", "templateSections": ["Summary", "Testing"] },
   "rules": { "docs": ["CONTRIBUTING.md", "CLAUDE.md"] },
-  "release": { "scheme": "semver", "changelog": "CHANGELOG.md", "tagPrefix": "v" }
+  "release": {
+    "scheme": "semver",
+    "changelog": "CHANGELOG.md",
+    "tagPrefix": "v",
+    "zeroVerBreaking": "minor",
+    "manifests": [{ "path": "mach.toml", "keys": ["^project\\.mach$", "^dep\\.[^.]+\\.(git|ref)$"], "bump": "minor" }]
+  }
 }
 ```
 
 `release.scheme` turns on version checking (`semver` is the only scheme today). `release.changelog` names the file whose top section must cover the commits. Leave either out and the release pack only judges the commits since the last tag.
+
+`release.zeroVerBreaking` is what a breaking change requires while the version is below 1.0.0 (`minor` by default, `major` to cut 1.0.0 on the first one). `release.manifests` lists files whose changes are release-worthy on their own, commit types aside: each entry names a TOML file, regexes over its dotted keys (`project.mach`, `dep.std.ref`) and the bump a change to one of them requires. The manifest at the last tag is compared with the one at `HEAD`, so a version line that the release itself moves is not matched unless a key pattern names it. The required bump is the higher of the commit bump and the manifest bump, and `release.bump` says which keys moved.
 
 ## Packs
 

@@ -35,12 +35,19 @@ export function parseCommit(sha: string, message: string): ParsedCommit {
 
 export type Bump = 'major' | 'minor' | 'patch' | 'none';
 
-export function requiredBump(commits: ParsedCommit[]): Bump {
+const BUMP_RANK: Record<Bump, number> = { none: 0, patch: 1, minor: 2, major: 3 };
+
+export function maxBump(a: Bump, b: Bump): Bump {
+  return BUMP_RANK[a] >= BUMP_RANK[b] ? a : b;
+}
+
+// the bump the commit types alone call for; a breaking change below 1.0.0 requires zeroVerBreaking
+export function requiredBump(commits: ParsedCommit[], version?: [number, number, number], zeroVerBreaking: 'major' | 'minor' = 'minor'): Bump {
   let bump: Bump = 'none';
   for (const c of commits) {
-    if (c.breaking) return 'major';
-    if (c.type === 'feat' && bump !== 'minor') bump = 'minor';
-    else if ((c.type === 'fix' || c.type === 'perf') && bump === 'none') bump = 'patch';
+    if (c.breaking) bump = maxBump(bump, version && version[0] === 0 ? zeroVerBreaking : 'major');
+    else if (c.type === 'feat') bump = maxBump(bump, 'minor');
+    else if (c.type === 'fix' || c.type === 'perf') bump = maxBump(bump, 'patch');
   }
   return bump;
 }
@@ -55,7 +62,7 @@ export function bumpVersion(version: [number, number, number], bump: Bump): [num
   const [a, b, c] = version;
   switch (bump) {
     case 'major':
-      return a === 0 ? [0, b + 1, 0] : [a + 1, 0, 0];
+      return [a + 1, 0, 0];
     case 'minor':
       return [a, b + 1, 0];
     case 'patch':
