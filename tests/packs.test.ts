@@ -4,7 +4,7 @@ import { bumpVersion, parseCommit, parseLog, requiredBump } from '../src/github/
 import { flattenToml, manifestChanges } from '../src/github/manifest.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
-import { lastReleaseTag, linkedIssues, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf, topSection } from '../src/github/subjects.ts';
+import { lastReleaseTag, linkedIssues, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf, topSection } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
@@ -196,6 +196,29 @@ describe('github helpers', () => {
   it('picks the highest semver tag, not the nearest ancestor', () => {
     expect(lastReleaseTag(['v0.3.4', 'v0.10.0', 'v0.9.1', 'nightly'], 'v')).toBe('v0.10.0');
     expect(lastReleaseTag([], 'v')).toBeUndefined();
+  });
+
+  it('drops merge commits from a pull request before the convention judges them', async () => {
+    const gh = {
+      json: async (path: string) => {
+        if (path === 'repos/o/r/pulls/7') return { title: 't', body: 'Closes #1', user: { login: 'me' }, base: { ref: 'dev' }, head: { ref: 'perf/1', sha: 'h' }, draft: false, additions: 1, deletions: 0, changed_files: 1 };
+        if (path.startsWith('repos/o/r/pulls/7/commits')) {
+          return [
+            { sha: 'a'.repeat(40), parents: [{ sha: 'x' }], commit: { message: 'perf(#1): faster' } },
+            { sha: 'b'.repeat(40), parents: [{ sha: 'a'.repeat(40) }, { sha: 'y' }], commit: { message: "Merge remote-tracking branch 'origin/dev' into perf/1" } },
+          ];
+        }
+        if (path.startsWith('repos/o/r/issues/1')) return { number: 1, title: 'one', body: '' };
+        if (path.includes('/comments')) return [];
+        if (path.includes('/check-runs')) return { check_runs: [] };
+        throw new Error(path);
+      },
+      text: async () => 'diff',
+    } as unknown as Gh;
+    const s = await prSubject(gh, 'o/r', 7, DEFAULT_CONFIG);
+    expect((s.facts['commits'] as { message: string }[]).map((c) => c.message)).toEqual(['perf(#1): faster']);
+    expect((s.state as { commits: string[] }).commits).toEqual(['perf(#1): faster']);
+    expect(runChecks(BUILTIN_PACKS['pr']!, s, DEFAULT_CONFIG).filter((f) => f.check === 'pr.commits')).toEqual([]);
   });
 
   it('reads a release from github when there is no checkout', async () => {
