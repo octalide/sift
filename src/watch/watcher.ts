@@ -3,7 +3,7 @@ import { Gh, GhError } from '../github/gh.ts';
 import type { Judge } from '../judge/types.ts';
 import type { Pack } from '../packs/types.ts';
 import type { StoreLike } from '../log.ts';
-import { diffItems, diffRuns, formatEvent, initialState, ITEM_JQ, STATE_VERSION, toItem, toRuns, trimRuns, type Deferred, type RawItem, type WatchEvent, type WatchState } from './poll.ts';
+import { diffItems, diffRuns, formatEvent, initialState, ITEM_JQ, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type CheckRun, type CommitStatus, type Deferred, type RawItem, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
 
 export type WatchOptions = {
@@ -197,7 +197,7 @@ export class Watcher {
   private async handle(events: WatchEvent[]): Promise<void> {
     const rules: WatchRules = { ...this.options.rules, login: this.state.login };
     const deliver: { event: WatchEvent; label: string }[] = [];
-    for (const e of events) {
+    for (const e of await this.settleRuns(events)) {
       const route = routeByRules(e, rules);
       if (route.action === 'drop') {
         this.host.onDecision?.(e, 'drop', route.reason);
@@ -226,6 +226,72 @@ export class Watcher {
     await this.host.deliver(this.render(deliver));
     this.state.deferred = [];
     this.state.lastDelivery = this.host.now();
+  }
+
+  // a completed run on the head of an open pr is reported as the pr's verdict, once, when the last check finishes.
+  // until then the run event is held with the pr named. under ci: all the run events pass through as well
+  private async settleRuns(events: WatchEvent[]): Promise<WatchEvent[]> {
+    const runs = events.filter((e) => e.kind === 'ci' && !e.settled);
+    if (runs.length === 0 || this.options.rules.ci === 'none') return events;
+    const out: WatchEvent[] = events.filter((e) => e.kind !== 'ci');
+    const pulls = await this.openPulls().catch((error: unknown) => {
+      this.host.log(`sift watch ${this.options.repo}: could not list open prs (${error instanceof Error ? error.message : String(error)}), routing runs alone`);
+      return undefined;
+    });
+    if (!pulls) return events;
+    const sha = (e: WatchEvent) => this.state.runs[e.id.replace(/^ci#/, '')]?.sha ?? '';
+    for (const e of runs) {
+      const pr = pulls.find((p) => p.sha === sha(e));
+      if (!pr) {
+        out.push(e);
+        continue;
+      }
+      if (this.options.rules.ci === 'all') out.push(e);
+      const key = `${pr.number}@${pr.sha}`;
+      if (this.state.settled[key]) {
+        if (this.options.rules.ci !== 'all') this.host.onDecision?.(e, 'drop', `ci settled on pr #${pr.number} already delivered`);
+        continue;
+      }
+      const verdict = await this.settle(pr.sha).catch(() => undefined);
+      if (!verdict) {
+        if (this.options.rules.ci !== 'all') this.defer(e, `ci ${e.conclusion ?? 'unknown'} on pr #${pr.number}, awaiting the other checks`);
+        continue;
+      }
+      this.state.settled = trimSettled({ ...this.state.settled, [key]: verdict.conclusion });
+      const failed = verdict.failed.length > 0 ? `, failed: ${verdict.failed.join(', ')}` : '';
+      out.push({
+        id: `ci-settled#${key}`,
+        kind: 'ci',
+        number: pr.number,
+        title: `${pr.branch} @${pr.sha.slice(0, 7)}: ${pr.title} (${verdict.total} checks${failed})`,
+        user: e.user,
+        bot: false,
+        url: pr.url,
+        changes: [`ci settled ${verdict.conclusion}`],
+        at: e.at,
+        conclusion: verdict.conclusion,
+        branch: pr.branch,
+        settled: true,
+        isNew: true,
+      });
+    }
+    return out;
+  }
+
+  private async openPulls(): Promise<{ number: number; title: string; branch: string; sha: string; url: string }[]> {
+    const raw = await this.host.gh.json<{ number: number; title: string; head: { ref: string; sha: string }; html_url: string }[]>(
+      `repos/${this.options.repo}/pulls?state=open&per_page=100`,
+    );
+    return raw.map((p) => ({ number: p.number, title: p.title, branch: p.head.ref, sha: p.head.sha, url: p.html_url }));
+  }
+
+  private async settle(sha: string): Promise<ReturnType<typeof settleChecks>> {
+    const repo = this.options.repo;
+    const [checks, status] = await Promise.all([
+      this.host.gh.json<{ check_runs: CheckRun[] }>(`repos/${repo}/commits/${sha}/check-runs?per_page=100`),
+      this.host.gh.json<{ statuses: CommitStatus[] }>(`repos/${repo}/commits/${sha}/status`),
+    ]);
+    return settleChecks(checks.check_runs ?? [], status.statuses ?? []);
   }
 
   private defer(e: WatchEvent, reason: string, label?: string): void {

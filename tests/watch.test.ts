@@ -3,7 +3,7 @@ import { Gh } from '../src/github/gh.ts';
 import { DEFAULT_CONFIG } from '../src/github/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
-import { diffItems, diffRuns, hashOf, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
+import { diffItems, diffRuns, hashOf, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { Watcher, summarize } from '../src/watch/watcher.ts';
 
@@ -31,6 +31,15 @@ describe('item diffing', () => {
     expect(diffRuns({ '1': run }, { '1': run }, 0)).toHaveLength(0);
   });
 
+  it('settles a head only once every check and status has finished', () => {
+    const done = { name: 'build', status: 'completed', conclusion: 'success' };
+    expect(settleChecks([done, { name: 'test', status: 'in_progress', conclusion: null }], [])).toBeUndefined();
+    expect(settleChecks([done], [{ context: 'ext', state: 'pending' }])).toBeUndefined();
+    expect(settleChecks([done, { name: 'test', status: 'completed', conclusion: 'success' }], [{ context: 'ext', state: 'success' }])).toEqual({ conclusion: 'success', total: 3, failed: [] });
+    expect(settleChecks([done, { name: 'test', status: 'completed', conclusion: 'failure' }], [])).toEqual({ conclusion: 'failure', total: 2, failed: ['test'] });
+    expect(settleChecks([], [])).toEqual({ conclusion: 'success', total: 0, failed: [] });
+  });
+
   it('keeps no bodies in the store', () => {
     const i = toItem({ n: 1, t: 't', s: 'open', u: 'x[bot]', bl: 9, bp: 'long body', c: 0, l: '', up: '1', cr: '2026-02-01', url: 'u', pr: false, m: false });
     expect(i.bot).toBe(true);
@@ -46,6 +55,8 @@ describe('item diffing', () => {
 
 describe('rules', () => {
   it('settles ci without the judge', () => {
+    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', branch: 'feat/12', settled: true }), rules).action).toBe('deliver');
+    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', branch: 'feat/12', settled: true }), { ...rules, ci: 'none' }).action).toBe('drop');
     expect(routeByRules(event({ kind: 'ci', conclusion: 'failure', branch: 'main' }), rules).action).toBe('deliver');
     expect(routeByRules(event({ kind: 'ci', conclusion: 'failure', branch: 'feat/12' }), rules).action).toBe('deliver');
     expect(routeByRules(event({ kind: 'ci', conclusion: 'failure', branch: 'scratch' }), rules).action).toBe('defer');
@@ -148,5 +159,58 @@ describe('watcher', () => {
     expect(delivered[0]).toContain('deferred meanwhile: 1 housekeeping');
     expect(scheduled.length).toBeGreaterThan(0);
     expect(summarize([{ event: event({}), reason: 'a' }, { event: event({}), reason: 'a' }])).toBe('2 a');
+  });
+
+  it('delivers one settled verdict per pr head when the last check completes', async () => {
+    const run = (id: number, name: string, status: string, conclusion: string | null) => ({ id, name, head_branch: 'feat/3', event: 'push', status, conclusion, head_sha: 'abc1234def', html_url: `https://x/runs/${id}`, actor: { login: 'me' }, updated_at: '1' });
+    const pulls = page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha: 'abc1234def' }, html_url: 'https://x/pull/3' }]);
+    const gh = fakeGh([
+      // the login lookup for ignoreSelf
+      page({ login: 'me' }),
+      // tick 1: seed with both workflows running
+      page([issue(1)]),
+      page([slim(1)]),
+      page({ workflow_runs: [run(10, 'build', 'in_progress', null), run(11, 'test', 'in_progress', null)] }),
+      // tick 2: build finished, test still running
+      notModified,
+      page({ workflow_runs: [run(10, 'build', 'completed', 'success'), run(11, 'test', 'in_progress', null)] }, '"r2"'),
+      pulls,
+      page({ check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }, { name: 'test', status: 'in_progress', conclusion: null }] }),
+      page({ statuses: [] }),
+      // tick 3: test finished too
+      notModified,
+      page({ workflow_runs: [run(10, 'build', 'completed', 'success'), run(11, 'test', 'completed', 'success')] }, '"r3"'),
+      pulls,
+      page({ check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }, { name: 'test', status: 'completed', conclusion: 'success' }] }),
+      page({ statuses: [] }),
+    ]);
+    const delivered: string[] = [];
+    const decisions: string[] = [];
+    const watcher = new Watcher(
+      {
+        gh,
+        store: { get: async () => undefined, set: async () => {} },
+        judge: { name: 'fake', ask: async () => ({ ok: false, backend: 'fake', latencyMs: 0, error: 'off' }) },
+        pack: BUILTIN_PACKS['triage']!,
+        config: DEFAULT_CONFIG,
+        now: () => 1_000_000,
+        deliver: async (t) => void delivered.push(t),
+        log: () => {},
+        status: () => {},
+        schedule: () => ({ cancel: () => {} }),
+        onDecision: (e, action, label) => decisions.push(`${action} ${e.id} ${label}`),
+      },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'], branchPattern: '^feat/\\d+$' } },
+    );
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    expect(decisions).toContain('defer ci#10 ci success on pr #3, awaiting the other checks');
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks)');
+    expect(delivered[0]).toContain('https://x/pull/3 · ci settled on pr');
+    expect(watcher.snapshot().settled).toEqual({ '3@abc1234def': 'success' });
   });
 });

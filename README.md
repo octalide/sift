@@ -138,7 +138,7 @@ Subject kinds and the checks they support:
 
 ## Watch
 
-With `watch: true` the plugin polls the session's repository (or `watchRepo`) with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: CI failures on protected branches deliver, CI successes defer, bot activity drops, your own writes defer (`watchIgnoreSelf`, keyed on the `gh` login), new PRs deliver, label churn defers. Everything else goes through the `triage` pack, and an event whose `actionable` lands in the violated band is deferred.
+With `watch: true` the plugin polls the session's repository (or `watchRepo`) with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops, your own writes defer (`watchIgnoreSelf`, keyed on the `gh` login), new PRs deliver, label churn defers. Everything else goes through the `triage` pack, and an event whose `actionable` lands in the violated band is deferred.
 
 A delivery is one prompt:
 
@@ -148,6 +148,16 @@ issue #41 comments 2->3: watcher misses review comments
   by alice · https://github.com/octalide/sift/issues/41 · actionable 0.93, kind question, urgency now
 deferred meanwhile: 2 housekeeping, 1 ci success
 ```
+
+A settled PR is one line with the aggregate verdict, so a steward waiting to grade, mark ready and merge needs no `gh pr checks` loop of its own:
+
+```
+[sift watch octalide/sift]
+ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks)
+  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
+```
+
+The verdict counts every check run and commit status on the PR's head, so it waits for external checks too. Until the last one finishes the individual runs are held in the digest, named by PR, and a head that never settles ages out with them.
 
 Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache and deferred list live in the plugin store, so a restart picks up where it left off.
 
