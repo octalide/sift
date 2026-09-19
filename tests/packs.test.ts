@@ -4,7 +4,8 @@ import { bumpVersion, parseCommit, parseLog, requiredBump } from '../src/github/
 import { flattenToml, manifestChanges } from '../src/github/manifest.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
-import { lastReleaseTag, linkedIssues, ruleParagraphs, sectionsOf, topSection } from '../src/github/subjects.ts';
+import { lastReleaseTag, linkedIssues, releaseSubject, ruleParagraphs, sectionsOf, topSection } from '../src/github/subjects.ts';
+import { localSource, remoteSource } from '../src/github/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { validatePack } from '../src/packs/load.ts';
@@ -172,10 +173,60 @@ describe('github helpers', () => {
     expect(splitResponse('HTTP/2.0 304 Not Modified\r\nEtag: "a"\r\n\r\n').status).toBe(304);
   });
 
-  it('picks the highest semver tag, not the nearest ancestor', async () => {
-    const gh = { git: async (argv: string[]) => (argv[0] === 'tag' ? 'v0.3.4\nv0.10.0\nv0.9.1\nnightly\n' : '') } as unknown as Gh;
-    expect(await lastReleaseTag(gh, 'v')).toBe('v0.10.0');
-    expect(await lastReleaseTag({ git: async () => '' } as unknown as Gh, 'v')).toBeUndefined();
+  it('picks the highest semver tag, not the nearest ancestor', () => {
+    expect(lastReleaseTag(['v0.3.4', 'v0.10.0', 'v0.9.1', 'nightly'], 'v')).toBe('v0.10.0');
+    expect(lastReleaseTag([], 'v')).toBeUndefined();
+  });
+
+  it('reads a release from github when there is no checkout', async () => {
+    const calls: string[] = [];
+    const gh = {
+      pages: async (path: string) => {
+        calls.push(path);
+        return path.startsWith('repos/o/r/tags') ? ['v0.4.0', 'v0.3.0'] : [];
+      },
+      json: async (path: string) => {
+        calls.push(path);
+        return {
+          commits: [
+            { sha: 'a'.repeat(40), parents: [{ sha: 'x' }], commit: { message: 'fix(#1): one' } },
+            { sha: 'b'.repeat(40), parents: [{ sha: 'x' }, { sha: 'y' }], commit: { message: 'Merge pull request #2' } },
+            { sha: 'c'.repeat(40), parents: [{ sha: 'x' }], commit: { message: 'feat(#3): three' } },
+          ],
+        };
+      },
+      text: async (path: string) => {
+        calls.push(path);
+        if (path.includes('ref=v0.4.0')) return '[dep.std]\nref = "tag/v5.0.0"\n';
+        if (path.includes('CHANGELOG')) throw new Error('404');
+        return '[dep.std]\nref = "tag/v6.0.0"\n';
+      },
+    } as unknown as Gh;
+    const config = resolveConfig({ release: { scheme: 'semver', changelog: 'CHANGELOG.md', manifests: [{ path: 'mach.toml', keys: ['^dep\\.'], bump: 'minor' }] } });
+    const s = await releaseSubject(remoteSource(gh, 'o/r', 'dev'), config);
+    expect(s.ref).toBe('v0.4.0..dev');
+    expect((s.facts['commits'] as { subject: string }[]).map((c) => c.subject)).toEqual(['feat(#3): three', 'fix(#1): one']);
+    expect(s.facts['bump']).toBe('minor');
+    expect(s.facts['manifests']).toHaveLength(1);
+    expect(s.facts['changelogPath']).toBeUndefined();
+    expect(calls).toContain('repos/o/r/compare/v0.4.0...dev');
+    expect(calls).toContain('repos/o/r/contents/mach.toml?ref=dev');
+  });
+
+  it('reads a release from the checkout, taking the working tree for HEAD', async () => {
+    const gh = {
+      git: async (argv: string[]) => {
+        if (argv[0] === 'tag') return 'v1.0.0\n';
+        if (argv[0] === 'log') return `\u001e${'d'.repeat(40)}\nfeat(#4): four\n`;
+        if (argv[0] === 'show') return argv[1] === 'v1.0.0:CHANGELOG.md' ? '## 1.0.0\n- old' : '';
+        return '';
+      },
+    } as unknown as Gh;
+    const config = resolveConfig({ release: { scheme: 'semver', changelog: 'CHANGELOG.md' } });
+    const s = await releaseSubject(localSource(gh, 'HEAD', async () => '## Unreleased\n- four\n\n## 1.0.0\n- old', async () => true), config);
+    expect(s.ref).toBe('v1.0.0..HEAD');
+    expect(s.facts['unreleased']).toBe('## Unreleased\n- four');
+    expect(s.facts['bump']).toBe('minor');
   });
 
   it('reads markdown structure', () => {

@@ -2,6 +2,7 @@ import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
 import { LOG_FORMAT, maxBump, parseLog, parseSemver, requiredBump, type Bump, type ParsedCommit } from './commits.ts';
 import { manifestChanges, type ManifestChange } from './manifest.ts';
+import type { GitSource } from './source.ts';
 import type { RepoConfig } from './config.ts';
 import type { Gh } from './gh.ts';
 
@@ -9,8 +10,8 @@ const BODY_CAP = 20_000;
 const DIFF_CAP = 60_000;
 const COMMENT_CAP = 6_000;
 
-export type ReadLike = (path: string) => Promise<string>;
-export type ExistsLike = (path: string) => Promise<boolean>;
+import type { ReadLike, ExistsLike } from './source.ts';
+export type { ReadLike, ExistsLike } from './source.ts';
 
 type GhUser = { login: string; type?: string };
 type GhLabel = { name: string };
@@ -190,8 +191,7 @@ export async function commitSubject(gh: Gh, range: string, config: RepoConfig): 
 }
 
 // the highest semver tag with the prefix, not the nearest ancestor: release tags sit on main and are unreachable from dev
-export async function lastReleaseTag(gh: Gh, prefix: string): Promise<string | undefined> {
-  const tags = (await gh.git(['tag', '--list', `${prefix}*`]).catch(() => '')).split('\n').map((t) => t.trim()).filter(Boolean);
+export function lastReleaseTag(tags: string[], prefix: string): string | undefined {
   let best: { tag: string; v: [number, number, number] } | undefined;
   for (const tag of tags) {
     const v = parseSemver(tag, prefix);
@@ -205,22 +205,21 @@ function compareSemver(a: [number, number, number], b: [number, number, number])
   return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
-export async function releaseSubject(gh: Gh, config: RepoConfig, read: ReadLike, exists: ExistsLike): Promise<Subject> {
-  const lastTag = await lastReleaseTag(gh, config.release.tagPrefix);
-  const range = lastTag ? `${lastTag}..HEAD` : 'HEAD';
-  const commits = parseLog(await gh.git(['log', LOG_FORMAT, '--no-merges', range]));
+export async function releaseSubject(source: GitSource, config: RepoConfig): Promise<Subject> {
+  const lastTag = lastReleaseTag(await source.tags(), config.release.tagPrefix);
+  const range = lastTag ? `${lastTag}..${source.head}` : source.head;
+  const commits = await source.log(lastTag);
   const version = lastTag ? parseSemver(lastTag, config.release.tagPrefix) : undefined;
   const commitBump = requiredBump(commits, version, config.release.zeroVerBreaking);
   const manifests: ManifestChange[] = [];
   for (const rule of config.release.manifests) {
-    const at = async (ref: string) => gh.git(['show', `${ref}:${rule.path}`]).catch(() => undefined);
-    manifests.push(...manifestChanges(rule, lastTag ? await at(lastTag) : undefined, await at('HEAD')));
+    manifests.push(...manifestChanges(rule, lastTag ? await source.show(lastTag, rule.path) : undefined, await source.show(source.head, rule.path)));
   }
   const manifestBump = manifests.reduce<Bump>((acc, m) => maxBump(acc, m.bump), 'none');
   const bump = maxBump(commitBump, manifestBump);
-  const changelogPath = config.release.changelog && (await exists(config.release.changelog)) ? config.release.changelog : undefined;
-  const changelog = changelogPath ? await read(changelogPath) : '';
-  const unreleased = topSection(changelog);
+  const changelog = config.release.changelog ? await source.show(source.head, config.release.changelog) : undefined;
+  const changelogPath = changelog !== undefined ? config.release.changelog : undefined;
+  const unreleased = topSection(changelog ?? '');
   return {
     kind: 'release',
     ref: range,
