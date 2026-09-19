@@ -17,7 +17,7 @@ describe('jev response parsing', () => {
       answers: {
         yes: { type: 'noul', noul: 0.9 },
         pick: { type: 'choice', choice: 'b', probabilities: { a: 0.2, b: 0.8 }, confidence: 0.8 },
-        level: { type: 'score', score: 1, legend: 'high', probabilities: [0.1, 0.9], confidence: 0.9 },
+        level: { type: 'score', score: 0.9, legend: { '0': 'low', '1': 'high' }, probabilities: { '0': 0.1, '1': 0.9 }, confidence: 0.9 },
       },
     });
     const answers = parseResponse(body, questions);
@@ -25,7 +25,15 @@ describe('jev response parsing', () => {
     if (typeof answers === 'string') throw new Error(answers);
     expect(answers['yes']).toEqual({ type: 'noul', p: 0.9 });
     expect(answers['pick']).toMatchObject({ type: 'choice', choice: 'b', confidence: 0.8 });
-    expect(answers['level']).toMatchObject({ type: 'score', score: 1, legend: 'high' });
+    expect(answers['level']).toEqual({ type: 'score', score: 1, expected: 0.9, legend: 'high', probabilities: [0.1, 0.9], confidence: 0.9 });
+  });
+
+  it('reads a score answer from an array and derives what is missing', () => {
+    const body = JSON.stringify({ answers: { level: { score: 1, probabilities: [0.3, 0.7] } } });
+    const answers = parseResponse(body, { level: questions['level']! });
+    if (typeof answers === 'string') throw new Error(answers);
+    expect(answers['level']).toEqual({ type: 'score', score: 1, expected: 1, legend: 'high', probabilities: [0.3, 0.7], confidence: 0.7 });
+    expect(parseResponse(JSON.stringify({ answers: { level: { score: 1, probabilities: { '2': 1 } } } }), { level: questions['level']! })).toMatch(/level/);
   });
 
   it('reports a missing or misfit answer', () => {

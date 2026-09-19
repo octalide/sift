@@ -32,6 +32,20 @@ function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+// jev keys level probabilities by index string, the model backend gives an array; both become an array by level
+function levelProbabilities(raw: unknown, levels: number): number[] | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const entries = Array.isArray(raw) ? raw.map((v, i) => [String(i), v] as const) : Object.entries(raw as Record<string, unknown>);
+  const probs = new Array<number>(levels).fill(0);
+  for (const [k, v] of entries) {
+    const i = Number(k);
+    const p = num(v);
+    if (!Number.isInteger(i) || i < 0 || i >= levels || p === undefined) return undefined;
+    probs[i] = p;
+  }
+  return probs;
+}
+
 // normalizes one raw answer into the plugin's Answer, or undefined when it does not fit its question
 export function parseAnswer(raw: unknown, question: Questions[string]): Answer | undefined {
   if (raw === null || typeof raw !== 'object') return undefined;
@@ -54,13 +68,13 @@ export function parseAnswer(raw: unknown, question: Questions[string]): Answer |
       return { type: 'choice', choice, probabilities: probs, confidence };
     }
     case 'score': {
-      const score = num(r['score']);
-      const probabilities = Array.isArray(r['probabilities']) ? r['probabilities'].map(num) : [];
-      if (score === undefined || probabilities.some((p) => p === undefined)) return undefined;
-      const probs = probabilities as number[];
-      const legend = typeof r['legend'] === 'string' ? r['legend'] : question.criteria[score] ?? String(score);
+      const probs = levelProbabilities(r['probabilities'], question.criteria.length);
+      if (!probs) return undefined;
+      const score = probs.indexOf(Math.max(...probs));
+      const expected = num(r['score']) ?? probs.reduce((sum, p, i) => sum + p * i, 0);
+      const legend = question.criteria[score] ?? String(score);
       const confidence = num(r['confidence']) ?? probs[score] ?? 0;
-      return { type: 'score', score, legend, probabilities: probs, confidence };
+      return { type: 'score', score, expected, legend, probabilities: probs, confidence };
     }
   }
 }
