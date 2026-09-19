@@ -51,6 +51,21 @@ export class Gh {
     return JSON.parse(response.body || 'null') as T;
   }
 
+  // pages through a list endpoint one request at a time, each slimmed by jq so no page nears the output limit
+  async pages<T>(path: string, jq: string, perPage = 100, maxPages = 200): Promise<T[]> {
+    const out: T[] = [];
+    const sep = path.includes('?') ? '&' : '?';
+    for (let page = 1; page <= maxPages; page++) {
+      const argv = ['gh', 'api', '--jq', jq, `${path}${sep}per_page=${perPage}&page=${page}`];
+      const result = await this.run(argv, { cwd: this.cwd, timeoutMs: 60_000 });
+      if (result.exitCode !== 0) throw new GhError(`gh api ${path} page ${page}: ${result.stderr.trim()}`, result.exitCode);
+      const items = JSON.parse(result.stdout.trim() || '[]') as T[];
+      out.push(...items);
+      if (items.length < perPage) break;
+    }
+    return out;
+  }
+
   async text(path: string, accept: string): Promise<string> {
     return (await this.api(path, { accept })).body;
   }

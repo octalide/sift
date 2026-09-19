@@ -4,7 +4,9 @@ export type Item = {
   state: string;
   user: string;
   bot: boolean;
-  bodyHash: string;
+  // length plus a prefix hash: an edit that changes neither still moves updated_at and surfaces as activity
+  bodySig: string;
+  created: string;
   comments: number;
   labels: string;
   updated: string;
@@ -41,8 +43,13 @@ export type WatchEvent = {
   isNew: boolean;
 };
 
+// bump when the stored shape changes; a store from an older version is reseeded
+export const STATE_VERSION = 2;
+
 export type WatchState = {
+  version: number;
   seeded: boolean;
+  seededAt?: string;
   cursor: string;
   items: Record<string, Item>;
   runs: Record<string, Run>;
@@ -64,6 +71,7 @@ export type Deferred = {
 
 export function initialState(): WatchState {
   return {
+    version: STATE_VERSION,
     seeded: false,
     cursor: '2008-01-01T00:00:00Z',
     items: {},
@@ -86,52 +94,59 @@ export function hashOf(text: string): string {
   return (h >>> 0).toString(16);
 }
 
-type RawIssue = {
-  number: number;
-  title: string;
-  state: string;
-  user: { login: string; type?: string };
-  body: string | null;
-  comments: number;
-  labels: { name: string }[];
-  updated_at: string;
-  html_url: string;
-  pull_request?: { merged_at?: string | null };
+// the slim record ITEM_JQ produces server side, so a page of 100 stays small
+export const ITEM_JQ = '[.[] | {n: .number, t: .title, s: .state, u: .user.login, ut: .user.type, bl: ((.body // "") | length), bp: ((.body // "")[0:400]), c: .comments, l: ([.labels[].name] | sort | join(",")), up: .updated_at, cr: .created_at, url: .html_url, pr: (.pull_request != null), m: (.pull_request.merged_at != null)}]';
+
+export type RawItem = {
+  n: number;
+  t: string;
+  s: string;
+  u: string;
+  ut?: string;
+  bl: number;
+  bp: string;
+  c: number;
+  l: string;
+  up: string;
+  cr: string;
+  url: string;
+  pr: boolean;
+  m: boolean;
 };
 
-export function toItem(raw: RawIssue): Item {
+export function toItem(raw: RawItem): Item {
   return {
-    kind: raw.pull_request ? 'pr' : 'issue',
-    title: raw.title,
-    state: raw.state,
-    user: raw.user.login,
-    bot: raw.user.type === 'Bot' || raw.user.login.endsWith('[bot]'),
-    bodyHash: hashOf(raw.body ?? ''),
-    comments: raw.comments,
-    labels: raw.labels
-      .map((l) => l.name)
-      .sort()
-      .join(','),
-    updated: raw.updated_at,
-    merged: !!raw.pull_request?.merged_at,
-    url: raw.html_url,
+    kind: raw.pr ? 'pr' : 'issue',
+    title: raw.t,
+    state: raw.s,
+    user: raw.u,
+    bot: raw.ut === 'Bot' || raw.u.endsWith('[bot]'),
+    bodySig: `${raw.bl}:${hashOf(raw.bp)}`,
+    created: raw.cr,
+    comments: raw.c,
+    labels: raw.l,
+    updated: raw.up,
+    merged: raw.m,
+    url: raw.url,
   };
 }
 
-export function diffItems(old: Record<string, Item>, fresh: Record<string, Item>, now: number): WatchEvent[] {
+// seededAt bounds the seed window: an unseen item created before it is old activity, not a new item
+export function diffItems(old: Record<string, Item>, fresh: Record<string, Item>, now: number, seededAt?: string): WatchEvent[] {
   const events: WatchEvent[] = [];
   for (const [n, v] of Object.entries(fresh)) {
     const o = old[n];
     const base = { number: Number(n), title: v.title, user: v.user, bot: v.bot, url: v.url, at: now, kind: v.kind };
     if (!o) {
-      events.push({ ...base, id: `${v.kind}#${n}@${v.updated}`, changes: [`new [${v.state}]`], isNew: true });
+      const isNew = !seededAt || v.created >= seededAt;
+      events.push({ ...base, id: `${v.kind}#${n}@${v.updated}`, changes: [isNew ? `new [${v.state}]` : `activity (first seen, ${v.comments} comments) [${v.state}]`], isNew });
       continue;
     }
     const changes: string[] = [];
     if (o.state !== v.state) changes.push(`state ${o.state}->${v.state}`);
     if (v.merged && !o.merged) changes.push('merged');
     if (o.title !== v.title) changes.push('title edited');
-    if (o.bodyHash !== v.bodyHash) changes.push('body edited');
+    if (o.bodySig !== v.bodySig) changes.push('body edited');
     if (o.comments !== v.comments) changes.push(`comments ${o.comments}->${v.comments}`);
     if (o.labels !== v.labels) changes.push(`labels [${v.labels}]`);
     if (changes.length === 0 && o.updated !== v.updated) changes.push('activity (review or other)');

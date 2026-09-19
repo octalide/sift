@@ -3,7 +3,7 @@ import { Gh, GhError } from '../github/gh.ts';
 import type { Judge } from '../judge/types.ts';
 import type { Pack } from '../packs/types.ts';
 import type { StoreLike } from '../log.ts';
-import { diffItems, diffRuns, formatEvent, initialState, toItem, toRuns, trimRuns, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
+import { diffItems, diffRuns, formatEvent, initialState, ITEM_JQ, STATE_VERSION, toItem, toRuns, trimRuns, type Deferred, type RawItem, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
 
 export type WatchOptions = {
@@ -11,6 +11,8 @@ export type WatchOptions = {
   minIntervalMs: number;
   maxIntervalMs: number;
   deferMaxAgeMs: number;
+  // how far back the first poll looks; older items are still tracked from their next change
+  seedWindowMs: number;
   rateFloor: number;
   shadow: boolean;
   rules: Omit<WatchRules, 'login'>;
@@ -49,7 +51,9 @@ export class Watcher {
 
   async start(): Promise<void> {
     this.stopped = false;
-    this.state = ((await this.host.store.get(this.key)) as WatchState | undefined) ?? initialState();
+    const stored = (await this.host.store.get(this.key)) as WatchState | undefined;
+    if (stored && stored.version !== STATE_VERSION) this.host.log(`sift watch ${this.options.repo}: stored state is from an older version, reseeding`);
+    this.state = stored && stored.version === STATE_VERSION ? stored : initialState();
     if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.gh.login();
     if (this.state.paused) {
       this.host.status(`watch paused (${this.options.repo})`);
@@ -148,14 +152,16 @@ export class Watcher {
     });
     const rateWait = this.rateWait(probe.remaining, probe.reset, now);
     if (probe.status === 304) return { changed: false, events: [], rateWait };
+    const stamp = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    if (!this.state.seeded) {
+      this.state.seededAt = stamp(now);
+      this.state.cursor = stamp(now - this.options.seedWindowMs);
+    }
     const since = this.state.cursor;
-    const cursor = new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z');
-    const raw = await this.host.gh.json<Parameters<typeof toItem>[0][]>(
-      `repos/${this.options.repo}/issues?state=all&sort=updated&direction=asc&since=${since}&per_page=100`,
-      { paginate: true },
-    );
-    const fresh = Object.fromEntries(raw.map((r) => [String(r.number), toItem(r)]));
-    const events = this.state.seeded ? diffItems(this.state.items, fresh, now) : [];
+    const cursor = stamp(now);
+    const raw = await this.host.gh.pages<RawItem>(`repos/${this.options.repo}/issues?state=all&sort=updated&direction=asc&since=${since}`, ITEM_JQ);
+    const fresh = Object.fromEntries(raw.map((r) => [String(r.n), toItem(r)]));
+    const events = this.state.seeded ? diffItems(this.state.items, fresh, now, this.state.seededAt) : [];
     this.state.items = { ...this.state.items, ...fresh };
     this.state.cursor = cursor;
     this.state.etags.issues = probe.etag;

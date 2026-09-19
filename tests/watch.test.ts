@@ -14,7 +14,7 @@ function event(over: Partial<WatchEvent>): WatchEvent {
 }
 
 describe('item diffing', () => {
-  const item = (over: Partial<Item> = {}): Item => ({ kind: 'issue', title: 'T', state: 'open', user: 'alice', bot: false, bodyHash: hashOf('b'), comments: 1, labels: 'bug', updated: '1', merged: false, url: 'u', ...over });
+  const item = (over: Partial<Item> = {}): Item => ({ kind: 'issue', title: 'T', state: 'open', user: 'alice', bot: false, bodySig: `1:${hashOf('b')}`, created: '2026-01-01', comments: 1, labels: 'bug', updated: '1', merged: false, url: 'u', ...over });
 
   it('names each change and reports silent activity', () => {
     const old = { '1': item(), '2': item() };
@@ -32,9 +32,15 @@ describe('item diffing', () => {
   });
 
   it('keeps no bodies in the store', () => {
-    const i = toItem({ number: 1, title: 't', state: 'open', user: { login: 'x[bot]' }, body: 'long body', comments: 0, labels: [], updated_at: '1', html_url: 'u' });
+    const i = toItem({ n: 1, t: 't', s: 'open', u: 'x[bot]', bl: 9, bp: 'long body', c: 0, l: '', up: '1', cr: '2026-02-01', url: 'u', pr: false, m: false });
     expect(i.bot).toBe(true);
     expect(JSON.stringify(i)).not.toContain('long body');
+  });
+
+  it('reports an unseen item created before the seed as activity, not new', () => {
+    const events = diffItems({}, { '9': item({ created: '2025-01-01' }), '10': item({ created: '2026-03-01' }) }, 0, '2026-02-01');
+    expect(events.map((e) => e.isNew)).toEqual([false, true]);
+    expect(events[0]!.changes[0]).toMatch(/first seen/);
   });
 });
 
@@ -67,7 +73,10 @@ function fakeGh(responses: (() => string)[]): Gh {
   return new Gh(async (argv) => {
     if (argv[0] === 'gh' && argv[1] === 'api') {
       const next = responses[i++] ?? (() => 'HTTP/2.0 304 Not Modified\r\n\r\n');
-      return { exitCode: 0, stdout: next(), stderr: '' };
+      const out = next();
+      // a --jq page request gets the body alone, already in the slim shape
+      if (argv[2] === '--jq') return { exitCode: 0, stdout: out.slice(out.indexOf('\r\n\r\n') + 4), stderr: '' };
+      return { exitCode: 0, stdout: out, stderr: '' };
     }
     return { exitCode: 0, stdout: '{}', stderr: '' };
   });
@@ -76,17 +85,18 @@ function fakeGh(responses: (() => string)[]): Gh {
 const page = (body: unknown, etag = '"e"') => () => `HTTP/2.0 200 OK\r\nEtag: ${etag}\r\nX-Ratelimit-Remaining: 4000\r\n\r\n${JSON.stringify(body)}`;
 const notModified = () => 'HTTP/2.0 304 Not Modified\r\n\r\n';
 const issue = (n: number, over: Record<string, unknown> = {}) => ({ number: n, title: `Issue ${n}`, state: 'open', user: { login: 'alice' }, body: 'b', comments: 0, labels: [], updated_at: `2026-01-0${n}T00:00:00Z`, html_url: `https://x/${n}`, ...over });
+const slim = (n: number, over: Record<string, unknown> = {}) => ({ n, t: `Issue ${n}`, s: 'open', u: 'alice', bl: 1, bp: 'b', c: 0, l: '', up: `2026-01-0${n}T00:00:00Z`, cr: `2026-01-0${n}T00:00:00Z`, url: `https://x/${n}`, pr: false, m: false, ...over });
 
 describe('watcher', () => {
   it('seeds silently, then delivers judged events and defers the rest with a digest', async () => {
     const gh = fakeGh([
       // tick 1: seed
       page([issue(1)]),
-      page([issue(1), issue(2)]),
+      page([slim(1), slim(2)]),
       page({ workflow_runs: [] }),
       // tick 2: issue 2 got a comment (judged), issue 1 got a label (deferred)
       page([issue(2)], '"f"'),
-      page([issue(1, { labels: [{ name: 'p1' }] }), issue(2, { comments: 1, updated_at: '2026-01-03T00:00:00Z' })]),
+      page([slim(1, { l: 'p1' }), slim(2, { c: 1, up: '2026-01-03T00:00:00Z' })]),
       notModified,
       // detail fetches for the judged event
       page(issue(2, { comments: 1 })),
@@ -125,7 +135,7 @@ describe('watcher', () => {
           return { cancel: () => {} };
         },
       },
-      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, rateFloor: 10, shadow: false, rules: { ignoreSelf: false, ignoreBots: true, ci: 'failures', triage: true, protectedBranches: ['main'] } },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: false, ignoreBots: true, ci: 'failures', triage: true, protectedBranches: ['main'] } },
     );
     await watcher.start();
     await watcher.tick();

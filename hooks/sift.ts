@@ -315,6 +315,7 @@ export const register: Register = (on, rawOptions) => {
             minIntervalMs: options.watchMinInterval * 1000,
             maxIntervalMs: options.watchMaxInterval * 1000,
             deferMaxAgeMs: options.watchDeferMaxAgeHours * 3600 * 1000,
+            seedWindowMs: 90 * 24 * 3600 * 1000,
             rateFloor: 500,
             shadow: options.shadow,
             rules: {
