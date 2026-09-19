@@ -113,7 +113,7 @@ describe('watcher', () => {
         answers: {
           actionable: { type: 'noul', p: 0.9 },
           kind: { type: 'choice', choice: 'question', probabilities: {}, confidence: 0.8 },
-          urgency: { type: 'score', score: 1, legend: 'soon: x', probabilities: [0, 1, 0], confidence: 0.7 },
+          urgency: { type: 'score', score: 1, expected: 1, legend: 'soon: x', probabilities: [0, 1, 0], confidence: 0.7 },
           ...Object.fromEntries(Object.keys(q).filter((k) => !['actionable', 'kind', 'urgency'].includes(k)).map((k) => [k, { type: 'noul' as const, p: 0.5 }])),
         },
       }),
