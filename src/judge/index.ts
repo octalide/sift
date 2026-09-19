@@ -58,6 +58,8 @@ export type Decision = {
   answers?: Record<string, string>;
   action: string;
   shadow: boolean;
+  // the session that made the decision; the ring is shared by every session running the plugin
+  session?: string;
 };
 
 // a judge that records every call for the /sift report and calibration

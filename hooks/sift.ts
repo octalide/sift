@@ -242,7 +242,8 @@ export const register: Register = (on, rawOptions) => {
     readFile = (p) => $.fs.read(p);
     existsFile = (p) => $.fs.exists(p);
     const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) };
-    const log = new DecisionLog(store);
+    const sessionId = await $.session.id();
+    const log = new DecisionLog(store, sessionId);
     const apiKey = await apiKeyOf($, options);
     const inner = makeJudge(
       { backend: options.backend, apiKey, jevModel: options.jevModel, jevBaseUrl: options.jevBaseUrl, fallbackModel: options.fallbackModel },
@@ -261,7 +262,6 @@ export const register: Register = (on, rawOptions) => {
     const config = resolveConfig([await optionConfig($, options.config, root), repoConfig], repoInfo?.defaultBranch);
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
     const home = (await $.env.get('HOME')) ?? '/tmp';
-    const sessionId = await $.session.id();
     const startWatch = async (): Promise<string | undefined> => {
       const rt = ready();
       if (rt.watcher) return undefined;
@@ -479,6 +479,13 @@ export const register: Register = (on, rawOptions) => {
     }
   });
 
+  // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count
+  on('prompt.submit', async (_$, e, next) => {
+    const warnings = runtime?.log.takeWarnings() ?? [];
+    if (warnings.length === 0) return next(e);
+    return next({ ...e, context: [...(e.context ?? []), ...warnings] });
+  });
+
   on('turn.complete', async ($, e, next) => {
     if (options.compactAtPercent <= 0 || compacting) return next(e);
     try {
@@ -529,13 +536,15 @@ export const register: Register = (on, rawOptions) => {
       .map(([m, s]) => `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms`)
       .join('\n');
     const enabled = (Object.keys(options) as (keyof Options)[]).filter((k) => typeof options[k] === 'boolean' && options[k]).join(', ');
+    const last = stats.session.lastFailure;
     const w = rt.watcher?.snapshot();
     const watch = !rt.watcher ? 'watch: off' : `watch: ${w!.paused ? 'paused' : 'running'} on ${options.watchRepo || rt.repo}, ${w!.deferred.length} deferred, last poll ${w!.lastPoll ? new Date(w!.lastPoll).toISOString() : 'never'}`;
     return [
       `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${rt.repo ?? 'none'}`,
       `enabled: ${enabled}`,
       watch,
-      `judge calls ${stats.calls}, failures ${stats.failures}`,
+      `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,
+      `all sessions (ring of 500): ${stats.calls} decisions, ${stats.failures} failures`,
       modules || '  no decisions yet',
     ].join('\n');
   }
