@@ -106,7 +106,7 @@ export class JevJudge implements Judge {
       return { ok: false, reason: 'rejected', message: response.text.slice(0, 300), backend: this.name };
     }
     if (!response.ok) {
-      return { ok: false, reason: 'unavailable', message: `http ${response.status}`, backend: this.name };
+      return { ok: false, reason: 'unavailable', message: `http ${response.status}: ${response.text.slice(0, 300)}`, backend: this.name, status: response.status };
     }
     const answers = parseResponse(response.text, questions);
     if (typeof answers === 'string') {

@@ -447,7 +447,7 @@ export const register: Register = (on, rawOptions) => {
         return next(e);
       }
       const ratio = reduction(result);
-      const summary = `${Math.round(ratio * 100)}% smaller, ${result.decisions.filter((d) => d.action === 'drop').length} calls dropped, ${result.decisions.filter((d) => d.action === 'truncate').length} results truncated, ${result.requests} request(s)`;
+      const summary = `${Math.round(ratio * 100)}% smaller, ${result.decisions.filter((d) => d.action === 'drop').length} calls dropped, ${result.decisions.filter((d) => d.action === 'truncate').length} results truncated, ${result.requests} request(s), state ~${result.stateTokens} tokens (${result.stage})`;
       if (ratio < options.compactMinReduction) {
         record('compact', 'fallback', { digest: `below minimum: ${summary}` });
         $.ui.log(`sift compact: built-in summary (${summary}, under ${Math.round(options.compactMinReduction * 100)}% minimum)`);

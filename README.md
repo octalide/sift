@@ -170,6 +170,6 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
 ## Caveats
 
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
-- The prune and compact modules estimate tokens by character count.
+- The prune and compact modules estimate tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT). Compact fits the whole history into Jev's 32k state limit by shrinking old messages in stages, every call staying visible; a session past roughly 1200 tool calls falls back to the built-in summary. A size rejection from Jev triggers one retry at half the budget.
 - The gate never sends a command that mentions a credential to the judge, and it is off by default. It is a second opinion, not a sandbox.
 - `route` is experimental and off by default.
