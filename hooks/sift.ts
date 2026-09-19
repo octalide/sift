@@ -2,6 +2,7 @@ import type { EngineInterface, PluginOptions, Register, SessionMessage } from 'c
 
 import { compact, COMPACT_DEFAULTS, reduction, type Message } from '../src/compact/compact.ts';
 import { gate as runGate, mentionsSecret } from '../src/gate/gate.ts';
+import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
 import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/config.ts';
 import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
@@ -50,6 +51,7 @@ type Options = {
   gate: boolean;
   message: boolean;
   gateFailClosed: boolean;
+  gateOutbound: boolean;
   classify: boolean;
   route: boolean;
   routeMinEffort: Effort;
@@ -89,6 +91,7 @@ const DEFAULTS: Options = {
   gate: false,
   message: false,
   gateFailClosed: true,
+  gateOutbound: false,
   classify: false,
   route: false,
   routeMinEffort: 'low',
@@ -416,6 +419,20 @@ export const register: Register = (on, rawOptions) => {
         if (!decision.allow) {
           if (options.shadow) $.ui.log(`sift gate (shadow): would deny ${e.tool}: ${decision.reason}`);
           else return { deny: `sift gate: ${decision.reason}. Ask the user before retrying.` };
+        }
+      }
+    }
+    const outbound = options.gateOutbound ? outboundOf(e.tool, e as unknown as Record<string, unknown>) : undefined;
+    if (outbound) {
+      const rulesPack = rt.packs['rules'];
+      const subject = rulesPack ? await rulesSubject(rt.gh, rt.repo, { kind: 'text', ref: outbound.text }, rt.config, readFile, existsFile) : undefined;
+      if (rulesPack && subject) {
+        const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, rt.config);
+        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
+        for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
+        if (!decision.allow) {
+          if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
+          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
         }
       }
     }
