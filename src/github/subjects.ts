@@ -168,7 +168,7 @@ export async function prSubject(gh: Gh, repo: string, n: number, config: RepoCon
 }
 
 export async function commitSubject(gh: Gh, range: string, config: RepoConfig): Promise<Subject> {
-  const raw = await gh.git(range.includes('..') ? ['log', LOG_FORMAT, range] : ['log', LOG_FORMAT, '-1', range]);
+  const raw = await gh.git(range.includes('..') ? ['log', LOG_FORMAT, '--no-merges', range] : ['log', LOG_FORMAT, '-1', range]);
   const commits = parseLog(raw);
   const single = commits.length === 1 ? commits[0]! : undefined;
   const diff = single ? truncate(await gh.git(['show', '--format=', '--stat', '-p', single.sha]).catch(() => ''), DIFF_CAP, '\n[diff truncated]') : undefined;
@@ -188,15 +188,26 @@ export async function commitSubject(gh: Gh, range: string, config: RepoConfig): 
   };
 }
 
-export async function releaseSubject(gh: Gh, config: RepoConfig, read: ReadLike, exists: ExistsLike): Promise<Subject> {
-  let lastTag: string | undefined;
-  try {
-    lastTag = (await gh.git(['describe', '--tags', '--abbrev=0'])).trim() || undefined;
-  } catch {
-    lastTag = undefined;
+// the highest semver tag with the prefix, not the nearest ancestor: release tags sit on main and are unreachable from dev
+export async function lastReleaseTag(gh: Gh, prefix: string): Promise<string | undefined> {
+  const tags = (await gh.git(['tag', '--list', `${prefix}*`]).catch(() => '')).split('\n').map((t) => t.trim()).filter(Boolean);
+  let best: { tag: string; v: [number, number, number] } | undefined;
+  for (const tag of tags) {
+    const v = parseSemver(tag, prefix);
+    if (!v) continue;
+    if (!best || compareSemver(v, best.v) > 0) best = { tag, v };
   }
+  return best?.tag;
+}
+
+function compareSemver(a: [number, number, number], b: [number, number, number]): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+}
+
+export async function releaseSubject(gh: Gh, config: RepoConfig, read: ReadLike, exists: ExistsLike): Promise<Subject> {
+  const lastTag = await lastReleaseTag(gh, config.release.tagPrefix);
   const range = lastTag ? `${lastTag}..HEAD` : 'HEAD';
-  const commits = parseLog(await gh.git(['log', LOG_FORMAT, range]));
+  const commits = parseLog(await gh.git(['log', LOG_FORMAT, '--no-merges', range]));
   const bump = requiredBump(commits);
   const version = lastTag ? parseSemver(lastTag, config.release.tagPrefix) : undefined;
   const changelogPath = config.release.changelog ?? (await firstExisting(exists, ['CHANGELOG.md', 'CHANGES.md', 'HISTORY.md']));
