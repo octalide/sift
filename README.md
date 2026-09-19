@@ -17,6 +17,7 @@ Everything sift does is built on that one call. Every module is a toggle, every 
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed, archives the full output under `~/.cache/sift/<session>/` and leaves a recovery note in the stub | on |
 | `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `mcp__sift__judge` answers raw typed questions | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
+| `message` | `session.receive` | judges every message from another session before it is queued: nothing actionable is held into a digest line that rides with the next delivery or prompt, the rest arrives with its scores on the first line | off |
 | `gate` | `tool.call` (pre) | judges Bash, Write and Edit calls against safety propositions and denies on a violated band | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
 | `route` | `turn.step` | lowers request effort for prompts the judge scores as routine | off |
@@ -110,6 +111,12 @@ A release grade reads the checkout when the session is inside the repo being gra
 
 `release.zeroVerBreaking` is what a breaking change requires while the version is below 1.0.0 (`minor` by default, `major` to cut 1.0.0 on the first one). `release.manifests` lists files whose changes are release-worthy on their own, commit types aside: each entry names a TOML file, regexes over its dotted keys (`project.mach`, `dep.std.ref`) and the bump a change to one of them requires. The manifest at the last tag is compared with the one at `HEAD`, so a version line that the release itself moves is not matched unless a key pattern names it. The required bump is the higher of the commit bump and the manifest bump, and `release.bump` says which keys moved.
 
+## Messages
+
+With `message: true` every peer delivery (another session's `SendMessage`) goes through the `message` pack before it is queued. The pack asks `actionable`, `kind` (question, task, result, blocked, status, noise) and `urgency`, and when the text references a pull request or issue (`https://github.com/o/r/pull/18`, `o/r#18`, or `#18` against the session's repo) sift fetches the item (body, checks, diff excerpt) and asks two more: `measured`, whether the claims are backed by something run or observed, and `evidenced`, whether the item itself carries that evidence. A message in the violated `actionable` band is consumed and held; the next delivered message or prompt carries `held meanwhile (n): <from>: <first line> [scores]`. Everything else arrives as sent with `[sift message from <name>] actionable 0.91, kind result, urgency soon, measured 0.40, evidenced 0.20` above it. The judge being unavailable delivers untouched, and `shadow` delivers with `(shadow: would hold)`.
+
+The same pack is available by hand: `grade(pack: "message", subject: "x", text: "<message>")`.
+
 ## Packs
 
 A pack is data: a subject kind, a list of mechanical checks, and typed questions with thresholds. The built-in packs are in `src/packs/builtin.ts`. A repo overrides or adds one with `.sift/packs/<name>.json` in the same shape:
@@ -145,7 +152,7 @@ Subject kinds and the checks they support:
 | `commit` | `commit.format` |
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
-| `event`, `text`, `command` | none |
+| `event`, `text`, `command`, `message` | none |
 
 ## Watch
 
