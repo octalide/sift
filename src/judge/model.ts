@@ -12,7 +12,8 @@ const SYSTEM = `You are a calibrated classifier. You never write prose. You answ
 For a "noul" question answer {"noul": p} where p in [0,1] is the probability the statement holds.
 For a "choice" question answer {"choice": key, "confidence": p} with one key from its criteria.
 For a "score" question answer {"score": i, "confidence": p} where i is the 0-based index into its criteria.
-Be honest about uncertainty: use probabilities near 0.5 when the state does not settle the question.`;
+Be honest about uncertainty: use probabilities near 0.5 when the state does not settle the question.
+Output the JSON object alone: no reasoning, no markdown fence, no text before or after it, every question id present.`;
 
 export function buildPrompt(state: unknown, questions: Questions): string {
   return [
@@ -39,8 +40,14 @@ export function extractJson(text: string): unknown {
 
 // fills the fields a chat model is not asked for so parseAnswer accepts the reply
 function widen(raw: unknown, question: Questions[string]): unknown {
+  // a bare value is read as the answer itself
+  if (typeof raw === 'number' && question.type === 'noul') return { noul: raw };
+  if (typeof raw === 'number' && question.type === 'score') return widen({ score: raw }, question);
+  if (typeof raw === 'string' && question.type === 'choice') return widen({ choice: raw }, question);
   if (raw === null || typeof raw !== 'object') return raw;
   const r = { ...(raw as Record<string, unknown>) };
+  if (question.type === 'noul' && r['noul'] === undefined && typeof r['p'] === 'number') r['noul'] = r['p'];
+  if (question.type === 'noul' && r['noul'] === undefined && typeof r['probability'] === 'number') r['noul'] = r['probability'];
   if (question.type === 'choice' && typeof r['choice'] === 'string' && r['probabilities'] === undefined) {
     const confidence = typeof r['confidence'] === 'number' ? r['confidence'] : 1;
     const others = Object.keys(question.criteria).filter((k) => k !== r['choice']);
@@ -76,7 +83,7 @@ export class ModelJudge implements Judge {
         model: this.model,
         system: SYSTEM,
         prompt: buildPrompt(state, questions),
-        maxTokens: 64 + Object.keys(questions).length * 40,
+        maxTokens: 256 + Object.keys(questions).length * 64,
       });
     } catch (error) {
       return { ok: false, reason: 'unavailable', message: messageOf(error), backend: this.name };
@@ -89,7 +96,8 @@ export class ModelJudge implements Judge {
     for (const [id, question] of Object.entries(questions)) {
       const answer = parseAnswer(widen((parsed as Record<string, unknown>)[id], question), question);
       if (!answer) {
-        return { ok: false, reason: 'malformed', message: `no usable answer for ${id}`, backend: this.name };
+        const got = JSON.stringify((parsed as Record<string, unknown>)[id]) ?? 'nothing';
+        return { ok: false, reason: 'malformed', message: `no usable answer for ${id} (got ${got.slice(0, 80)})`, backend: this.name };
       }
       answers[id] = answer;
     }
