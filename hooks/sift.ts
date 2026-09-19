@@ -51,6 +51,8 @@ type Options = {
   route: boolean;
   routeMinEffort: Effort;
   routeMaxEffort: Effort;
+  // conventions applied under every repo's .sift/config.json: a path or inline json
+  config: string;
 };
 
 const DEFAULTS: Options = {
@@ -87,6 +89,7 @@ const DEFAULTS: Options = {
   route: false,
   routeMinEffort: 'low',
   routeMaxEffort: 'high',
+  config: '',
 };
 
 export function resolveOptions(raw: PluginOptions): Options {
@@ -117,6 +120,16 @@ type Runtime = {
   sessionId: string;
   archiveDir: string;
 };
+
+// the config option is inline json or a path, relative to the repo root
+async function optionConfig($: EngineInterface, value: string, root: string): Promise<unknown> {
+  const v = value.trim();
+  if (!v) return undefined;
+  if (v.startsWith('{')) return JSON.parse(v);
+  const path = v.startsWith('/') ? v : `${root}/${v}`;
+  if (!(await $.fs.exists(path))) throw new Error(`sift config ${path} not found`);
+  return JSON.parse(await $.fs.read(path));
+}
 
 async function apiKeyOf($: EngineInterface, options: Options): Promise<string | undefined> {
   if (options.apiKey) return options.apiKey;
@@ -232,8 +245,8 @@ export const register: Register = (on, rawOptions) => {
     const repoInfo = await gh.repoInfo();
     const sessionRepo = await $.session.repo();
     const root = sessionRepo?.root ?? cwd;
-    const rawConfig = (await $.fs.exists(`${root}/${CONFIG_PATH}`)) ? JSON.parse(await $.fs.read(`${root}/${CONFIG_PATH}`)) : undefined;
-    const config = resolveConfig(rawConfig, repoInfo?.defaultBranch);
+    const repoConfig = (await $.fs.exists(`${root}/${CONFIG_PATH}`)) ? JSON.parse(await $.fs.read(`${root}/${CONFIG_PATH}`)) : undefined;
+    const config = resolveConfig([await optionConfig($, options.config, root), repoConfig], repoInfo?.defaultBranch);
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
     const home = (await $.env.get('HOME')) ?? '/tmp';
     const sessionId = await $.session.id();

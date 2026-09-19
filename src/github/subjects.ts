@@ -210,8 +210,8 @@ export async function releaseSubject(gh: Gh, config: RepoConfig, read: ReadLike,
   const commits = parseLog(await gh.git(['log', LOG_FORMAT, '--no-merges', range]));
   const bump = requiredBump(commits);
   const version = lastTag ? parseSemver(lastTag, config.release.tagPrefix) : undefined;
-  const changelogPath = config.release.changelog ?? (await firstExisting(exists, ['CHANGELOG.md', 'CHANGES.md', 'HISTORY.md']));
-  const changelog = changelogPath && (await exists(changelogPath)) ? await read(changelogPath) : '';
+  const changelogPath = config.release.changelog && (await exists(config.release.changelog)) ? config.release.changelog : undefined;
+  const changelog = changelogPath ? await read(changelogPath) : '';
   const unreleased = topSection(changelog);
   return {
     kind: 'release',
@@ -270,11 +270,6 @@ export function textSubject(text: string, context?: string): Subject {
     facts: {},
     options: {},
   };
-}
-
-async function firstExisting(exists: ExistsLike, paths: string[]): Promise<string | undefined> {
-  for (const p of paths) if (await exists(p)) return p;
-  return undefined;
 }
 
 // the newest changelog section: everything under the first second-level heading
