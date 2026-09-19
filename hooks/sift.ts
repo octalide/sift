@@ -10,13 +10,13 @@ import { localSource, remoteSource } from '../src/github/source.ts';
 import { heldDigest, judgeMessage, messageRefs, messageSubject, refDetail, type Held } from '../src/message/message.ts';
 import { JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
-import { DecisionLog } from '../src/log.ts';
+import { DecisionLog, type Cost } from '../src/log.ts';
 import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
 import type { Pack, Report, Subject } from '../src/packs/types.ts';
 import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { routeEffort, type Effort } from '../src/route/route.ts';
-import { estimateTokens } from '../src/tokens.ts';
+import { estimateTokens, estimateTokensOf } from '../src/tokens.ts';
 import { Watcher } from '../src/watch/watcher.ts';
 
 type Options = {
@@ -463,7 +463,7 @@ export const register: Register = (on, rawOptions) => {
     }
     const before = estimateTokens(text);
     const after = estimateTokens(pruned.text);
-    record('prune', options.shadow ? 'would-prune' : 'pruned', { digest: `${e.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens`, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
+    record('prune', options.shadow ? 'would-prune' : 'pruned', { digest: `${e.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens`, tokensRemoved: before - after, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
     $.ui.toast(`sift${options.shadow ? ' (shadow)' : ''}: ${e.tool} output ${pruned.dropped}/${pruned.chunks} chunks dropped, ~${before - after} tokens`);
     if (options.shadow) return r;
     if (e.tool === 'Bash') return { result: { ...(r.result as Record<string, unknown>), stdout: pruned.text } };
@@ -494,7 +494,7 @@ export const register: Register = (on, rawOptions) => {
         $.ui.log(`sift compact: built-in summary (${summary}, under ${Math.round(options.compactMinReduction * 100)}% minimum)`);
         return next(e);
       }
-      record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: summary });
+      record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: summary, tokensRemoved: Math.max(0, estimateTokensOf(e.messages) - estimateTokensOf(result.messages)) });
       if (options.shadow) {
         $.ui.log(`sift compact (shadow): would keep ${result.messages.length}/${e.messages.length} messages, ${summary}`);
         return next(e);
@@ -595,11 +595,19 @@ export const register: Register = (on, rawOptions) => {
     return yield* next({ ...e, effort: decision.effort });
   });
 
+  const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : String(n));
+
   async function statusText(rt: Runtime): Promise<string> {
     const stats = await rt.log.stats();
     const modules = Object.entries(stats.byModule)
-      .map(([m, s]) => `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms`)
+      .map(
+        ([m, s]) =>
+          `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms` +
+          (s.requestTokens || s.responseTokens ? `  in ${k(s.requestTokens)} out ${k(s.responseTokens)}` : '') +
+          (s.tokensRemoved ? `  removed ${k(s.tokensRemoved)}` : ''),
+      )
       .join('\n');
+    const cost = (c: Cost) => `judge in ${k(c.requestTokens)}, out ${k(c.responseTokens)}, context removed ${k(c.tokensRemoved)}`;
     const enabled = (Object.keys(options) as (keyof Options)[]).filter((k) => typeof options[k] === 'boolean' && options[k]).join(', ');
     const last = stats.session.lastFailure;
     const w = rt.watcher?.snapshot();
@@ -610,6 +618,7 @@ export const register: Register = (on, rawOptions) => {
       watch,
       `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,
       `all sessions (ring of 500): ${stats.calls} decisions, ${stats.failures} failures`,
+      `cost this session: ${cost(stats.session.cost)}; ring: ${cost(stats.cost)} (tokens, estimated unless the backend reports them)`,
       modules || '  no decisions yet',
     ].join('\n');
   }

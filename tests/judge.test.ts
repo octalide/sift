@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { bandOf } from '../src/judge/bands.ts';
 import { JevJudge, parseResponse } from '../src/judge/jev.ts';
+import { LoggedJudge, type Decision } from '../src/judge/index.ts';
+import { DecisionLog } from '../src/log.ts';
 import { ModelJudge, extractJson } from '../src/judge/model.ts';
 import { makeJudge } from '../src/judge/index.ts';
 import type { Questions } from '../src/judge/types.ts';
@@ -58,6 +60,42 @@ describe('jev response parsing', () => {
     await judge.ask({ a: 1 }, { yes: questions['yes']! });
     expect(sent?.url).toBe('https://x/y');
     expect(JSON.parse(sent!.body)).toEqual({ model: 'jev-x', state: { a: 1 }, questions: { yes: questions['yes'] } });
+  });
+});
+
+describe('usage accounting', () => {
+  it('takes the backend count when reported and estimates otherwise, on success and failure', async () => {
+    const withUsage = new JevJudge({ apiKey: 'k', model: 'm', baseUrl: 'u' }, async () => ({ status: 200, ok: true, text: JSON.stringify({ answers: { yes: { noul: 0.5 } }, usage: { input_tokens: 123, output_tokens: 7 } }) }));
+    const r1 = await withUsage.ask({ a: 1 }, { yes: questions['yes']! });
+    expect(r1.usage).toEqual({ requestTokens: 123, responseTokens: 7, source: 'backend' });
+    const estimated = new JevJudge({ apiKey: 'k', model: 'm', baseUrl: 'u' }, async () => ({ status: 200, ok: true, text: JSON.stringify({ answers: { yes: { noul: 0.5 } } }) }));
+    const r2 = await estimated.ask({ a: 'x'.repeat(600) }, { yes: questions['yes']! });
+    expect(r2.usage?.source).toBe('estimate');
+    expect(r2.usage!.requestTokens).toBeGreaterThan(100);
+    const failed = new JevJudge({ apiKey: 'k', model: 'm', baseUrl: 'u' }, async () => ({ status: 400, ok: false, text: 'too big' }));
+    const r3 = await failed.ask({ a: 1 }, { yes: questions['yes']! });
+    expect(r3.ok).toBe(false);
+    expect(r3.usage?.requestTokens).toBeGreaterThan(0);
+    const model = new ModelJudge('haiku', async () => '{"yes":{"noul":0.2}}');
+    const r4 = await model.ask({}, { yes: questions['yes']! });
+    expect(r4.usage).toMatchObject({ source: 'estimate' });
+    expect(r4.usage!.requestTokens).toBeGreaterThan(50);
+  });
+
+  it('records the cost on the decision and sums it per module and per session', async () => {
+    const decisions: Decision[] = [];
+    const logged = new LoggedJudge(new ModelJudge('haiku', async () => '{"yes":{"noul":0.2}}'), (d) => decisions.push({ ...d, module: 'judge', action: 'ask', shadow: false }));
+    await logged.ask({}, { yes: questions['yes']! });
+    expect(decisions[0]!.requestTokens).toBeGreaterThan(0);
+    expect(decisions[0]!.responseTokens).toBeGreaterThan(0);
+    const store = new Map<string, unknown>();
+    const log = new DecisionLog({ get: async (k) => store.get(k), set: async (k, v) => void store.set(k, v) }, 's');
+    log.push(decisions[0]!);
+    log.push({ at: 1, module: 'prune', backend: 'x', ok: true, digest: '', action: 'pruned', shadow: false, tokensRemoved: 500 });
+    log.push({ at: 1, module: 'compact', backend: 'x', ok: true, digest: '', action: 'would-compact', shadow: true, tokensRemoved: 9000 });
+    const stats = await log.stats();
+    expect(stats.session.cost).toEqual({ requestTokens: decisions[0]!.requestTokens, responseTokens: decisions[0]!.responseTokens, tokensRemoved: 500 });
+    expect(stats.byModule['prune']!.tokensRemoved).toBe(500);
   });
 });
 
