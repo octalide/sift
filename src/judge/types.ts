@@ -43,7 +43,7 @@ export type JudgeFailure = 'disabled' | 'unavailable' | 'rejected' | 'malformed'
 
 export type Judgement =
   | { ok: true; answers: Answers; backend: string; latencyMs: number }
-  | { ok: false; reason: JudgeFailure; message: string; backend: string };
+  | { ok: false; reason: JudgeFailure; message: string; backend: string; status?: number };
 
 export interface Judge {
   readonly name: string;

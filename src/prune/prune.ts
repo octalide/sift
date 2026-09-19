@@ -1,5 +1,5 @@
 import type { Judge, Questions } from '../judge/types.ts';
-import { estimateTokens, truncate } from '../tokens.ts';
+import { estimateTokens, JEV_LIMITS, truncate } from '../tokens.ts';
 
 export type PruneOptions = {
   floorTokens: number;
@@ -13,7 +13,7 @@ export const PRUNE_DEFAULTS: PruneOptions = {
   floorTokens: 4000,
   chunkLines: 25,
   keepThreshold: 0.5,
-  maxRequestTokens: 30_000,
+  maxRequestTokens: Math.floor(JEV_LIMITS.requestTokens * 0.5),
   maxChunks: 160,
 };
 
