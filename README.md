@@ -15,7 +15,7 @@ Everything sift does is built on that one call. Every module is a toggle, every 
 |---|---|---|---|
 | `compact` | `session.compact` | replaces the compaction summary with the transcript minus the tool calls and results the judge marks stale. User and assistant text is never touched | on |
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed, archives the full output under `~/.cache/sift/<session>/` and leaves a recovery note in the stub | on |
-| `grade` | registered tools | `sift_grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `sift_judge` answers raw typed questions | on |
+| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `mcp__sift__judge` answers raw typed questions | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
 | `gate` | `tool.call` (pre) | judges Bash, Write and Edit calls against safety propositions and denies on a violated band | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
@@ -42,24 +42,30 @@ claude plugin marketplace add octalide/sift
 claude plugin install sift@sift
 ```
 
-Options live in `/config` under the plugin, or in `settings.json` under `pluginConfigs.sift.options` (`pluginConfigs["sift@inline"]` for a `--plugin-dir` load). Every option is described in `.claude-plugin/plugin.json`.
+Options live in `/config` under the plugin, or in `settings.json` under `pluginConfigs.sift.options` (`pluginConfigs["sift@inline"]` for a `--plugin-dir` load). Every option is described in `.claude-plugin/plugin.json`. To give one kind of session different options (a watcher session, say), pass a settings file at launch:
+
+```sh
+claude --plugin-dir ./sift --settings '{"pluginConfigs":{"sift@inline":{"options":{"watch":true}}}}'
+```
 
 `/sift` prints status and per-module decision counts, `/sift log [n]` the recent decisions with their scores, `/sift watch status|poll|pause|resume|reset|deferred` controls the watcher.
 
 ## Grading
 
+The tools are registered as `mcp__sift__grade` and `mcp__sift__judge`.
+
 ```
-sift_grade(pack: "pr", subject: "42")
-sift_grade(pack: "issue", subject: "17")
-sift_grade(pack: "commit", subject: "main..HEAD")
-sift_grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
-sift_grade(pack: "rules", subject: "42")            # a PR against the repo's rule documents
-sift_grade(pack: "rules", subject: "x", text: "...") # free text against the rules
+grade(pack: "pr", subject: "42")
+grade(pack: "issue", subject: "17")
+grade(pack: "commit", subject: "main..HEAD")
+grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
+grade(pack: "rules", subject: "42")            # a PR against the repo's rule documents
+grade(pack: "rules", subject: "x", text: "...") # free text against the rules
 ```
 
 A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, conventional commit format, required semver bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable).
 
-`sift_judge(state, questions)` is the raw call for anything a pack does not cover:
+`judge(state, questions)` is the raw call for anything a pack does not cover:
 
 ```json
 {
