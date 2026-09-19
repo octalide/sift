@@ -266,11 +266,11 @@ export const register: Register = (on, rawOptions) => {
       },
     );
     const judge = new LoggedJudge(inner, (d) => log.push({ ...d, module: 'judge', action: 'ask', shadow: false }));
-    const cwd = await $.session.cwd();
-    const gh = new Gh((argv, init) => $.process.run(argv, init), cwd);
+    // the main working tree, never a worktree the session started in and may later remove
+    const spawnCwd = async () => (await $.session.repo())?.root ?? (await $.session.cwd());
+    const gh = new Gh((argv, init) => $.process.run(argv, init), spawnCwd);
     const repoInfo = await gh.repoInfo();
-    const sessionRepo = await $.session.repo();
-    const root = sessionRepo?.root ?? cwd;
+    const root = await spawnCwd();
     const repoConfig = (await $.fs.exists(`${root}/${CONFIG_PATH}`)) ? JSON.parse(await $.fs.read(`${root}/${CONFIG_PATH}`)) : undefined;
     const config = resolveConfig([await optionConfig($, options.config, root), repoConfig], repoInfo?.defaultBranch);
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
