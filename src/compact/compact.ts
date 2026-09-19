@@ -1,6 +1,6 @@
 import { bandOf } from '../judge/bands.ts';
 import type { Judge, Questions } from '../judge/types.ts';
-import { estimateTokens, estimateTokensOf, JEV_LIMITS, truncate } from '../tokens.ts';
+import { batchQuestions, estimateTokens, estimateTokensOf, JEV_LIMITS, truncate } from '../tokens.ts';
 
 export type ToolUse = {
   tool_use_id: string;
@@ -265,24 +265,6 @@ export function questionsFor(calls: Call[]): Questions {
     }
   }
   return q;
-}
-
-export function batchQuestions(questions: Questions, stateTokens: number, maxRequestTokens: number): Questions[] {
-  const batches: Questions[] = [];
-  let current: Questions = {};
-  let tokens = stateTokens;
-  for (const [id, q] of Object.entries(questions)) {
-    const cost = estimateTokens(JSON.stringify(q)) + 8;
-    if (tokens + cost > maxRequestTokens && Object.keys(current).length > 0) {
-      batches.push(current);
-      current = {};
-      tokens = stateTokens;
-    }
-    current[id] = q;
-    tokens += cost;
-  }
-  if (Object.keys(current).length > 0) batches.push(current);
-  return batches;
 }
 
 export function applyDecisions(messages: readonly Message[], calls: Call[], decisions: CallDecision[], truncateHead: number): Message[] {

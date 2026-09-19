@@ -94,7 +94,7 @@ To apply one set of conventions across many repos, set the `config` option to a 
   "branches": { "protected": ["main", "dev"], "pattern": "^(feat|fix|chore|hotfix)/\\d+$" },
   "issues": { "requiredLabelGroups": [["bug", "feat", "docs", "chore"]], "milestone": true, "templateSections": ["Summary", "Acceptance"], "childLabels": ["task"] },
   "prs": { "linkIssue": true, "target": "dev", "templateSections": ["Summary", "Testing"] },
-  "rules": { "docs": ["CONTRIBUTING.md", "CLAUDE.md"] },
+  "rules": { "docs": ["CONTRIBUTING.md", "CLAUDE.md", "briar-systems/mach-std:MIGRATION.md@v6.0.0"], "maxRules": 200 },
   "release": {
     "scheme": "semver",
     "changelog": "CHANGELOG.md",
@@ -138,6 +138,8 @@ A pack is data: a subject kind, a list of mechanical checks, and typed questions
   }
 }
 ```
+
+`rules.docs` entries are paths in the checkout or `owner/repo:path[@ref]` read from GitHub, so a consumer PR can be graded against another repo's migration guide at a tag. Each paragraph or list item is one rule, and each row of a markdown table is one rule with its cells named by the header (`5.x: sort.sort[T](data, len, cmp); 6.0.0: sort.sort[T](data, len)`). Rules past `rules.maxRules` are dropped and `rules.present` says so. A pack with more questions than one request holds goes out in several, the subject repeated in each.
 
 A noul's optional `criteria` is Jev's shape, `{ "true": "...", "false": "..." }`, saying what a yes and a no mean. A choice's `criteria` maps keys to descriptions, a score's is an ordered list of legends.
 

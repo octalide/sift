@@ -3,6 +3,7 @@ import { DEFAULT_THRESHOLDS, type Judge, type Questions, type Question } from '.
 import type { RepoConfig } from '../github/config.ts';
 import { CHECKS } from './checks.ts';
 import type { Finding, Judged, Pack, Report, Subject, Verdict } from './types.ts';
+import { batchQuestions, estimateTokensOf, JEV_LIMITS } from '../tokens.ts';
 
 export function materialize(pack: Pack, subject: Subject): { questions: Questions; meta: Record<string, { lo: number; hi: number; severity: Judged['severity']; inverted: boolean }> } {
   const questions: Questions = {};
@@ -71,20 +72,21 @@ export async function runPack(pack: Pack, subject: Subject, judge: Judge, config
   const judged: Judged[] = [];
   let judgeError: string | undefined;
   let backend = judge.name;
-  if (Object.keys(questions).length > 0) {
-    const result = await judge.ask(subject.state, questions);
+  // a pack with many questions (rules over a long doc) goes out in several requests, the state repeated in each
+  for (const batch of batchQuestions(questions, estimateTokensOf(subject.state), JEV_LIMITS.requestTokens)) {
+    const result = await judge.ask(subject.state, batch);
     backend = result.backend;
-    if (result.ok) {
-      for (const [id, answer] of Object.entries(result.answers)) {
-        const m = meta[id]!;
-        let band = bandOf(answer, m);
-        if (m.inverted && answer.type === 'noul') {
-          band = band === 'satisfied' ? 'violated' : band === 'violated' ? 'satisfied' : band;
-        }
-        judged.push({ id, answer, band, severity: m.severity, instructions: questions[id]!.instructions });
-      }
-    } else {
+    if (!result.ok) {
       judgeError = `${result.reason}: ${result.message}`;
+      break;
+    }
+    for (const [id, answer] of Object.entries(result.answers)) {
+      const m = meta[id]!;
+      let band = bandOf(answer, m);
+      if (m.inverted && answer.type === 'noul') {
+        band = band === 'satisfied' ? 'violated' : band === 'violated' ? 'satisfied' : band;
+      }
+      judged.push({ id, answer, band, severity: m.severity, instructions: questions[id]!.instructions });
     }
   }
   return {
