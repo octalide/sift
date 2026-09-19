@@ -1,7 +1,9 @@
 import type { RepoConfig } from '../github/config.ts';
 import { Gh, GhError } from '../github/gh.ts';
 import type { Judge } from '../judge/types.ts';
-import type { Pack } from '../packs/types.ts';
+import type { Finding, Pack } from '../packs/types.ts';
+import { runChecks } from '../packs/run.ts';
+import { issueSubject } from '../github/subjects.ts';
 import type { StoreLike } from '../log.ts';
 import { diffItems, diffRuns, formatEvent, initialState, ITEM_JQ, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type CheckRun, type CommitStatus, type Deferred, type RawItem, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
@@ -23,6 +25,8 @@ export type WatchHost = {
   store: StoreLike;
   judge: Judge;
   pack: Pack;
+  // the issue pack's mechanical checks run on every new issue, the filer's own included
+  issuePack?: Pack;
   config: RepoConfig;
   now: () => number;
   deliver: (text: string) => Promise<void>;
@@ -198,7 +202,9 @@ export class Watcher {
     const rules: WatchRules = { ...this.options.rules, login: this.state.login };
     const deliver: { event: WatchEvent; label: string }[] = [];
     for (const e of await this.settleRuns(events)) {
-      const route = routeByRules(e, rules);
+      const filing = e.kind === 'issue' && e.isNew && !(rules.ignoreBots && e.bot) ? await this.fileCheck(e) : [];
+      if (filing.length > 0) e.findings = filing.map((f) => `${f.check}: ${f.message}`);
+      const route = filing.length > 0 ? { action: 'deliver' as const, reason: `filed with ${filing.length} finding${filing.length === 1 ? '' : 's'}` } : routeByRules(e, rules);
       if (route.action === 'drop') {
         this.host.onDecision?.(e, 'drop', route.reason);
         continue;
@@ -294,6 +300,19 @@ export class Watcher {
     return settleChecks(checks.check_runs ?? [], status.statuses ?? []);
   }
 
+  // mechanical findings of the issue pack on a fresh issue: labels, template, parent, milestone. no judge, no cost beyond the fetch
+  private async fileCheck(e: WatchEvent): Promise<Finding[]> {
+    const pack = this.host.issuePack;
+    if (!pack || e.number === undefined) return [];
+    try {
+      const subject = await issueSubject(this.host.gh, this.options.repo, e.number, this.host.config);
+      return runChecks(pack, subject, this.host.config).filter((f) => f.severity !== 'info');
+    } catch (error) {
+      this.host.log(`sift watch ${this.options.repo}: could not check issue #${e.number} (${error instanceof Error ? error.message : String(error)})`);
+      return [];
+    }
+  }
+
   private defer(e: WatchEvent, reason: string, label?: string): void {
     this.host.onDecision?.(e, 'defer', label ?? reason);
     this.state.deferred.push({ event: e, reason, label });
@@ -313,6 +332,7 @@ export class Watcher {
     for (const { event, label } of items) {
       lines.push(`${formatEvent(event)}`);
       lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''}`);
+      if (event.findings?.length) lines.push(`  filing: ${event.findings.join('; ')}`);
     }
     if (this.state.deferred.length > 0) lines.push(`deferred meanwhile: ${summarize(this.state.deferred)}`);
     return lines.join('\n');

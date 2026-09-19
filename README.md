@@ -107,6 +107,12 @@ To apply one set of conventions across many repos, set the `config` option to a 
 
 A release grade reads the checkout when the session is inside the repo being graded (`ref` defaults to `HEAD`, and the working tree stands in for it so an uncommitted changelog promotion is graded before the commit). For any other repo, or from a directory that is no checkout, it reads GitHub: tags, the compare between the last tag and `ref`, and the manifest and changelog contents at each end. `ref` then defaults to the configured `prs.target` and otherwise to the default branch.
 
+`issues.requiredLabelGroups` lists label groups, one label from each required (`[["bug", "enhancement", "documentation"]]` asks for a type label). `issues.templateSections` names the second-level headings the body must carry with content under each. `issues.childLabels` marks labels whose issues must be a native sub-issue of a parent (the `issues/N/parent` link, not a body mention). `issues.milestone` requires one. These run in `grade issue` and, when the watch is on, on every new issue as it is filed, the watching session's own included: an issue that fails any of them is delivered with a `filing:` line naming the findings, whoever filed it. A family that files with the default GitHub labels and a two-section template would set:
+
+```json
+"issues": { "requiredLabelGroups": [["bug", "enhancement", "documentation"]], "templateSections": ["Problem", "Fix"], "childLabels": ["task"], "milestone": false }
+```
+
 `release.scheme` turns on version checking (`semver` is the only scheme today). `release.changelog` names the file whose top section must cover the commits. Leave either out and the release pack only judges the commits since the last tag.
 
 `release.zeroVerBreaking` is what a breaking change requires while the version is below 1.0.0 (`minor` by default, `major` to cut 1.0.0 on the first one). `release.manifests` lists files whose changes are release-worthy on their own, commit types aside: each entry names a TOML file, regexes over its dotted keys (`project.mach`, `dep.std.ref`) and the bump a change to one of them requires. The manifest at the last tag is compared with the one at `HEAD`, so a version line that the release itself moves is not matched unless a key pattern names it. The required bump is the higher of the commit bump and the manifest bump, and `release.bump` says which keys moved.
@@ -158,7 +164,7 @@ Subject kinds and the checks they support:
 
 ## Watch
 
-With `watch: true` the plugin polls the session's repository (or `watchRepo`) with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops, your own writes defer (`watchIgnoreSelf`, keyed on the `gh` login), new PRs deliver, label churn defers. Everything else goes through the `triage` pack, and an event whose `actionable` lands in the violated band is deferred.
+With `watch: true` the plugin polls the session's repository (or `watchRepo`) with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops, your own writes defer (`watchIgnoreSelf`, keyed on the `gh` login), new PRs deliver, a new issue is checked against the issue pack and delivers with its findings when it fails one (own writes otherwise defer under `watchIgnoreSelf`), label churn defers. Everything else goes through the `triage` pack, and an event whose `actionable` lands in the violated band is deferred.
 
 A delivery is one prompt:
 
