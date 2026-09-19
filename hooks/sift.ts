@@ -5,6 +5,7 @@ import { gate as runGate, mentionsSecret } from '../src/gate/gate.ts';
 import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/config.ts';
 import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
+import { localSource, remoteSource } from '../src/github/source.ts';
 import { JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { DecisionLog } from '../src/log.ts';
@@ -172,7 +173,7 @@ export const register: Register = (on, rawOptions) => {
     return runtime;
   };
 
-  async function subjectFor(rt: Runtime, packName: string, ref: string, opts: { repo?: string; text?: string } = {}): Promise<Subject> {
+  async function subjectFor(rt: Runtime, packName: string, ref: string, opts: GradeOptions = {}): Promise<Subject> {
     const pack = rt.packs[packName];
     if (!pack) throw new Error(`unknown pack ${packName} (have: ${Object.keys(rt.packs).join(', ')})`);
     const repo = opts.repo ?? rt.repo;
@@ -190,7 +191,12 @@ export const register: Register = (on, rawOptions) => {
       case 'commit':
         return commitSubject(rt.gh, ref || 'HEAD', rt.config);
       case 'release': {
-        const s = await releaseSubject(rt.gh, rt.config, fs.read, fs.exists);
+        // the checkout serves its own repo; any other repo, or no checkout at all, is read from github
+        const local = rt.repo !== undefined && (opts.repo === undefined || opts.repo === rt.repo);
+        const source = local
+          ? localSource(rt.gh, opts.ref ?? 'HEAD', readFile, existsFile)
+          : remoteSource(rt.gh, needRepo(), opts.ref ?? rt.config.prs.target ?? (await defaultBranch(rt.gh, needRepo())));
+        const s = await releaseSubject(source, rt.config);
         if (ref && ref !== 'release') s.facts['proposed'] = ref;
         return s;
       }
@@ -207,7 +213,13 @@ export const register: Register = (on, rawOptions) => {
   let readFile: (p: string) => Promise<string> = async () => '';
   let existsFile: (p: string) => Promise<boolean> = async () => false;
 
-  async function grade(rt: Runtime, packName: string, ref: string, opts?: { repo?: string; text?: string }): Promise<Report> {
+  type GradeOptions = { repo?: string; text?: string; ref?: string };
+
+  async function defaultBranch(gh: Gh, repo: string): Promise<string> {
+    return (await gh.json<{ default_branch: string }>(`repos/${repo}`)).default_branch;
+  }
+
+  async function grade(rt: Runtime, packName: string, ref: string, opts?: GradeOptions): Promise<Report> {
     const pack = rt.packs[packName];
     if (!pack) throw new Error(`unknown pack ${packName}`);
     const subject = await subjectFor(rt, packName, ref, opts);
@@ -220,7 +232,7 @@ export const register: Register = (on, rawOptions) => {
     const built = await next(e);
     const sift = {
       judge: (state: unknown, questions: Questions) => ready().judge.ask(state, questions),
-      grade: (pack: string, subject: string, opts?: { repo?: string; text?: string }) => grade(ready(), pack, subject, opts),
+      grade: (pack: string, subject: string, opts?: GradeOptions) => grade(ready(), pack, subject, opts),
       backend: () => (runtime ? runtime.judge.name : 'unbound'),
     };
     return { ...built, sift };
@@ -230,7 +242,8 @@ export const register: Register = (on, rawOptions) => {
     readFile = (p) => $.fs.read(p);
     existsFile = (p) => $.fs.exists(p);
     const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) };
-    const log = new DecisionLog(store);
+    const sessionId = await $.session.id();
+    const log = new DecisionLog(store, sessionId);
     const apiKey = await apiKeyOf($, options);
     const inner = makeJudge(
       { backend: options.backend, apiKey, jevModel: options.jevModel, jevBaseUrl: options.jevBaseUrl, fallbackModel: options.fallbackModel },
@@ -249,7 +262,6 @@ export const register: Register = (on, rawOptions) => {
     const config = resolveConfig([await optionConfig($, options.config, root), repoConfig], repoInfo?.defaultBranch);
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
     const home = (await $.env.get('HOME')) ?? '/tmp';
-    const sessionId = await $.session.id();
     const startWatch = async (): Promise<string | undefined> => {
       const rt = ready();
       if (rt.watcher) return undefined;
@@ -306,14 +318,15 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs: issue (subject: issue number), pr (PR number), commit (sha or range like main..HEAD), release (subject: "release" or a proposed version like v1.4.0), rules (subject: PR number, issue number with text="issue", commit, or free text in text). Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs: issue (subject: issue number), pr (PR number), commit (sha or range like main..HEAD), release (subject: "release" or a proposed version like v1.4.0, ref: the branch it is cut from, repo: any repo, no checkout needed), rules (subject: PR number, issue number with text="issue", commit, or free text in text). Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {
             pack: { type: 'string', description: 'pack name' },
             subject: { type: 'string', description: 'issue or PR number, commit or range, "release", or a version' },
-            repo: { type: 'string', description: 'owner/name, defaults to the current repository' },
+            repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from GitHub' },
             text: { type: 'string', description: 'free text subject for the rules pack, or "issue" to grade an issue number against the rules' },
+            ref: { type: 'string', description: 'release pack: the branch or sha the release is cut from. Defaults to HEAD in a checkout, else the configured PR target branch, else the default branch' },
           },
           required: ['pack', 'subject'],
         },
@@ -353,9 +366,9 @@ export const register: Register = (on, rawOptions) => {
   });
 
   on('tool.call', { tool: 'mcp__sift__grade' }, async ($, e) => {
-    const input = e as unknown as { pack: string; subject: string; repo?: string; text?: string };
+    const input = e as unknown as { pack: string; subject: string; repo?: string; text?: string; ref?: string };
     try {
-      const report = await grade(ready(), input.pack, String(input.subject), { repo: input.repo, text: input.text });
+      const report = await grade(ready(), input.pack, String(input.subject), { repo: input.repo, text: input.text, ref: input.ref });
       return { result: [{ type: 'text', text: formatReport(report) }] };
     } catch (error) {
       return { deny: `sift grade failed: ${messageOf(error)}` };
@@ -466,6 +479,13 @@ export const register: Register = (on, rawOptions) => {
     }
   });
 
+  // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count
+  on('prompt.submit', async (_$, e, next) => {
+    const warnings = runtime?.log.takeWarnings() ?? [];
+    if (warnings.length === 0) return next(e);
+    return next({ ...e, context: [...(e.context ?? []), ...warnings] });
+  });
+
   on('turn.complete', async ($, e, next) => {
     if (options.compactAtPercent <= 0 || compacting) return next(e);
     try {
@@ -516,13 +536,15 @@ export const register: Register = (on, rawOptions) => {
       .map(([m, s]) => `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms`)
       .join('\n');
     const enabled = (Object.keys(options) as (keyof Options)[]).filter((k) => typeof options[k] === 'boolean' && options[k]).join(', ');
+    const last = stats.session.lastFailure;
     const w = rt.watcher?.snapshot();
     const watch = !rt.watcher ? 'watch: off' : `watch: ${w!.paused ? 'paused' : 'running'} on ${options.watchRepo || rt.repo}, ${w!.deferred.length} deferred, last poll ${w!.lastPoll ? new Date(w!.lastPoll).toISOString() : 'never'}`;
     return [
       `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${rt.repo ?? 'none'}`,
       `enabled: ${enabled}`,
       watch,
-      `judge calls ${stats.calls}, failures ${stats.failures}`,
+      `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,
+      `all sessions (ring of 500): ${stats.calls} decisions, ${stats.failures} failures`,
       modules || '  no decisions yet',
     ].join('\n');
   }

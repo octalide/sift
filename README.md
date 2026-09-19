@@ -48,7 +48,7 @@ Options live in `/config` under the plugin, or in `settings.json` under `pluginC
 claude --plugin-dir ./sift --settings '{"pluginConfigs":{"sift@inline":{"options":{"watch":true}}}}'
 ```
 
-`/sift` prints status and per-module decision counts (the same text is available to the model as the `mcp__sift__status` tool), `/sift log [n]` the recent decisions with their scores, `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watcher (also the `mcp__sift__watch` tool). The `watch` option starts it at boot; `start` arms it in a session that came up without it.
+`/sift` prints status and per-module decision counts (the same text is available to the model as the `mcp__sift__status` tool), with this session's decisions and failures separate from the ring shared by every session running the plugin. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` the recent decisions with their scores, `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watcher (also the `mcp__sift__watch` tool). The `watch` option starts it at boot; `start` arms it in a session that came up without it.
 
 ## Grading
 
@@ -59,6 +59,7 @@ grade(pack: "pr", subject: "42")
 grade(pack: "issue", subject: "17")
 grade(pack: "commit", subject: "main..HEAD")
 grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
+grade(pack: "release", subject: "v1.4.0", repo: "o/r", ref: "dev")  # any repo, no checkout needed
 grade(pack: "rules", subject: "42")            # a PR against the repo's rule documents
 grade(pack: "rules", subject: "x", text: "...") # free text against the rules
 ```
@@ -93,11 +94,21 @@ To apply one set of conventions across many repos, set the `config` option to a 
   "issues": { "requiredLabelGroups": [["bug", "feat", "docs", "chore"]], "milestone": true, "templateSections": ["Summary", "Acceptance"], "childLabels": ["task"] },
   "prs": { "linkIssue": true, "target": "dev", "templateSections": ["Summary", "Testing"] },
   "rules": { "docs": ["CONTRIBUTING.md", "CLAUDE.md"] },
-  "release": { "scheme": "semver", "changelog": "CHANGELOG.md", "tagPrefix": "v" }
+  "release": {
+    "scheme": "semver",
+    "changelog": "CHANGELOG.md",
+    "tagPrefix": "v",
+    "zeroVerBreaking": "minor",
+    "manifests": [{ "path": "mach.toml", "keys": ["^project\\.mach$", "^dep\\.[^.]+\\.(git|ref)$"], "bump": "minor" }]
+  }
 }
 ```
 
+A release grade reads the checkout when the session is inside the repo being graded (`ref` defaults to `HEAD`, and the working tree stands in for it so an uncommitted changelog promotion is graded before the commit). For any other repo, or from a directory that is no checkout, it reads GitHub: tags, the compare between the last tag and `ref`, and the manifest and changelog contents at each end. `ref` then defaults to the configured `prs.target` and otherwise to the default branch.
+
 `release.scheme` turns on version checking (`semver` is the only scheme today). `release.changelog` names the file whose top section must cover the commits. Leave either out and the release pack only judges the commits since the last tag.
+
+`release.zeroVerBreaking` is what a breaking change requires while the version is below 1.0.0 (`minor` by default, `major` to cut 1.0.0 on the first one). `release.manifests` lists files whose changes are release-worthy on their own, commit types aside: each entry names a TOML file, regexes over its dotted keys (`project.mach`, `dep.std.ref`) and the bump a change to one of them requires. The manifest at the last tag is compared with the one at `HEAD`, so a version line that the release itself moves is not matched unless a key pattern names it. The required bump is the higher of the commit bump and the manifest bump, and `release.bump` says which keys moved.
 
 ## Packs
 
