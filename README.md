@@ -19,6 +19,7 @@ Everything sift does is built on that one call. Every module is a toggle, every 
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
 | `message` | `session.receive` | judges every message from another session before it is queued: nothing actionable is held into a digest line that rides with the next delivery or prompt, the rest arrives with its scores on the first line | off |
 | `gate` | `tool.call` (pre) | judges Bash, Write and Edit calls against safety propositions and denies on a violated band | off |
+| `gateOutbound` | `tool.call` (pre) | checks text about to leave the session (a Discord message, a `gh pr`, `gh issue` or `gh release` create, comment or edit body) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
 | `route` | `turn.step` | lowers request effort for prompts the judge scores as routine | off |
 
@@ -116,6 +117,10 @@ A release grade reads the checkout when the session is inside the repo being gra
 `release.scheme` turns on version checking (`semver` is the only scheme today). `release.changelog` names the file whose top section must cover the commits. Leave either out and the release pack only judges the commits since the last tag.
 
 `release.zeroVerBreaking` is what a breaking change requires while the version is below 1.0.0 (`minor` by default, `major` to cut 1.0.0 on the first one). `release.manifests` lists files whose changes are release-worthy on their own, commit types aside: each entry names a TOML file, regexes over its dotted keys (`project.mach`, `dep.std.ref`) and the bump a change to one of them requires. The manifest at the last tag is compared with the one at `HEAD`, so a version line that the release itself moves is not matched unless a key pattern names it. The required bump is the higher of the commit bump and the manifest bump, and `release.bump` says which keys moved.
+
+## Outbound text
+
+With `gateOutbound: true` the text a tool call is about to send is checked before the call runs: Discord `send_message`, `send_dm`, `edit_message`, `send_webhook_message`, `create_forum_post` content and embed text, and the `--body`/`-b` value of `gh pr|issue|release create|comment|edit` in a Bash command, quoted or in a `$(cat <<'EOF' ... EOF)` heredoc. The channel's hard limit is mechanical (2000 characters for Discord) and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
 
 ## Messages
 
