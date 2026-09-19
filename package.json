@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Claude Code function-hook plugin: typed judgement calls (Jev or a small model) for compaction, tool output pruning, repo watching and grading.",
   "type": "module",
   "license": "MIT",

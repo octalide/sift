@@ -128,11 +128,12 @@ export async function prSubject(gh: Gh, repo: string, n: number, config: RepoCon
       .then((r) => r.check_runs)
       .catch(() => [] as GhCheck[]),
     gh
-      .json<{ sha: string; commit: { message: string } }[]>(`repos/${repo}/pulls/${n}/commits?per_page=100`)
+      .json<{ sha: string; parents: { sha: string }[]; commit: { message: string } }[]>(`repos/${repo}/pulls/${n}/commits?per_page=100`)
       .catch(() => []),
   ]);
   const issue = linked[0] ? await gh.json<GhIssue>(`repos/${repo}/issues/${linked[0]}`).catch(() => undefined) : undefined;
-  const commits = log.map((c) => ({ sha: c.sha, message: c.commit.message }));
+  // merge commits (a branch updated from its base) are history, not work the convention judges
+  const commits = log.filter((c) => c.parents.length < 2).map((c) => ({ sha: c.sha, message: c.commit.message }));
   const failed = checks.filter((c) => c.status === 'completed' && c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
   const pending = checks.filter((c) => c.status !== 'completed');
   return {
