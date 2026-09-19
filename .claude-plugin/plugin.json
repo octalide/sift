@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
@@ -165,7 +165,7 @@
     "watchCi": {
       "type": "string",
       "title": "Watch CI events",
-      "description": "failures delivers failed runs on protected branches, all delivers every completed run, none delivers no CI.",
+      "description": "failures delivers each open PR once when every check on its head has finished (pass or fail) and failed runs on protected branches, all delivers every completed run as well, none delivers no CI.",
       "options": [
         "failures",
         "all",

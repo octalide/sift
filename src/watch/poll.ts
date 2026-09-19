@@ -39,12 +39,14 @@ export type WatchEvent = {
   // ci only
   conclusion?: string | null;
   branch?: string;
+  // every check on the head of an open pr completed; number is the pr
+  settled?: boolean;
   // set when the event is new
   isNew: boolean;
 };
 
 // bump when the stored shape changes; a store from an older version is reseeded
-export const STATE_VERSION = 2;
+export const STATE_VERSION = 3;
 
 export type WatchState = {
   version: number;
@@ -53,6 +55,8 @@ export type WatchState = {
   cursor: string;
   items: Record<string, Item>;
   runs: Record<string, Run>;
+  // pr@sha -> conclusion, one settled delivery per head
+  settled: Record<string, string>;
   etags: { issues?: string; runs?: string };
   deferred: Deferred[];
   paused: boolean;
@@ -76,6 +80,7 @@ export function initialState(): WatchState {
     cursor: '2008-01-01T00:00:00Z',
     items: {},
     runs: {},
+    settled: {},
     etags: {},
     deferred: [],
     paused: false,
@@ -178,7 +183,7 @@ export function toRuns(raw: RawRun[]): Record<string, Run> {
         event: r.event,
         status: r.status,
         conclusion: r.conclusion,
-        sha: r.head_sha.slice(0, 7),
+        sha: r.head_sha,
         url: r.html_url,
         actor: r.actor?.login ?? '',
         updated: r.updated_at,
@@ -195,7 +200,7 @@ export function diffRuns(old: Record<string, Run>, fresh: Record<string, Run>, n
     events.push({
       id: `ci#${id}`,
       kind: 'ci',
-      title: `${v.name} on ${v.branch} @${v.sha} (${v.event})`,
+      title: `${v.name} on ${v.branch} @${v.sha.slice(0, 7)} (${v.event})`,
       user: v.actor,
       bot: false,
       url: v.url,
@@ -218,7 +223,26 @@ export function trimRuns(runs: Record<string, Run>, keep = 200): Record<string, 
   return Object.fromEntries(ids.map((id) => [String(id), runs[String(id)]!]));
 }
 
+// keep the newest settled heads so the store stays small
+export function trimSettled(settled: Record<string, string>, keep = 200): Record<string, string> {
+  const keys = Object.keys(settled).slice(-keep);
+  return Object.fromEntries(keys.map((k) => [k, settled[k]!]));
+}
+
+export type CheckRun = { name: string; status: string; conclusion: string | null };
+export type CommitStatus = { context: string; state: string };
+
+const failed = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'error']);
+
+// the verdict on a head once every check run and commit status has finished, undefined while any is pending
+export function settleChecks(checks: CheckRun[], statuses: CommitStatus[]): { conclusion: 'success' | 'failure'; total: number; failed: string[] } | undefined {
+  if (checks.some((c) => c.status !== 'completed') || statuses.some((s) => s.state === 'pending')) return undefined;
+  const bad = [...checks.filter((c) => failed.has(c.conclusion ?? '')).map((c) => c.name), ...statuses.filter((s) => failed.has(s.state)).map((s) => s.context)];
+  return { conclusion: bad.length > 0 ? 'failure' : 'success', total: checks.length + statuses.length, failed: bad };
+}
+
 export function formatEvent(e: WatchEvent): string {
+  if (e.kind === 'ci' && e.settled) return `ci settled ${e.conclusion ?? 'unknown'}: pr #${e.number} ${e.title}`;
   const head = e.kind === 'ci' ? `ci ${e.conclusion ?? 'unknown'}: ${e.title}` : `${e.kind} #${e.number} ${e.changes.join(', ')}: ${e.title}`;
   return head;
 }
