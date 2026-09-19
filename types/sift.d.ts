@@ -27,7 +27,7 @@ export type Sift = {
   // typed questions over any state, answered by the configured backend
   judge: (state: unknown, questions: Record<string, SiftQuestion>) => Promise<SiftJudgement>;
   // run a pack over a subject: an issue or PR number, a commit range, "release", or text
-  grade: (pack: string, subject: string, options?: { repo?: string; text?: string }) => Promise<SiftReport>;
+  grade: (pack: string, subject: string, options?: { repo?: string; text?: string; ref?: string }) => Promise<SiftReport>;
   // the backend name in use
   backend: () => string;
 };
