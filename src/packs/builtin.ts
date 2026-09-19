@@ -148,7 +148,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
   release: {
     name: 'release',
     subject: 'release',
-    description: 'What semver bump do the commits since the last tag require, and does the changelog match?',
+    description: 'Are the commits since the last release safe to ship as described, and when a version scheme and changelog are configured, do they agree?',
     checks: ['release.commits', 'release.bump', 'release.changelog'],
     questions: {
       hidden_breaking: {
@@ -161,7 +161,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       changelog_complete: {
         type: 'noul',
         instructions: 'The top changelog section mentions every user-visible change among the commits.',
-        when: 'has_commits',
+        when: 'changelogPath',
         severity: 'warn',
       },
     },

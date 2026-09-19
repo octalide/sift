@@ -28,6 +28,9 @@ export type RepoConfig = {
     docs: string[];
   };
   release: {
+    // unset: no version is computed or checked
+    scheme?: 'semver';
+    // unset: no changelog is read or checked
     changelog?: string;
     tagPrefix: string;
   };
@@ -35,7 +38,7 @@ export type RepoConfig = {
 
 export const DEFAULT_CONFIG: RepoConfig = {
   commits: {
-    convention: 'conventional',
+    convention: 'none',
     types: ['feat', 'fix', 'docs', 'refactor', 'test', 'chore', 'style', 'ci', 'perf', 'build', 'revert'],
     scope: 'any',
     forbidTrailers: [],
@@ -64,9 +67,12 @@ function merge<T extends Record<string, unknown>>(base: T, over: Partial<T> | un
   return out as T;
 }
 
-export function resolveConfig(raw: unknown, defaultBranch?: string): RepoConfig {
-  const over = raw && typeof raw === 'object' ? (raw as Partial<RepoConfig>) : undefined;
-  const config = merge(DEFAULT_CONFIG, over);
+// layers apply in order, each field by field over the last
+export function resolveConfig(layers: unknown | unknown[], defaultBranch?: string): RepoConfig {
+  let config = DEFAULT_CONFIG;
+  for (const raw of Array.isArray(layers) ? layers : [layers]) {
+    if (raw && typeof raw === 'object') config = merge(config, raw as Partial<RepoConfig>);
+  }
   if (config.branches.protected.length === 0 && defaultBranch) {
     config.branches = { ...config.branches, protected: [defaultBranch] };
   }
