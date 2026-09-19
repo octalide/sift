@@ -274,6 +274,13 @@ export const register: Register = (on, rawOptions) => {
       description: 'sift status: judge backend, enabled modules, whether the repo watch is running, and decision counts. Call it at session start to learn whether repository events will be delivered to you as prompts.',
       inputSchema: { type: 'object', properties: {} },
     });
+    if (options.watch) {
+      await $.tool.register({
+        name: 'watch',
+        description: 'Control the sift repo watch: status, poll (one poll now, delivering anything new), pause (stop polling until resumed), resume, reset (forget the cursor and reseed), deferred (list events held back).',
+        inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'poll', 'pause', 'resume', 'reset', 'deferred'] } } },
+      });
+    }
     await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|poll|pause|resume|reset|deferred]' });
 
     if (options.watch) {
@@ -502,6 +509,33 @@ export const register: Register = (on, rawOptions) => {
     ].join('\n');
   }
 
+  // the watch controls, shared by /sift watch and the watch tool
+  async function watchControl(rt: Runtime, sub: string): Promise<string> {
+    const w = rt.watcher;
+    if (!w) return 'watch is off (enable the watch option and restart the session)';
+    if (sub === 'pause') await w.pause();
+    else if (sub === 'resume') await w.resume();
+    else if (sub === 'reset') await w.reset();
+    else if (sub === 'poll') await w.tick();
+    const st = w.snapshot();
+    if (sub === 'deferred') {
+      return st.deferred.map((d) => `${d.reason.padEnd(24)} ${d.event.kind} ${d.event.number ?? ''} ${d.event.title} ${d.label ?? ''}`).join('\n') || 'nothing deferred';
+    }
+    return [
+      `watch ${options.watchRepo || rt.repo}: ${st.paused ? 'paused' : 'running'}, ${Object.keys(st.items).length} items, ${Object.keys(st.runs).length} runs cached`,
+      `interval ${Math.round(st.interval / 1000)}s, last poll ${st.lastPoll ? new Date(st.lastPoll).toISOString() : 'never'}, failures ${st.failures}`,
+      `deferred ${st.deferred.length}, self login ${st.login ?? 'unknown'}, cursor ${st.cursor}`,
+    ].join('\n');
+  }
+
+  on('tool.call', { tool: 'mcp__sift__watch' }, async ($, e) => {
+    const rt = runtime;
+    const action = String((e as unknown as { action?: string }).action ?? 'status');
+    if (!rt) return { result: [{ type: 'text', text: 'sift is not bound yet' }] };
+    if (!['status', 'poll', 'pause', 'resume', 'reset', 'deferred'].includes(action)) return { deny: `unknown watch action ${action}` };
+    return { result: [{ type: 'text', text: await watchControl(rt, action) }] };
+  });
+
   on('tool.call', { tool: 'mcp__sift__status' }, async () => {
     const rt = runtime;
     return { result: [{ type: 'text', text: rt ? await statusText(rt) : 'sift is not bound yet' }] };
@@ -520,26 +554,7 @@ export const register: Register = (on, rawOptions) => {
       await rt.log.clear();
       return { text: 'decision log cleared' };
     }
-    if (head === 'watch') {
-      const w = rt.watcher;
-      if (!w) return { text: 'watch is off (enable the watch option and restart the session)' };
-      const sub = rest[0] ?? 'status';
-      if (sub === 'pause') await w.pause();
-      else if (sub === 'resume') await w.resume();
-      else if (sub === 'reset') await w.reset();
-      else if (sub === 'poll') await w.tick();
-      const s = w.snapshot();
-      if (sub === 'deferred') {
-        return { text: s.deferred.map((d) => `${d.reason.padEnd(24)} ${d.event.kind} ${d.event.number ?? ''} ${d.event.title} ${d.label ?? ''}`).join('\n') || 'nothing deferred' };
-      }
-      return {
-        text: [
-          `watch ${options.watchRepo || rt.repo}: ${s.paused ? 'paused' : 'running'}, ${Object.keys(s.items).length} items, ${Object.keys(s.runs).length} runs cached`,
-          `interval ${Math.round(s.interval / 1000)}s, last poll ${s.lastPoll ? new Date(s.lastPoll).toISOString() : 'never'}, failures ${s.failures}`,
-          `deferred ${s.deferred.length}, self login ${s.login ?? 'unknown'}, cursor ${s.cursor}`,
-        ].join('\n'),
-      };
-    }
+    if (head === 'watch') return { text: await watchControl(rt, rest[0] ?? 'status') };
     return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift watch status|poll|pause|resume|reset|deferred` };
   });
 };
