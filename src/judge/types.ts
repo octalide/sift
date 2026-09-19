@@ -43,9 +43,12 @@ export type Answers = Record<string, Answer>;
 
 export type JudgeFailure = 'disabled' | 'unavailable' | 'rejected' | 'malformed';
 
+// what a call cost: the backend's own count when it reports one, else an estimate from the bytes sent and received
+export type Usage = { requestTokens: number; responseTokens: number; source: 'backend' | 'estimate' };
+
 export type Judgement =
-  | { ok: true; answers: Answers; backend: string; latencyMs: number }
-  | { ok: false; reason: JudgeFailure; message: string; backend: string; status?: number };
+  | { ok: true; answers: Answers; backend: string; latencyMs: number; usage?: Usage }
+  | { ok: false; reason: JudgeFailure; message: string; backend: string; status?: number; usage?: Usage };
 
 export interface Judge {
   readonly name: string;

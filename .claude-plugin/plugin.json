@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
@@ -191,6 +191,12 @@
       "description": "Register sift_grade (packs: issue, pr, commit, release, rules) and sift_judge (raw typed questions) as tools.",
       "default": true
     },
+    "message": {
+      "type": "boolean",
+      "title": "Peer message triage",
+      "description": "Judge every message from another session with the message pack before it is queued. Not actionable: held into a digest line that rides with the next delivery or prompt. Otherwise delivered with its scores (actionable, kind, urgency, and for messages that reference a PR or issue, whether the claims are measured and the item carries the evidence) on the first line.",
+      "default": false
+    },
     "gate": {
       "type": "boolean",
       "title": "Command gate",
@@ -202,6 +208,12 @@
       "title": "Conventions",
       "description": "Repository conventions in the shape of .sift/config.json, as inline JSON or a path relative to the repo root. Applied over the defaults and under each repo's own .sift/config.json. Empty uses the neutral defaults: no commit format, version or changelog checks.",
       "default": ""
+    },
+    "gateOutbound": {
+      "type": "boolean",
+      "title": "Outbound text gate",
+      "description": "Before a Discord message or a gh pr/issue/release create, comment or edit body goes out, check the channel's length limit (2000 for Discord) and judge the text against the repository rule documents. A broken rule denies the call, an unclear one logs.",
+      "default": false
     },
     "gateFailClosed": {
       "type": "boolean",

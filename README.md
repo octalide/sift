@@ -17,7 +17,9 @@ Everything sift does is built on that one call. Every module is a toggle, every 
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed, archives the full output under `~/.cache/sift/<session>/` and leaves a recovery note in the stub | on |
 | `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `mcp__sift__judge` answers raw typed questions | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
+| `message` | `session.receive` | judges every message from another session before it is queued: nothing actionable is held into a digest line that rides with the next delivery or prompt, the rest arrives with its scores on the first line | off |
 | `gate` | `tool.call` (pre) | judges Bash, Write and Edit calls against safety propositions and denies on a violated band | off |
+| `gateOutbound` | `tool.call` (pre) | checks text about to leave the session (a Discord message, a `gh pr`, `gh issue` or `gh release` create, comment or edit body) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
 | `route` | `turn.step` | lowers request effort for prompts the judge scores as routine | off |
 
@@ -48,7 +50,7 @@ Options live in `/config` under the plugin, or in `settings.json` under `pluginC
 claude --plugin-dir ./sift --settings '{"pluginConfigs":{"sift@inline":{"options":{"watch":true}}}}'
 ```
 
-`/sift` prints status and per-module decision counts (the same text is available to the model as the `mcp__sift__status` tool), with this session's decisions and failures separate from the ring shared by every session running the plugin. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` the recent decisions with their scores, `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watcher (also the `mcp__sift__watch` tool). The `watch` option starts it at boot; `start` arms it in a session that came up without it.
+`/sift` prints status and per-module decision counts (the same text is available to the model as the `mcp__sift__status` tool), with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by compaction and pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` the recent decisions with their scores, `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watcher (also the `mcp__sift__watch` tool). The `watch` option starts it at boot; `start` arms it in a session that came up without it.
 
 ## Grading
 
@@ -93,7 +95,7 @@ To apply one set of conventions across many repos, set the `config` option to a 
   "branches": { "protected": ["main", "dev"], "pattern": "^(feat|fix|chore|hotfix)/\\d+$" },
   "issues": { "requiredLabelGroups": [["bug", "feat", "docs", "chore"]], "milestone": true, "templateSections": ["Summary", "Acceptance"], "childLabels": ["task"] },
   "prs": { "linkIssue": true, "target": "dev", "templateSections": ["Summary", "Testing"] },
-  "rules": { "docs": ["CONTRIBUTING.md", "CLAUDE.md"] },
+  "rules": { "docs": ["CONTRIBUTING.md", "CLAUDE.md", "briar-systems/mach-std:MIGRATION.md@v6.0.0"], "maxRules": 200 },
   "release": {
     "scheme": "semver",
     "changelog": "CHANGELOG.md",
@@ -106,9 +108,25 @@ To apply one set of conventions across many repos, set the `config` option to a 
 
 A release grade reads the checkout when the session is inside the repo being graded (`ref` defaults to `HEAD`, and the working tree stands in for it so an uncommitted changelog promotion is graded before the commit). For any other repo, or from a directory that is no checkout, it reads GitHub: tags, the compare between the last tag and `ref`, and the manifest and changelog contents at each end. `ref` then defaults to the configured `prs.target` and otherwise to the default branch.
 
+`issues.requiredLabelGroups` lists label groups, one label from each required (`[["bug", "enhancement", "documentation"]]` asks for a type label). `issues.templateSections` names the second-level headings the body must carry with content under each. `issues.childLabels` marks labels whose issues must be a native sub-issue of a parent (the `issues/N/parent` link, not a body mention). `issues.milestone` requires one. These run in `grade issue` and, when the watch is on, on every new issue as it is filed, the watching session's own included: an issue that fails any of them is delivered with a `filing:` line naming the findings, whoever filed it. A family that files with the default GitHub labels and a two-section template would set:
+
+```json
+"issues": { "requiredLabelGroups": [["bug", "enhancement", "documentation"]], "templateSections": ["Problem", "Fix"], "childLabels": ["task"], "milestone": false }
+```
+
 `release.scheme` turns on version checking (`semver` is the only scheme today). `release.changelog` names the file whose top section must cover the commits. Leave either out and the release pack only judges the commits since the last tag.
 
 `release.zeroVerBreaking` is what a breaking change requires while the version is below 1.0.0 (`minor` by default, `major` to cut 1.0.0 on the first one). `release.manifests` lists files whose changes are release-worthy on their own, commit types aside: each entry names a TOML file, regexes over its dotted keys (`project.mach`, `dep.std.ref`) and the bump a change to one of them requires. The manifest at the last tag is compared with the one at `HEAD`, so a version line that the release itself moves is not matched unless a key pattern names it. The required bump is the higher of the commit bump and the manifest bump, and `release.bump` says which keys moved.
+
+## Outbound text
+
+With `gateOutbound: true` the text a tool call is about to send is checked before the call runs: Discord `send_message`, `send_dm`, `edit_message`, `send_webhook_message`, `create_forum_post` content and embed text, and the `--body`/`-b` value of `gh pr|issue|release create|comment|edit` in a Bash command, quoted or in a `$(cat <<'EOF' ... EOF)` heredoc. The channel's hard limit is mechanical (2000 characters for Discord) and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
+
+## Messages
+
+With `message: true` every peer delivery (another session's `SendMessage`) goes through the `message` pack before it is queued. The pack asks `actionable`, `kind` (question, task, result, blocked, status, noise) and `urgency`, and when the text references a pull request or issue (`https://github.com/o/r/pull/18`, `o/r#18`, or `#18` against the session's repo) sift fetches the item (body, checks, diff excerpt) and asks two more: `measured`, whether the claims are backed by something run or observed, and `evidenced`, whether the item itself carries that evidence. A message in the violated `actionable` band is consumed and held; the next delivered message or prompt carries `held meanwhile (n): <from>: <first line> [scores]`. Everything else arrives as sent with `[sift message from <name>] actionable 0.91, kind result, urgency soon, measured 0.40, evidenced 0.20` above it. The judge being unavailable delivers untouched, and `shadow` delivers with `(shadow: would hold)`.
+
+The same pack is available by hand: `grade(pack: "message", subject: "x", text: "<message>")`.
 
 ## Packs
 
@@ -132,6 +150,8 @@ A pack is data: a subject kind, a list of mechanical checks, and typed questions
 }
 ```
 
+`rules.docs` entries are paths in the checkout or `owner/repo:path[@ref]` read from GitHub, so a consumer PR can be graded against another repo's migration guide at a tag. Each paragraph or list item is one rule, and each row of a markdown table is one rule with its cells named by the header (`5.x: sort.sort[T](data, len, cmp); 6.0.0: sort.sort[T](data, len)`). Rules past `rules.maxRules` are dropped and `rules.present` says so. A pack with more questions than one request holds goes out in several, the subject repeated in each.
+
 A noul's optional `criteria` is Jev's shape, `{ "true": "...", "false": "..." }`, saying what a yes and a no mean. A choice's `criteria` maps keys to descriptions, a score's is an ordered list of legends.
 
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, and `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`). A pack may also carry `expand` to generate one question per entry of a subject list, which is how the rules pack turns every paragraph of CONTRIBUTING.md into a proposition.
@@ -145,11 +165,11 @@ Subject kinds and the checks they support:
 | `commit` | `commit.format` |
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
-| `event`, `text`, `command` | none |
+| `event`, `text`, `command`, `message` | none |
 
 ## Watch
 
-With `watch: true` the plugin polls the session's repository (or `watchRepo`) with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops, your own writes defer (`watchIgnoreSelf`, keyed on the `gh` login), new PRs deliver, label churn defers. Everything else goes through the `triage` pack, and an event whose `actionable` lands in the violated band is deferred.
+With `watch: true` the plugin polls the session's repository (or `watchRepo`) with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops, your own writes defer (`watchIgnoreSelf`, keyed on the `gh` login), new PRs deliver, a new issue is checked against the issue pack and delivers with its findings when it fails one (own writes otherwise defer under `watchIgnoreSelf`), label churn defers. Everything else goes through the `triage` pack, and an event whose `actionable` lands in the violated band is deferred.
 
 A delivery is one prompt:
 

@@ -24,3 +24,22 @@ export function estimateTokensOf(value: unknown): number {
 export function truncate(text: string, maxChars: number, note = '…'): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars)}${note}`;
 }
+
+// splits questions into requests that stay under the budget with the state repeated in each
+export function batchQuestions<Q>(questions: Record<string, Q>, stateTokens: number, maxRequestTokens: number): Record<string, Q>[] {
+  const batches: Record<string, Q>[] = [];
+  let current: Record<string, Q> = {};
+  let tokens = stateTokens;
+  for (const [id, q] of Object.entries(questions)) {
+    const cost = estimateTokens(JSON.stringify(q)) + 8;
+    if (tokens + cost > maxRequestTokens && Object.keys(current).length > 0) {
+      batches.push(current);
+      current = {};
+      tokens = stateTokens;
+    }
+    current[id] = q;
+    tokens += cost;
+  }
+  if (Object.keys(current).length > 0) batches.push(current);
+  return batches;
+}

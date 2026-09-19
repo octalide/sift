@@ -117,5 +117,9 @@ export const CHECKS: Record<string, Check> = {
     return top.length === 0 ? [warn('release.changelog', 'changelog has no section to promote')] : [];
   },
   'release.commits': (s, c) => commitFindings('release.commits', (s.facts['commits'] as ParsedCommit[]) ?? [], c),
-  'rules.present': (s) => (s.facts['has_rules'] ? [] : [info('rules.present', 'no rule documents found in the repo')]),
+  'rules.present': (s, c) => {
+    if (!s.facts['has_rules']) return [info('rules.present', 'no rule documents found in the repo')];
+    const total = Number(s.facts['total_rules'] ?? 0);
+    return total > c.rules.maxRules ? [warn('rules.present', `${c.rules.maxRules} of ${total} rules used, raise rules.maxRules to judge the rest`)] : [];
+  },
 };

@@ -11,10 +11,14 @@ const MAX = 500;
 export type Stats = {
   calls: number;
   failures: number;
-  byModule: Record<string, { calls: number; acted: number; shadow: number; latencyMs: number }>;
+  byModule: Record<string, { calls: number; acted: number; shadow: number; latencyMs: number; requestTokens: number; responseTokens: number; tokensRemoved: number }>;
   // this session alone; the ring holds every session that ran the plugin
-  session: { calls: number; failures: number; lastFailure?: Decision };
+  session: { calls: number; failures: number; lastFailure?: Decision; cost: Cost };
+  cost: Cost;
 };
+
+// judge tokens spent against context tokens taken out
+export type Cost = { requestTokens: number; responseTokens: number; tokensRemoved: number };
 
 // a bounded ring of decisions in the plugin store, the source of the /sift report
 export class DecisionLog {
@@ -70,22 +74,31 @@ export class DecisionLog {
   async stats(): Promise<Stats> {
     await this.flush();
     const all = ((await this.store.get(KEY)) as Decision[] | undefined) ?? [];
-    const stats: Stats = { calls: 0, failures: 0, byModule: {}, session: { calls: 0, failures: 0 } };
+    const zero = (): Cost => ({ requestTokens: 0, responseTokens: 0, tokensRemoved: 0 });
+    const add = (c: Cost, d: Decision) => {
+      c.requestTokens += d.requestTokens ?? 0;
+      c.responseTokens += d.responseTokens ?? 0;
+      if (!d.shadow) c.tokensRemoved += d.tokensRemoved ?? 0;
+    };
+    const stats: Stats = { calls: 0, failures: 0, byModule: {}, session: { calls: 0, failures: 0, cost: zero() }, cost: zero() };
     for (const d of all) {
       stats.calls += 1;
       if (!d.ok) stats.failures += 1;
+      add(stats.cost, d);
       if (this.session !== undefined && d.session === this.session) {
         stats.session.calls += 1;
+        add(stats.session.cost, d);
         if (!d.ok) {
           stats.session.failures += 1;
           stats.session.lastFailure = d;
         }
       }
-      const m = (stats.byModule[d.module] ??= { calls: 0, acted: 0, shadow: 0, latencyMs: 0 });
+      const m = (stats.byModule[d.module] ??= { calls: 0, acted: 0, shadow: 0, latencyMs: 0, requestTokens: 0, responseTokens: 0, tokensRemoved: 0 });
       m.calls += 1;
       if (d.shadow) m.shadow += 1;
       else if (d.action !== 'none' && d.action !== 'fallback') m.acted += 1;
       m.latencyMs += d.latencyMs ?? 0;
+      add(m, d);
     }
     return stats;
   }

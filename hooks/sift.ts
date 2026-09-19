@@ -2,19 +2,21 @@ import type { EngineInterface, PluginOptions, Register, SessionMessage } from 'c
 
 import { compact, COMPACT_DEFAULTS, reduction, type Message } from '../src/compact/compact.ts';
 import { gate as runGate, mentionsSecret } from '../src/gate/gate.ts';
+import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
 import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/config.ts';
 import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
+import { heldDigest, judgeMessage, messageRefs, messageSubject, refDetail, type Held } from '../src/message/message.ts';
 import { JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
-import { DecisionLog } from '../src/log.ts';
+import { DecisionLog, type Cost } from '../src/log.ts';
 import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
 import type { Pack, Report, Subject } from '../src/packs/types.ts';
 import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { routeEffort, type Effort } from '../src/route/route.ts';
-import { estimateTokens } from '../src/tokens.ts';
+import { estimateTokens, estimateTokensOf } from '../src/tokens.ts';
 import { Watcher } from '../src/watch/watcher.ts';
 
 type Options = {
@@ -47,7 +49,9 @@ type Options = {
   watchDeferMaxAgeHours: number;
   grade: boolean;
   gate: boolean;
+  message: boolean;
   gateFailClosed: boolean;
+  gateOutbound: boolean;
   classify: boolean;
   route: boolean;
   routeMinEffort: Effort;
@@ -85,7 +89,9 @@ const DEFAULTS: Options = {
   watchDeferMaxAgeHours: 24,
   grade: true,
   gate: false,
+  message: false,
   gateFailClosed: true,
+  gateOutbound: false,
   classify: false,
   route: false,
   routeMinEffort: 'low',
@@ -120,6 +126,8 @@ type Runtime = {
   startWatch: () => Promise<string | undefined>;
   sessionId: string;
   archiveDir: string;
+  // peer messages consumed since the last delivery, reported as one digest line
+  held: Held[];
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -204,6 +212,11 @@ export const register: Register = (on, rawOptions) => {
         const kind = /^#?\d+$/.test(ref) ? (opts.text === 'issue' ? 'issue' : 'pr') : /^[0-9a-f]{7,40}$|\.\./.test(ref) ? 'commit' : 'text';
         return rulesSubject(rt.gh, repo, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config, fs.read, fs.exists);
       }
+      case 'message': {
+        const text = opts.text ?? ref;
+        const refs = await Promise.all(messageRefs(text, repo).map((r) => refDetail(rt.gh, r)));
+        return messageSubject(text, 'grade', refs);
+      }
       default:
         return textSubject(opts.text ?? ref);
     }
@@ -275,6 +288,7 @@ export const register: Register = (on, rawOptions) => {
           store,
           judge,
           pack: triagePack,
+          issuePack: rt.packs['issue'],
           config,
           now: () => Date.now(),
           deliver: async (text) => {
@@ -311,7 +325,7 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, archiveDir: `${home}/.cache/sift/${sessionId}` };
+    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, archiveDir: `${home}/.cache/sift/${sessionId}`, held: [] };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -408,6 +422,20 @@ export const register: Register = (on, rawOptions) => {
         }
       }
     }
+    const outbound = options.gateOutbound ? outboundOf(e.tool, e as unknown as Record<string, unknown>) : undefined;
+    if (outbound) {
+      const rulesPack = rt.packs['rules'];
+      const subject = rulesPack ? await rulesSubject(rt.gh, rt.repo, { kind: 'text', ref: outbound.text }, rt.config, readFile, existsFile) : undefined;
+      if (rulesPack && subject) {
+        const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, rt.config);
+        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
+        for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
+        if (!decision.allow) {
+          if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
+          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
+        }
+      }
+    }
     const r = await next(e);
     if (!options.prune || !pruneTools(options).includes(e.tool) || r.deny !== undefined || r.isError) return r;
     const text = e.tool === 'Bash' ? (r.result as { stdout?: string } | undefined)?.stdout : e.tool === 'Read' ? (r.result as { type?: string; file?: { content?: string } } | undefined)?.file?.content : undefined;
@@ -435,7 +463,7 @@ export const register: Register = (on, rawOptions) => {
     }
     const before = estimateTokens(text);
     const after = estimateTokens(pruned.text);
-    record('prune', options.shadow ? 'would-prune' : 'pruned', { digest: `${e.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens`, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
+    record('prune', options.shadow ? 'would-prune' : 'pruned', { digest: `${e.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens`, tokensRemoved: before - after, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
     $.ui.toast(`sift${options.shadow ? ' (shadow)' : ''}: ${e.tool} output ${pruned.dropped}/${pruned.chunks} chunks dropped, ~${before - after} tokens`);
     if (options.shadow) return r;
     if (e.tool === 'Bash') return { result: { ...(r.result as Record<string, unknown>), stdout: pruned.text } };
@@ -466,7 +494,7 @@ export const register: Register = (on, rawOptions) => {
         $.ui.log(`sift compact: built-in summary (${summary}, under ${Math.round(options.compactMinReduction * 100)}% minimum)`);
         return next(e);
       }
-      record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: summary });
+      record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: summary, tokensRemoved: Math.max(0, estimateTokensOf(e.messages) - estimateTokensOf(result.messages)) });
       if (options.shadow) {
         $.ui.log(`sift compact (shadow): would keep ${result.messages.length}/${e.messages.length} messages, ${summary}`);
         return next(e);
@@ -479,11 +507,48 @@ export const register: Register = (on, rawOptions) => {
     }
   });
 
-  // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count
+  // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count.
+  // peer messages held since the last delivery ride along the same way
   on('prompt.submit', async (_$, e, next) => {
     const warnings = runtime?.log.takeWarnings() ?? [];
-    if (warnings.length === 0) return next(e);
-    return next({ ...e, context: [...(e.context ?? []), ...warnings] });
+    const held = takeHeld();
+    if (warnings.length === 0 && !held) return next(e);
+    return next({ ...e, context: [...(e.context ?? []), ...warnings, ...(held ? [held] : [])] });
+  });
+
+  function takeHeld(): string {
+    if (!runtime || runtime.held.length === 0) return '';
+    const digest = heldDigest(runtime.held);
+    runtime.held = [];
+    return digest;
+  }
+
+  // a peer message is judged before it is queued: nothing actionable is held into a digest, the rest arrives with its scores
+  on('session.receive', async (_$, e, next) => {
+    const rt = runtime;
+    if (!rt || !options.message || options.backend === 'off') return next(e);
+    if (e.origin.kind !== 'peer' && e.origin.kind !== 'peer-send-message') return next(e);
+    const pack = rt.packs['message'];
+    if (!pack) return next(e);
+    const from = /from-name="([^"]+)"/.exec(e.text)?.[1] ?? e.origin.kind;
+    const body = e.text.replace(/^<cross-session-message[^>]*>\s*/, '').replace(/\s*<\/cross-session-message>[\s\S]*$/, '');
+    const head = body.split('\n').find((l) => l.trim().length > 0) ?? '';
+    const refs = await Promise.all(messageRefs(body, rt.repo).map((r) => refDetail(rt.gh, r)));
+    const triage = await judgeMessage(pack, messageSubject(body, e.origin.kind, refs), rt.judge, rt.config);
+    const digest = `${from}: ${head.slice(0, 60)}`;
+    if (triage.error) {
+      record('message', 'fallback', { ok: false, reason: triage.error, digest });
+      return next(e);
+    }
+    if (triage.action === 'consume' && !options.shadow) {
+      record('message', 'consumed', { digest, answers: { label: triage.label } });
+      rt.held.push({ at: Date.now(), from, head, label: triage.label });
+      return { consumed: `sift: not actionable (${triage.label})` };
+    }
+    record('message', options.shadow && triage.action === 'consume' ? 'would-consume' : 'delivered', { digest, answers: { label: triage.label } });
+    const held = takeHeld();
+    const scores = `[sift message from ${from}] ${triage.label}${options.shadow && triage.action === 'consume' ? ' (shadow: would hold)' : ''}`;
+    return next({ ...e, text: [scores, e.text, held].filter(Boolean).join('\n') });
   });
 
   on('turn.complete', async ($, e, next) => {
@@ -530,11 +595,19 @@ export const register: Register = (on, rawOptions) => {
     return yield* next({ ...e, effort: decision.effort });
   });
 
+  const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : String(n));
+
   async function statusText(rt: Runtime): Promise<string> {
     const stats = await rt.log.stats();
     const modules = Object.entries(stats.byModule)
-      .map(([m, s]) => `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms`)
+      .map(
+        ([m, s]) =>
+          `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms` +
+          (s.requestTokens || s.responseTokens ? `  in ${k(s.requestTokens)} out ${k(s.responseTokens)}` : '') +
+          (s.tokensRemoved ? `  removed ${k(s.tokensRemoved)}` : ''),
+      )
       .join('\n');
+    const cost = (c: Cost) => `judge in ${k(c.requestTokens)}, out ${k(c.responseTokens)}, context removed ${k(c.tokensRemoved)}`;
     const enabled = (Object.keys(options) as (keyof Options)[]).filter((k) => typeof options[k] === 'boolean' && options[k]).join(', ');
     const last = stats.session.lastFailure;
     const w = rt.watcher?.snapshot();
@@ -545,6 +618,7 @@ export const register: Register = (on, rawOptions) => {
       watch,
       `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,
       `all sessions (ring of 500): ${stats.calls} decisions, ${stats.failures} failures`,
+      `cost this session: ${cost(stats.session.cost)}; ring: ${cost(stats.cost)} (tokens, estimated unless the backend reports them)`,
       modules || '  no decisions yet',
     ].join('\n');
   }
