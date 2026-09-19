@@ -226,6 +226,64 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       },
     },
   },
+  message: {
+    name: 'message',
+    subject: 'message',
+    description: 'Does this message from another session need the receiver to act, and where it claims results, does the linked work carry them?',
+    checks: [],
+    questions: {
+      actionable: {
+        type: 'noul',
+        instructions: 'This message needs the receiving session to do something now: decide, answer, verify, dispatch, or act on a result.',
+        criteria: {
+          true: 'The sender waits on a decision or answer, reports something that needs verifying or relaying, or asks for work.',
+          false: 'An acknowledgement, a status echo with nothing new, a sweep reply that found nothing, or a duplicate of something already handled.',
+        },
+        severity: 'fail',
+        lo: 0.3,
+        hi: 0.6,
+      },
+      kind: {
+        type: 'choice',
+        instructions: 'What kind of message is this?',
+        criteria: {
+          question: 'the sender asks for a decision or fact and waits',
+          task: 'the sender assigns or requests work',
+          result: 'the sender reports finished work with something to verify',
+          blocked: 'the sender cannot proceed and says what unblocks it',
+          status: 'the sender reports state with nothing to decide or verify',
+          noise: 'an acknowledgement or contentless reply',
+        },
+        severity: 'info',
+      },
+      urgency: {
+        type: 'score',
+        instructions: 'How soon does this need attention?',
+        criteria: ['later: can wait for the next scheduled look', 'soon: should be handled this session', 'now: the sender or something else is blocked on it'],
+        severity: 'info',
+      },
+      measured: {
+        type: 'noul',
+        instructions: 'The claims in the message about the referenced work are backed by something that was run or observed, not inferred from reading.',
+        criteria: {
+          true: 'The message cites a run, a test result, a check, a command output, or a specific observation for each claim.',
+          false: 'The message asserts outcomes without saying what produced them, or reasons from the code alone.',
+        },
+        when: 'has_refs',
+        severity: 'warn',
+      },
+      evidenced: {
+        type: 'noul',
+        instructions: 'The referenced pull request or issue itself carries the evidence for what the message claims about it.',
+        criteria: {
+          true: 'The linked item shows the claimed change, tests or checks; a reader can confirm the claim there without trusting the message.',
+          false: 'The linked item lacks what the message claims, or shows something different.',
+        },
+        when: 'has_refs',
+        severity: 'warn',
+      },
+    },
+  },
   gate: {
     name: 'gate',
     subject: 'command',
