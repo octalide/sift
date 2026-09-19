@@ -245,9 +245,12 @@ export async function rulesSubject(
 ): Promise<Subject> {
   const rules: { source: string; text: string }[] = [];
   for (const doc of config.rules.docs) {
-    if (!(await exists(doc))) continue;
-    for (const rule of ruleParagraphs(await read(doc))) rules.push({ source: doc, text: rule });
+    const text = await ruleDoc(doc, gh, read, exists);
+    if (text === undefined) continue;
+    for (const rule of ruleParagraphs(text)) rules.push({ source: doc, text: rule });
   }
+  const total = rules.length;
+  rules.splice(config.rules.maxRules);
   let subject: Record<string, unknown> = { kind: target.kind, ref: target.ref };
   if (gh && repo && target.kind === 'pr') {
     const s = await prSubject(gh, repo, Number(target.ref.replace(/^#/, '')), config);
@@ -265,7 +268,7 @@ export async function rulesSubject(
     kind: 'rules',
     ref: `${target.kind}:${truncate(target.ref, 40)}`,
     state: { subject, rules: rules.map((r, i) => ({ id: `r${i + 1}`, source: r.source, text: r.text })) },
-    facts: { rules, has_rules: rules.length > 0 },
+    facts: { rules, has_rules: rules.length > 0, total_rules: total },
     options: {},
   };
 }
@@ -290,6 +293,31 @@ export function topSection(changelog: string): string {
 }
 
 // bullets and short paragraphs that read as rules, headings kept as context prefix
+// a rule doc is a path in the checkout or owner/repo:path[@ref] read from github; undefined when absent
+export async function ruleDoc(doc: string, gh: Gh | undefined, read: ReadLike, exists: ExistsLike): Promise<string | undefined> {
+  const remote = /^([\w.-]+\/[\w.-]+):([^@]+?)(?:@(.+))?$/.exec(doc);
+  if (!remote) return (await exists(doc)) ? read(doc) : undefined;
+  if (!gh) return undefined;
+  const [, repo, path, ref] = remote;
+  return gh.text(`repos/${repo}/contents/${path}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`, 'application/vnd.github.raw+json').catch(() => undefined);
+}
+
+// a markdown table row is one rule, its cells named by the header: "5.x: a; 6.0.0: b"
+function tableRows(lines: string[]): string[] {
+  const cells = (line: string) =>
+    line
+      .trim()
+      .replace(/^\||\|$/g, '')
+      .split('|')
+      .map((c) => c.trim());
+  const header = cells(lines[0]!);
+  return lines
+    .slice(2)
+    .map(cells)
+    .filter((row) => row.some((c) => c.length > 0))
+    .map((row) => row.map((c, i) => (header[i] ? `${header[i]}: ${c}` : c)).join('; '));
+}
+
 export function ruleParagraphs(markdown: string): string[] {
   const out: string[] = [];
   let heading = '';
@@ -301,12 +329,23 @@ export function ruleParagraphs(markdown: string): string[] {
     out.push(heading ? `${heading}: ${text}` : text);
   };
   let inCode = false;
+  let table: string[] = [];
+  const flushTable = () => {
+    if (table.length >= 2) for (const row of tableRows(table)) out.push(heading ? `${heading}: ${row}` : row);
+    table = [];
+  };
   for (const line of markdown.split('\n')) {
     if (line.startsWith('```')) {
       inCode = !inCode;
       continue;
     }
     if (inCode) continue;
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      if (table.length === 0) flush();
+      table.push(line);
+      continue;
+    }
+    flushTable();
     const h = /^#{1,6}\s+(.+)$/.exec(line);
     if (h) {
       flush();
@@ -324,8 +363,9 @@ export function ruleParagraphs(markdown: string): string[] {
     }
     buffer.push(line.trim());
   }
+  flushTable();
   flush();
-  return out.slice(0, 120);
+  return out;
 }
 
 export function commitsOf(subject: Subject): ParsedCommit[] {
