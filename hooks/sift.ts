@@ -269,7 +269,12 @@ export const register: Register = (on, rawOptions) => {
       });
     }
 
-    await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|pause|resume|reset|deferred]' });
+    await $.tool.register({
+      name: 'status',
+      description: 'sift status: judge backend, enabled modules, whether the repo watch is running, and decision counts. Call it at session start to learn whether repository events will be delivered to you as prompts.',
+      inputSchema: { type: 'object', properties: {} },
+    });
+    await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|poll|pause|resume|reset|deferred]' });
 
     if (options.watch) {
       const repo = options.watchRepo || runtime.repo;
@@ -480,6 +485,28 @@ export const register: Register = (on, rawOptions) => {
     return yield* next({ ...e, effort: decision.effort });
   });
 
+  async function statusText(rt: Runtime): Promise<string> {
+    const stats = await rt.log.stats();
+    const modules = Object.entries(stats.byModule)
+      .map(([m, s]) => `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms`)
+      .join('\n');
+    const enabled = (Object.keys(options) as (keyof Options)[]).filter((k) => typeof options[k] === 'boolean' && options[k]).join(', ');
+    const w = rt.watcher?.snapshot();
+    const watch = !rt.watcher ? 'watch: off' : `watch: ${w!.paused ? 'paused' : 'running'} on ${options.watchRepo || rt.repo}, ${w!.deferred.length} deferred, last poll ${w!.lastPoll ? new Date(w!.lastPoll).toISOString() : 'never'}`;
+    return [
+      `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${rt.repo ?? 'none'}`,
+      `enabled: ${enabled}`,
+      watch,
+      `judge calls ${stats.calls}, failures ${stats.failures}`,
+      modules || '  no decisions yet',
+    ].join('\n');
+  }
+
+  on('tool.call', { tool: 'mcp__sift__status' }, async () => {
+    const rt = runtime;
+    return { result: [{ type: 'text', text: rt ? await statusText(rt) : 'sift is not bound yet' }] };
+  });
+
   on('command.run', { command: 'sift' }, async ($, e) => {
     const rt = runtime;
     if (!rt) return { text: 'sift is not bound yet' };
@@ -500,6 +527,7 @@ export const register: Register = (on, rawOptions) => {
       if (sub === 'pause') await w.pause();
       else if (sub === 'resume') await w.resume();
       else if (sub === 'reset') await w.reset();
+      else if (sub === 'poll') await w.tick();
       const s = w.snapshot();
       if (sub === 'deferred') {
         return { text: s.deferred.map((d) => `${d.reason.padEnd(24)} ${d.event.kind} ${d.event.number ?? ''} ${d.event.title} ${d.label ?? ''}`).join('\n') || 'nothing deferred' };
@@ -512,20 +540,7 @@ export const register: Register = (on, rawOptions) => {
         ].join('\n'),
       };
     }
-    const stats = await rt.log.stats();
-    const modules = Object.entries(stats.byModule)
-      .map(([m, s]) => `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms`)
-      .join('\n');
-    const enabled = (Object.keys(options) as (keyof Options)[]).filter((k) => typeof options[k] === 'boolean' && options[k]).join(', ');
-    return {
-      text: [
-        `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${rt.repo ?? 'none'}`,
-        `enabled: ${enabled}`,
-        `judge calls ${stats.calls}, failures ${stats.failures}`,
-        modules || '  no decisions yet',
-        'commands: /sift log [n], /sift clear, /sift watch status|pause|resume|reset|deferred',
-      ].join('\n'),
-    };
+    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift watch status|poll|pause|resume|reset|deferred` };
   });
 };
 

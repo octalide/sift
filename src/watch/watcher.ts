@@ -263,6 +263,12 @@ export class Watcher {
       const reviews = await this.host.gh.json<{ user: { login: string }; state: string; body: string }[]>(`repos/${repo}/pulls/${e.number}/reviews?per_page=100`);
       const r = reviews[reviews.length - 1];
       if (r) detail.latestReview = { by: r.user.login, state: r.state, text: r.body };
+      // a review made of inline comments alone has an empty body, the comments carry the ask
+      const inline = await this.host.gh.json<{ user: { login: string }; path: string; body: string }[]>(
+        `repos/${repo}/pulls/${e.number}/comments?per_page=1&direction=desc&sort=created`,
+      );
+      const c = inline[0];
+      if (c) detail.latestReviewComment = { by: c.user.login, path: c.path, text: c.body };
     }
     return detail;
   }
