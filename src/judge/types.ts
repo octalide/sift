@@ -29,9 +29,11 @@ export type ChoiceAnswer = {
   probabilities: Record<string, number>;
   confidence: number;
 };
+// score is the most likely level index, expected the probability-weighted position between levels
 export type ScoreAnswer = {
   type: 'score';
   score: number;
+  expected: number;
   legend: string;
   probabilities: number[];
   confidence: number;

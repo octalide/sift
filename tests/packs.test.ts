@@ -83,7 +83,7 @@ describe('mechanical checks', () => {
       facts: { labels: ['docs'], sections: { Summary: '<!-- fill me -->' }, has_others: false },
       options: {},
     };
-    const report = await runPack(BUILTIN_PACKS['issue']!, subject, answering({ substantive: { type: 'noul', p: 0.9 }, single_repo: { type: 'noul', p: 0.9 }, needs_parent: { type: 'noul', p: 0.1 }, readiness: { type: 'score', score: 2, legend: 'ready', probabilities: [0, 0, 1], confidence: 1 } }), config);
+    const report = await runPack(BUILTIN_PACKS['issue']!, subject, answering({ substantive: { type: 'noul', p: 0.9 }, single_repo: { type: 'noul', p: 0.9 }, needs_parent: { type: 'noul', p: 0.1 }, readiness: { type: 'score', score: 2, expected: 2, legend: 'ready', probabilities: [0, 0, 1], confidence: 1 } }), config);
     const checks = report.mechanical.map((f) => `${f.check}:${f.severity}`);
     expect(checks).toContain('issue.labels:fail');
     expect(checks).toContain('issue.milestone:fail');
@@ -118,7 +118,7 @@ describe('pack materialization', () => {
         workaround: { type: 'noul', p: 0.1 },
         contract_change: { type: 'noul', p: 0.5 },
         tests_cover: { type: 'noul', p: 0.8 },
-        risk: { type: 'score', score: 0, legend: 'low', probabilities: [1, 0, 0], confidence: 1 },
+        risk: { type: 'score', score: 0, expected: 0, legend: 'low', probabilities: [1, 0, 0], confidence: 1 },
       }),
       DEFAULT_CONFIG,
     );
