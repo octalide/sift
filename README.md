@@ -59,6 +59,7 @@ grade(pack: "pr", subject: "42")
 grade(pack: "issue", subject: "17")
 grade(pack: "commit", subject: "main..HEAD")
 grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
+grade(pack: "release", subject: "v1.4.0", repo: "o/r", ref: "dev")  # any repo, no checkout needed
 grade(pack: "rules", subject: "42")            # a PR against the repo's rule documents
 grade(pack: "rules", subject: "x", text: "...") # free text against the rules
 ```
@@ -102,6 +103,8 @@ To apply one set of conventions across many repos, set the `config` option to a 
   }
 }
 ```
+
+A release grade reads the checkout when the session is inside the repo being graded (`ref` defaults to `HEAD`, and the working tree stands in for it so an uncommitted changelog promotion is graded before the commit). For any other repo, or from a directory that is no checkout, it reads GitHub: tags, the compare between the last tag and `ref`, and the manifest and changelog contents at each end. `ref` then defaults to the configured `prs.target` and otherwise to the default branch.
 
 `release.scheme` turns on version checking (`semver` is the only scheme today). `release.changelog` names the file whose top section must cover the commits. Leave either out and the release pack only judges the commits since the last tag.
 
