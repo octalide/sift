@@ -112,6 +112,8 @@ type Runtime = {
   root?: string;
   gh: Gh;
   watcher?: Watcher;
+  // builds and starts the watcher; returns the reason when it cannot
+  startWatch: () => Promise<string | undefined>;
   sessionId: string;
   archiveDir: string;
 };
@@ -235,7 +237,56 @@ export const register: Register = (on, rawOptions) => {
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
     const home = (await $.env.get('HOME')) ?? '/tmp';
     const sessionId = await $.session.id();
-    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, sessionId, archiveDir: `${home}/.cache/sift/${sessionId}` };
+    const startWatch = async (): Promise<string | undefined> => {
+      const rt = ready();
+      if (rt.watcher) return undefined;
+      const repo = options.watchRepo || rt.repo;
+      const triagePack = rt.packs['triage'];
+      if (!repo) return 'no repository to watch (set watchRepo or run in a checkout with a GitHub remote)';
+      if (!triagePack) return 'triage pack missing';
+      const watcher = new Watcher(
+        {
+          gh,
+          store,
+          judge,
+          pack: triagePack,
+          config,
+          now: () => Date.now(),
+          deliver: async (text) => {
+            if (options.watchDelivery === 'log') {
+              for (const line of text.split('\n')) $.ui.log(line);
+              return;
+            }
+            await $.prompt.submit({ text });
+          },
+          log: (text) => $.ui.log(text),
+          status: (text) => $.ui.status(text),
+          schedule: (ms, fn) => $.clock.after(ms, fn),
+          onDecision: (event, action, label) => rt.log.push({ at: Date.now(), module: 'watch', backend: judge.name, ok: true, digest: `${event.id} ${event.changes.join(',')}`, action, shadow: options.shadow, answers: { label } }),
+        },
+        {
+          repo,
+          minIntervalMs: options.watchMinInterval * 1000,
+          maxIntervalMs: options.watchMaxInterval * 1000,
+          deferMaxAgeMs: options.watchDeferMaxAgeHours * 3600 * 1000,
+          seedWindowMs: 90 * 24 * 3600 * 1000,
+          rateFloor: 500,
+          shadow: options.shadow,
+          rules: {
+            ignoreSelf: options.watchIgnoreSelf,
+            ignoreBots: options.watchIgnoreBots,
+            ci: options.watchCi,
+            triage: options.watchTriage && options.backend !== 'off',
+            protectedBranches: config.branches.protected,
+            branchPattern: config.branches.pattern,
+          },
+        },
+      );
+      rt.watcher = watcher;
+      await watcher.start();
+      return undefined;
+    };
+    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, archiveDir: `${home}/.cache/sift/${sessionId}` };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -274,63 +325,16 @@ export const register: Register = (on, rawOptions) => {
       description: 'sift status: judge backend, enabled modules, whether the repo watch is running, and decision counts. Call it at session start to learn whether repository events will be delivered to you as prompts.',
       inputSchema: { type: 'object', properties: {} },
     });
-    if (options.watch) {
-      await $.tool.register({
-        name: 'watch',
-        description: 'Control the sift repo watch: status, poll (one poll now, delivering anything new), pause (stop polling until resumed), resume, reset (forget the cursor and reseed), deferred (list events held back).',
-        inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'poll', 'pause', 'resume', 'reset', 'deferred'] } } },
-      });
-    }
-    await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|poll|pause|resume|reset|deferred]' });
+    await $.tool.register({
+      name: 'watch',
+      description: 'Control the sift repo watch: status, start (build and start the watch when the session came up without it), poll (one poll now, delivering anything new), pause (stop polling until resumed), resume, reset (forget the cursor and reseed), deferred (list events held back).',
+      inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'start', 'poll', 'pause', 'resume', 'reset', 'deferred'] } } },
+    });
+    await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|start|poll|pause|resume|reset|deferred]' });
 
     if (options.watch) {
-      const repo = options.watchRepo || runtime.repo;
-      const triagePack = packs['triage'];
-      if (!repo) $.ui.log('sift watch: no repository to watch (set watchRepo or run in a checkout with a GitHub remote)');
-      else if (!triagePack) $.ui.log('sift watch: triage pack missing');
-      else {
-        const rt = runtime;
-        const watcher = new Watcher(
-          {
-            gh,
-            store,
-            judge,
-            pack: triagePack,
-            config,
-            now: () => Date.now(),
-            deliver: async (text) => {
-              if (options.watchDelivery === 'log') {
-                for (const line of text.split('\n')) $.ui.log(line);
-                return;
-              }
-              await $.prompt.submit({ text });
-            },
-            log: (text) => $.ui.log(text),
-            status: (text) => $.ui.status(text),
-            schedule: (ms, fn) => $.clock.after(ms, fn),
-            onDecision: (event, action, label) => rt.log.push({ at: Date.now(), module: 'watch', backend: judge.name, ok: true, digest: `${event.id} ${event.changes.join(',')}`, action, shadow: options.shadow, answers: { label } }),
-          },
-          {
-            repo,
-            minIntervalMs: options.watchMinInterval * 1000,
-            maxIntervalMs: options.watchMaxInterval * 1000,
-            deferMaxAgeMs: options.watchDeferMaxAgeHours * 3600 * 1000,
-            seedWindowMs: 90 * 24 * 3600 * 1000,
-            rateFloor: 500,
-            shadow: options.shadow,
-            rules: {
-              ignoreSelf: options.watchIgnoreSelf,
-              ignoreBots: options.watchIgnoreBots,
-              ci: options.watchCi,
-              triage: options.watchTriage && options.backend !== 'off',
-              protectedBranches: config.branches.protected,
-              branchPattern: config.branches.pattern,
-            },
-          },
-        );
-        runtime.watcher = watcher;
-        await watcher.start();
-      }
+      const reason = await startWatch();
+      if (reason) $.ui.log(`sift watch: ${reason}`);
     }
     return next(e);
   });
@@ -512,8 +516,12 @@ export const register: Register = (on, rawOptions) => {
 
   // the watch controls, shared by /sift watch and the watch tool
   async function watchControl(rt: Runtime, sub: string): Promise<string> {
+    if (sub === 'start') {
+      const reason = await rt.startWatch();
+      if (reason) return `watch cannot start: ${reason}`;
+    }
     const w = rt.watcher;
-    if (!w) return 'watch is off (enable the watch option and restart the session)';
+    if (!w) return 'watch is off (start it with the start action, or set the watch option to start it at boot)';
     if (sub === 'pause') await w.pause();
     else if (sub === 'resume') await w.resume();
     else if (sub === 'reset') await w.reset();
@@ -533,7 +541,7 @@ export const register: Register = (on, rawOptions) => {
     const rt = runtime;
     const action = String((e as unknown as { action?: string }).action ?? 'status');
     if (!rt) return { result: [{ type: 'text', text: 'sift is not bound yet' }] };
-    if (!['status', 'poll', 'pause', 'resume', 'reset', 'deferred'].includes(action)) return { deny: `unknown watch action ${action}` };
+    if (!['status', 'start', 'poll', 'pause', 'resume', 'reset', 'deferred'].includes(action)) return { deny: `unknown watch action ${action}` };
     return { result: [{ type: 'text', text: await watchControl(rt, action) }] };
   });
 
@@ -556,7 +564,7 @@ export const register: Register = (on, rawOptions) => {
       return { text: 'decision log cleared' };
     }
     if (head === 'watch') return { text: await watchControl(rt, rest[0] ?? 'status') };
-    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift watch status|poll|pause|resume|reset|deferred` };
+    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift watch status|start|poll|pause|resume|reset|deferred` };
   });
 };
 
