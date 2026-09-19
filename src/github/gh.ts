@@ -20,11 +20,14 @@ export class GhError extends Error {
   }
 }
 
+// where a spawn runs, resolved per call so a directory removed after session start is never reused
+export type CwdLike = () => Promise<string | undefined>;
+
 // gh api over a process runner; conditional requests answer 304 with an empty body
 export class Gh {
   constructor(
     private readonly run: RunLike,
-    private readonly cwd?: string,
+    private readonly cwd: CwdLike = async () => undefined,
   ) {}
 
   async api(path: string, opts: { etag?: string; accept?: string; paginate?: boolean; method?: string; fields?: Record<string, string> } = {}): Promise<ApiResponse> {
@@ -35,7 +38,7 @@ export class Gh {
     if (opts.accept) argv.push('-H', `Accept: ${opts.accept}`);
     for (const [k, v] of Object.entries(opts.fields ?? {})) argv.push('-f', `${k}=${v}`);
     argv.push(path);
-    const result = await this.run(argv, { cwd: this.cwd, timeoutMs: 60_000 });
+    const result = await this.run(argv, { cwd: await this.cwd(), timeoutMs: 60_000 });
     const parsed = splitResponse(result.stdout);
     if (parsed.status === 0) {
       throw new GhError(result.stderr.trim() || `gh api ${path} produced no response`, result.exitCode);
@@ -57,7 +60,7 @@ export class Gh {
     const sep = path.includes('?') ? '&' : '?';
     for (let page = 1; page <= maxPages; page++) {
       const argv = ['gh', 'api', '--jq', jq, `${path}${sep}per_page=${perPage}&page=${page}`];
-      const result = await this.run(argv, { cwd: this.cwd, timeoutMs: 60_000 });
+      const result = await this.run(argv, { cwd: await this.cwd(), timeoutMs: 60_000 });
       if (result.exitCode !== 0) throw new GhError(`gh api ${path} page ${page}: ${result.stderr.trim()}`, result.exitCode);
       const items = JSON.parse(result.stdout.trim() || '[]') as T[];
       out.push(...items);
@@ -71,7 +74,7 @@ export class Gh {
   }
 
   async git(args: string[]): Promise<string> {
-    const result = await this.run(['git', ...args], { cwd: this.cwd, timeoutMs: 60_000 });
+    const result = await this.run(['git', ...args], { cwd: await this.cwd(), timeoutMs: 60_000 });
     if (result.exitCode !== 0) throw new GhError(`git ${args.join(' ')}: ${result.stderr.trim()}`, result.exitCode);
     return result.stdout;
   }
@@ -88,7 +91,7 @@ export class Gh {
   async repoInfo(): Promise<{ nameWithOwner: string; defaultBranch: string } | undefined> {
     const result = await this.run(
       ['gh', 'repo', 'view', '--json', 'nameWithOwner,defaultBranchRef', '--jq', '{nameWithOwner, defaultBranch: .defaultBranchRef.name}'],
-      { cwd: this.cwd, timeoutMs: 30_000 },
+      { cwd: await this.cwd(), timeoutMs: 30_000 },
     );
     if (result.exitCode !== 0) return undefined;
     try {
