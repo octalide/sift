@@ -12,17 +12,36 @@ export type Stats = {
   calls: number;
   failures: number;
   byModule: Record<string, { calls: number; acted: number; shadow: number; latencyMs: number }>;
+  // this session alone; the ring holds every session that ran the plugin
+  session: { calls: number; failures: number; lastFailure?: Decision };
 };
 
 // a bounded ring of decisions in the plugin store, the source of the /sift report
 export class DecisionLog {
   private pending: Decision[] = [];
   private flushing?: Promise<void>;
-  constructor(private readonly store: StoreLike) {}
+  private unreported: Decision[] = [];
+  constructor(
+    private readonly store: StoreLike,
+    private readonly session?: string,
+  ) {}
 
   push(decision: Decision): void {
-    this.pending.push(decision);
+    const stamped = decision.session === undefined && this.session !== undefined ? { ...decision, session: this.session } : decision;
+    if (!stamped.ok) this.unreported.push(stamped);
+    this.pending.push(stamped);
     void this.flush();
+  }
+
+  // failures since the last time this was called, one line per module, for a warning at the next prompt
+  takeWarnings(): string[] {
+    const bursts = new Map<string, Decision[]>();
+    for (const d of this.unreported) bursts.set(d.module, [...(bursts.get(d.module) ?? []), d]);
+    this.unreported = [];
+    return [...bursts.entries()].map(([module, ds]) => {
+      const last = ds[ds.length - 1]!;
+      return `sift ${module} fell back ${ds.length === 1 ? 'once' : `${ds.length} times`} since the last prompt (${last.backend}: ${last.reason ?? 'no reason'}), the built-in behaviour ran instead`;
+    });
   }
 
   private flush(): Promise<void> {
@@ -51,10 +70,17 @@ export class DecisionLog {
   async stats(): Promise<Stats> {
     await this.flush();
     const all = ((await this.store.get(KEY)) as Decision[] | undefined) ?? [];
-    const stats: Stats = { calls: 0, failures: 0, byModule: {} };
+    const stats: Stats = { calls: 0, failures: 0, byModule: {}, session: { calls: 0, failures: 0 } };
     for (const d of all) {
       stats.calls += 1;
       if (!d.ok) stats.failures += 1;
+      if (this.session !== undefined && d.session === this.session) {
+        stats.session.calls += 1;
+        if (!d.ok) {
+          stats.session.failures += 1;
+          stats.session.lastFailure = d;
+        }
+      }
       const m = (stats.byModule[d.module] ??= { calls: 0, acted: 0, shadow: 0, latencyMs: 0 });
       m.calls += 1;
       if (d.shadow) m.shadow += 1;
