@@ -17,7 +17,7 @@ export type Stats = {
 // a bounded ring of decisions in the plugin store, the source of the /sift report
 export class DecisionLog {
   private pending: Decision[] = [];
-  private flushing = false;
+  private flushing?: Promise<void>;
   constructor(private readonly store: StoreLike) {}
 
   push(decision: Decision): void {
@@ -25,27 +25,31 @@ export class DecisionLog {
     void this.flush();
   }
 
-  private async flush(): Promise<void> {
-    if (this.flushing) return;
-    this.flushing = true;
-    try {
-      while (this.pending.length > 0) {
-        const batch = this.pending.splice(0);
-        const current = ((await this.store.get(KEY)) as Decision[] | undefined) ?? [];
-        const next = [...current, ...batch].slice(-MAX);
-        await this.store.set(KEY, next);
+  private flush(): Promise<void> {
+    if (this.flushing) return this.flushing;
+    this.flushing = (async () => {
+      try {
+        while (this.pending.length > 0) {
+          const batch = this.pending.splice(0);
+          const current = ((await this.store.get(KEY)) as Decision[] | undefined) ?? [];
+          await this.store.set(KEY, [...current, ...batch].slice(-MAX));
+        }
+      } finally {
+        this.flushing = undefined;
       }
-    } finally {
-      this.flushing = false;
-    }
+    })();
+    return this.flushing;
   }
 
+  // readers see every decision pushed before the call
   async recent(limit = 50): Promise<Decision[]> {
+    await this.flush();
     const all = ((await this.store.get(KEY)) as Decision[] | undefined) ?? [];
     return all.slice(-limit);
   }
 
   async stats(): Promise<Stats> {
+    await this.flush();
     const all = ((await this.store.get(KEY)) as Decision[] | undefined) ?? [];
     const stats: Stats = { calls: 0, failures: 0, byModule: {} };
     for (const d of all) {
