@@ -1,6 +1,6 @@
 // the noun this plugin adds to `$`, for its own modules and for other plugins that depend on it
 export type SiftQuestion =
-  | { type: 'noul'; instructions: string; criteria?: string }
+  | { type: 'noul'; instructions: string; criteria?: { true: string; false: string } }
   | { type: 'choice'; instructions: string; criteria: Record<string, string> }
   | { type: 'score'; instructions: string; criteria: string[] };
 

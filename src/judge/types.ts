@@ -1,7 +1,10 @@
+// criteria is jev's shape: what a yes and a no mean
+export type NoulCriteria = { true: string; false: string };
+
 export type NoulQuestion = {
   type: 'noul';
   instructions: string;
-  criteria?: string;
+  criteria?: NoulCriteria;
 };
 
 export type ChoiceQuestion = {

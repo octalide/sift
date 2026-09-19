@@ -117,6 +117,8 @@ A pack is data: a subject kind, a list of mechanical checks, and typed questions
 }
 ```
 
+A noul's optional `criteria` is Jev's shape, `{ "true": "...", "false": "..." }`, saying what a yes and a no mean. A choice's `criteria` maps keys to descriptions, a score's is an ordered list of legends.
+
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, and `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`). A pack may also carry `expand` to generate one question per entry of a subject list, which is how the rules pack turns every paragraph of CONTRIBUTING.md into a proposition.
 
 Subject kinds and the checks they support:
