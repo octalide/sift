@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
