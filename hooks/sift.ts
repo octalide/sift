@@ -269,7 +269,7 @@ export const register: Register = (on, rawOptions) => {
       });
     }
 
-    await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|pause|resume|reset|deferred]' });
+    await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|poll|pause|resume|reset|deferred]' });
 
     if (options.watch) {
       const repo = options.watchRepo || runtime.repo;
@@ -500,6 +500,7 @@ export const register: Register = (on, rawOptions) => {
       if (sub === 'pause') await w.pause();
       else if (sub === 'resume') await w.resume();
       else if (sub === 'reset') await w.reset();
+      else if (sub === 'poll') await w.tick();
       const s = w.snapshot();
       if (sub === 'deferred') {
         return { text: s.deferred.map((d) => `${d.reason.padEnd(24)} ${d.event.kind} ${d.event.number ?? ''} ${d.event.title} ${d.label ?? ''}`).join('\n') || 'nothing deferred' };
@@ -523,7 +524,7 @@ export const register: Register = (on, rawOptions) => {
         `enabled: ${enabled}`,
         `judge calls ${stats.calls}, failures ${stats.failures}`,
         modules || '  no decisions yet',
-        'commands: /sift log [n], /sift clear, /sift watch status|pause|resume|reset|deferred',
+        'commands: /sift log [n], /sift clear, /sift watch status|poll|pause|resume|reset|deferred',
       ].join('\n'),
     };
   });

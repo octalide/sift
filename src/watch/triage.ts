@@ -44,6 +44,7 @@ export type EventDetail = {
   labels?: string[];
   latestComment?: { by: string; text: string };
   latestReview?: { by: string; state: string; text: string };
+  latestReviewComment?: { by: string; path: string; text: string };
 };
 
 export function eventSubject(repo: string, e: WatchEvent, detail: EventDetail): Subject {
@@ -62,6 +63,7 @@ export function eventSubject(repo: string, e: WatchEvent, detail: EventDetail): 
       labels: detail.labels ?? [],
       latest_comment: detail.latestComment ? { by: detail.latestComment.by, text: truncate(detail.latestComment.text, 4000) } : null,
       latest_review: detail.latestReview ? { ...detail.latestReview, text: truncate(detail.latestReview.text, 4000) } : null,
+      latest_review_comment: detail.latestReviewComment ? { ...detail.latestReviewComment, text: truncate(detail.latestReviewComment.text, 4000) } : null,
     },
     facts: {},
     options: {},

@@ -44,7 +44,7 @@ claude plugin install sift@sift
 
 Options live in `/config` under the plugin, or in `settings.json` under `pluginConfigs.sift.options` (`pluginConfigs["sift@inline"]` for a `--plugin-dir` load). Every option is described in `.claude-plugin/plugin.json`.
 
-`/sift` prints status and per-module decision counts, `/sift log [n]` the recent decisions with their scores, `/sift watch status|pause|resume|reset|deferred` controls the watcher.
+`/sift` prints status and per-module decision counts, `/sift log [n]` the recent decisions with their scores, `/sift watch status|poll|pause|resume|reset|deferred` controls the watcher.
 
 ## Grading
 
