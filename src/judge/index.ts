@@ -60,6 +60,10 @@ export type Decision = {
   shadow: boolean;
   // the session that made the decision; the ring is shared by every session running the plugin
   session?: string;
+  // what a judge call cost, and what a compaction or prune took out of the context
+  requestTokens?: number;
+  responseTokens?: number;
+  tokensRemoved?: number;
 };
 
 // a judge that records every call for the /sift report and calibration
@@ -79,6 +83,8 @@ export class LoggedJudge implements Judge {
       ok: result.ok,
       latencyMs: result.ok ? result.latencyMs : undefined,
       reason: result.ok ? undefined : `${result.reason}: ${result.message}`,
+      requestTokens: result.usage?.requestTokens,
+      responseTokens: result.usage?.responseTokens,
       digest: digestOf(state),
       answers: result.ok
         ? Object.fromEntries(Object.entries(result.answers).map(([k, a]) => [k, labelOf(a)]))

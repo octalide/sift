@@ -1,5 +1,6 @@
 import { messageOf, parseAnswer } from './jev.ts';
-import type { Answers, Judge, Judgement, Questions } from './types.ts';
+import type { Answers, Judge, Judgement, Questions, Usage } from './types.ts';
+import { estimateTokens } from '../tokens.ts';
 
 export type CompleteLike = (request: {
   model: string;
@@ -77,30 +78,32 @@ export class ModelJudge implements Judge {
 
   async ask(state: unknown, questions: Questions): Promise<Judgement> {
     const started = this.now();
+    const prompt = buildPrompt(state, questions);
+    const usage = (text: string): Usage => ({ requestTokens: estimateTokens(SYSTEM) + estimateTokens(prompt), responseTokens: estimateTokens(text), source: 'estimate' });
     let text: string;
     try {
       text = await this.complete({
         model: this.model,
         system: SYSTEM,
-        prompt: buildPrompt(state, questions),
+        prompt,
         maxTokens: 256 + Object.keys(questions).length * 64,
       });
     } catch (error) {
-      return { ok: false, reason: 'unavailable', message: messageOf(error), backend: this.name };
+      return { ok: false, reason: 'unavailable', message: messageOf(error), backend: this.name, usage: usage('') };
     }
     const parsed = extractJson(text);
     if (parsed === null || typeof parsed !== 'object') {
-      return { ok: false, reason: 'malformed', message: 'reply held no JSON object', backend: this.name };
+      return { ok: false, reason: 'malformed', message: 'reply held no JSON object', backend: this.name, usage: usage(text) };
     }
     const answers: Answers = {};
     for (const [id, question] of Object.entries(questions)) {
       const answer = parseAnswer(widen((parsed as Record<string, unknown>)[id], question), question);
       if (!answer) {
         const got = JSON.stringify((parsed as Record<string, unknown>)[id]) ?? 'nothing';
-        return { ok: false, reason: 'malformed', message: `no usable answer for ${id} (got ${got.slice(0, 80)})`, backend: this.name };
+        return { ok: false, reason: 'malformed', message: `no usable answer for ${id} (got ${got.slice(0, 80)})`, backend: this.name, usage: usage(text) };
       }
       answers[id] = answer;
     }
-    return { ok: true, answers, backend: this.name, latencyMs: this.now() - started };
+    return { ok: true, answers, backend: this.name, latencyMs: this.now() - started, usage: usage(text) };
   }
 }

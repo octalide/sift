@@ -1,4 +1,5 @@
-import type { Answer, Answers, Judge, Judgement, Questions } from './types.ts';
+import type { Answer, Answers, Judge, Judgement, Questions, Usage } from './types.ts';
+import { estimateTokens } from '../tokens.ts';
 
 export type FetchLike = (
   url: string,
@@ -79,6 +80,21 @@ export function parseAnswer(raw: unknown, question: Questions[string]): Answer |
   }
 }
 
+// the backend's usage block when the response carries one (input/output or prompt/completion names), else an estimate
+export function usageOf(requestBody: string, responseText: string): Usage {
+  try {
+    const parsed = JSON.parse(responseText) as { usage?: Record<string, unknown> };
+    const u = parsed.usage;
+    const num = (...keys: string[]) => keys.map((k) => u?.[k]).find((v): v is number => typeof v === 'number');
+    const inTok = num('input_tokens', 'prompt_tokens', 'state_tokens');
+    const outTok = num('output_tokens', 'completion_tokens');
+    if (inTok !== undefined) return { requestTokens: inTok, responseTokens: outTok ?? estimateTokens(responseText), source: 'backend' };
+  } catch {
+    // not json, estimated below
+  }
+  return { requestTokens: estimateTokens(requestBody), responseTokens: estimateTokens(responseText), source: 'estimate' };
+}
+
 export function parseResponse(text: string, questions: Questions): Answers | string {
   let parsed: unknown;
   try {
@@ -113,20 +129,21 @@ export class JevJudge implements Judge {
     try {
       response = await this.fetchFn(request.url, request);
     } catch (error) {
-      return { ok: false, reason: 'unavailable', message: messageOf(error), backend: this.name };
+      return { ok: false, reason: 'unavailable', message: messageOf(error), backend: this.name, usage: { requestTokens: estimateTokens(request.body), responseTokens: 0, source: 'estimate' } };
     }
     const latencyMs = this.now() - started;
+    const usage = usageOf(request.body, response.text);
     if (response.status === 422) {
-      return { ok: false, reason: 'rejected', message: response.text.slice(0, 300), backend: this.name };
+      return { ok: false, reason: 'rejected', message: response.text.slice(0, 300), backend: this.name, usage };
     }
     if (!response.ok) {
-      return { ok: false, reason: 'unavailable', message: `http ${response.status}: ${response.text.slice(0, 300)}`, backend: this.name, status: response.status };
+      return { ok: false, reason: 'unavailable', message: `http ${response.status}: ${response.text.slice(0, 300)}`, backend: this.name, status: response.status, usage };
     }
     const answers = parseResponse(response.text, questions);
     if (typeof answers === 'string') {
-      return { ok: false, reason: 'malformed', message: answers, backend: this.name };
+      return { ok: false, reason: 'malformed', message: answers, backend: this.name, usage };
     }
-    return { ok: true, answers, backend: this.name, latencyMs };
+    return { ok: true, answers, backend: this.name, latencyMs, usage };
   }
 }
 
