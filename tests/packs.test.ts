@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import type { Gh } from '../src/github/gh.ts';
 import { bumpVersion, parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
-import { linkedIssues, ruleParagraphs, sectionsOf, topSection } from '../src/github/subjects.ts';
+import { lastReleaseTag, linkedIssues, ruleParagraphs, sectionsOf, topSection } from '../src/github/subjects.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { validatePack } from '../src/packs/load.ts';
@@ -124,6 +125,12 @@ describe('github helpers', () => {
     expect(r.remaining).toBe(4999);
     expect(JSON.parse(r.body)).toEqual([{ n: 1 }, { n: 2 }]);
     expect(splitResponse('HTTP/2.0 304 Not Modified\r\nEtag: "a"\r\n\r\n').status).toBe(304);
+  });
+
+  it('picks the highest semver tag, not the nearest ancestor', async () => {
+    const gh = { git: async (argv: string[]) => (argv[0] === 'tag' ? 'v0.3.4\nv0.10.0\nv0.9.1\nnightly\n' : '') } as unknown as Gh;
+    expect(await lastReleaseTag(gh, 'v')).toBe('v0.10.0');
+    expect(await lastReleaseTag({ git: async () => '' } as unknown as Gh, 'v')).toBeUndefined();
   });
 
   it('reads markdown structure', () => {
