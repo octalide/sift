@@ -8,6 +8,12 @@ export type FsLike = {
   list: (path: string) => Promise<{ name: string; kind: string }[]>;
 };
 
+function isNoulCriteria(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  const c = value as Record<string, unknown>;
+  return typeof c['true'] === 'string' && typeof c['false'] === 'string';
+}
+
 export function validatePack(raw: unknown, name: string): Pack {
   if (raw === null || typeof raw !== 'object') throw new Error(`pack ${name}: not an object`);
   const p = raw as Partial<Pack>;
@@ -17,6 +23,7 @@ export function validatePack(raw: unknown, name: string): Pack {
     if (!['noul', 'choice', 'score'].includes(q.type)) throw new Error(`pack ${name}: question ${id} has unknown type ${String(q.type)}`);
     if (typeof q.instructions !== 'string') throw new Error(`pack ${name}: question ${id} has no instructions`);
     if (q.type === 'score' && !Array.isArray(q.criteria)) throw new Error(`pack ${name}: score ${id} needs a criteria array`);
+    if (q.type === 'noul' && q.criteria !== undefined && !isNoulCriteria(q.criteria)) throw new Error(`pack ${name}: noul ${id} criteria must be { true, false } strings`);
     if (q.type === 'choice' && !q.options && (q.criteria === null || typeof q.criteria !== 'object')) throw new Error(`pack ${name}: choice ${id} needs criteria or options`);
   }
   return {

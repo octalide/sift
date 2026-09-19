@@ -65,7 +65,10 @@ function questionsFor(chunks: Chunk[]): Questions {
     q[`c${c.k}`] = {
       type: 'noul',
       instructions: `At least one line in chunk ${c.k} (lines ${c.from}-${c.to}) is needed to carry out the task or answer the user.`,
-      criteria: 'Progress output, repeated boilerplate, and listings the task does not refer to are not needed. Results, diagnostics, and values the task asks about are.',
+      criteria: {
+        true: 'The chunk holds a result, diagnostic, or value the task asks about.',
+        false: 'The chunk is progress output, repeated boilerplate, or a listing the task does not refer to.',
+      },
     };
   }
   return q;

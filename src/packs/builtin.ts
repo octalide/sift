@@ -11,7 +11,10 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       substantive: {
         type: 'noul',
         instructions: 'The body describes a concrete problem or change with enough detail that someone could start work without asking what is meant.',
-        criteria: 'A body of placeholder text, a bare title restated, or a single sentence with no context does not satisfy this.',
+        criteria: {
+          true: 'The body states what is wrong or wanted, where, and what done looks like.',
+          false: 'The body is placeholder text, the title restated, or a single sentence with no context.',
+        },
         severity: 'warn',
       },
       type: {
@@ -23,7 +26,10 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       single_repo: {
         type: 'noul',
         instructions: 'The requested change can be completed entirely within this repository.',
-        criteria: 'An issue that requires a change in another named repository or an upstream dependency first does not satisfy this.',
+        criteria: {
+          true: 'Everything the issue asks for lives in this repository.',
+          false: 'The issue requires a change in another named repository or an upstream dependency first.',
+        },
         severity: 'warn',
       },
       needs_parent: {
@@ -60,14 +66,20 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       addresses_issue: {
         type: 'noul',
         instructions: 'The diff implements what the linked issue asks for.',
-        criteria: 'A diff that solves a different problem, or only part of the issue with no explanation, does not satisfy this.',
+        criteria: {
+          true: 'The diff does what the issue asks, or explains what it leaves out.',
+          false: 'The diff solves a different problem, or only part of the issue with no explanation.',
+        },
         when: 'has_issue',
         severity: 'fail',
       },
       scope_creep: {
         type: 'noul',
         instructions: 'The diff changes files or behaviour unrelated to the stated purpose of the PR.',
-        criteria: 'Unrelated refactors, formatting sweeps, or drive-by fixes in other subsystems count. A small change required to make the main change compile does not.',
+        criteria: {
+          true: 'The diff carries unrelated refactors, formatting sweeps, or drive-by fixes in other subsystems.',
+          false: 'Every change serves the stated purpose, including small changes needed to make the main change compile.',
+        },
         inverted: true,
         severity: 'warn',
       },
@@ -117,7 +129,10 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       describes_change: {
         type: 'noul',
         instructions: 'The commit subject line accurately describes what the diff does.',
-        criteria: 'A subject that names a different change, is vague (update, fix stuff, wip), or claims more than the diff does, does not satisfy this.',
+        criteria: {
+          true: 'The subject names the change the diff makes, at the scale the diff makes it.',
+          false: 'The subject names a different change, is vague (update, fix stuff, wip), or claims more than the diff does.',
+        },
         when: 'has_diff',
         severity: 'warn',
       },
@@ -162,7 +177,10 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       template: {
         type: 'noul',
         instructions: 'The subject complies with this rule: {text}',
-        criteria: 'Answer near 0.5 when the rule does not apply to this subject at all.',
+        criteria: {
+          true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then).',
+          false: 'The subject does something the rule forbids or omits something it requires.',
+        },
         severity: 'warn',
         lo: 0.3,
         hi: 0.6,
@@ -178,7 +196,10 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       actionable: {
         type: 'noul',
         instructions: 'This event needs the repository maintainer to do something now: reply, triage, fix, review, or merge.',
-        criteria: 'Label churn, a bot status update, a thank-you comment, or a duplicate notification does not satisfy this.',
+        criteria: {
+          true: 'A person or CI is waiting on the maintainer to reply, triage, fix, review, or merge.',
+          false: 'Label churn, a bot status update, a thank-you comment, or a duplicate notification.',
+        },
         severity: 'fail',
         lo: 0.3,
         hi: 0.6,
