@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
@@ -196,6 +196,12 @@
       "title": "Command gate",
       "description": "Judge Bash, Write and Edit calls against safety propositions before they run. Denies on a violated band.",
       "default": false
+    },
+    "config": {
+      "type": "string",
+      "title": "Conventions",
+      "description": "Repository conventions in the shape of .sift/config.json, as inline JSON or a path relative to the repo root. Applied over the defaults and under each repo's own .sift/config.json. Empty uses the neutral defaults: no commit format, version or changelog checks.",
+      "default": ""
     },
     "gateFailClosed": {
       "type": "boolean",

@@ -87,6 +87,7 @@ export const CHECKS: Record<string, Check> = {
   'pr.commits': (s, c) => commitFindings('pr.commits', ((s.facts['commits'] as { sha: string; message: string }[]) ?? []).map((x) => parseCommit(x.sha, x.message)), c),
   'commit.format': (s, c) => commitFindings('commit.format', (s.facts['commits'] as ParsedCommit[]) ?? [], c),
   'release.bump': (s, c) => {
+    if (!c.release.scheme) return [];
     const bump = s.facts['bump'] as Bump;
     const version = s.facts['version'] as [number, number, number] | undefined;
     if (!s.facts['has_commits']) return [info('release.bump', 'no commits since the last tag')];
@@ -104,8 +105,9 @@ export const CHECKS: Record<string, Check> = {
     }
     return findings;
   },
-  'release.changelog': (s) => {
-    if (!s.facts['changelogPath']) return [warn('release.changelog', 'no changelog file found')];
+  'release.changelog': (s, c) => {
+    if (!c.release.changelog) return [];
+    if (!s.facts['changelogPath']) return [warn('release.changelog', `${c.release.changelog} not found`)];
     const top = String(s.facts['unreleased'] ?? '');
     return top.length === 0 ? [warn('release.changelog', 'changelog has no section to promote')] : [];
   },

@@ -82,7 +82,9 @@ Other plugins can call the same thing through `$.sift.judge` and `$.sift.grade` 
 
 ## Repo configuration
 
-Conventions are read from `.sift/config.json` in the repository. Everything is optional. With no file, sift checks conventional commit format, reads CONTRIBUTING.md, CLAUDE.md, AGENTS.md and the PR template as rule documents, and treats the default branch as protected.
+Conventions are read from `.sift/config.json` in the repository. The defaults are neutral: no commit format, label, template, version or changelog check runs until it is configured. Out of the box sift reads CONTRIBUTING.md, CLAUDE.md, AGENTS.md and the PR template as rule documents, treats the default branch as protected, and otherwise relies on the judged questions, which hold for any project. Every mechanical check is opt-in, so there is nothing to switch off.
+
+To apply one set of conventions across many repos, set the `config` option to a path or inline JSON of the same shape. It sits under each repo's own file, field by field. A strict setup for a conventional-commits, semver-tagged, `dev` into `main` workflow looks like this:
 
 ```json
 {
@@ -91,9 +93,11 @@ Conventions are read from `.sift/config.json` in the repository. Everything is o
   "issues": { "requiredLabelGroups": [["bug", "feat", "docs", "chore"]], "milestone": true, "templateSections": ["Summary", "Acceptance"], "childLabels": ["task"] },
   "prs": { "linkIssue": true, "target": "dev", "templateSections": ["Summary", "Testing"] },
   "rules": { "docs": ["CONTRIBUTING.md", "CLAUDE.md"] },
-  "release": { "changelog": "CHANGELOG.md", "tagPrefix": "v" }
+  "release": { "scheme": "semver", "changelog": "CHANGELOG.md", "tagPrefix": "v" }
 }
 ```
+
+`release.scheme` turns on version checking (`semver` is the only scheme today). `release.changelog` names the file whose top section must cover the commits. Leave either out and the release pack only judges the commits since the last tag.
 
 ## Packs
 

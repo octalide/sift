@@ -35,7 +35,7 @@ describe('conventional commits', () => {
 
 describe('mechanical checks', () => {
   it('flags forbidden trailers, unknown types and bad scopes', () => {
-    const config = resolveConfig({ commits: { scope: 'issue', forbidTrailers: ['Co-Authored-By'] } });
+    const config = resolveConfig({ commits: { convention: 'conventional', scope: 'issue', forbidTrailers: ['Co-Authored-By'] } });
     const subject: Subject = {
       kind: 'commit',
       ref: 'r',
@@ -50,6 +50,28 @@ describe('mechanical checks', () => {
       '89abcde uses unknown type wat',
     ]);
     expect(verdictOf(findings, [], false)).toBe('fail');
+  });
+
+  it('checks nothing mechanical by default', () => {
+    const subject: Subject = {
+      kind: 'commit',
+      ref: 'r',
+      state: {},
+      facts: { commits: [parseCommit('89abcde', 'wat: y')] },
+      options: {},
+    };
+    expect(runChecks(BUILTIN_PACKS['commit']!, subject, resolveConfig(undefined))).toEqual([]);
+    const release: Subject = { kind: 'release', ref: 'HEAD', state: {}, facts: { has_commits: true, bump: 'minor', version: [1, 2, 3], proposed: 'v1.2.4' }, options: {} };
+    expect(runChecks(BUILTIN_PACKS['release']!, release, resolveConfig(undefined))).toEqual([]);
+    const semver = runChecks(BUILTIN_PACKS['release']!, release, resolveConfig({ release: { scheme: 'semver' } }));
+    expect(semver.map((f) => f.message)).toEqual(['required bump: minor, next version v1.3.0', 'v1.2.4 is a patch bump, commits require minor']);
+  });
+
+  it('layers config sources in order', () => {
+    const config = resolveConfig([{ commits: { convention: 'conventional', scope: 'issue' }, prs: { target: 'dev' } }, { commits: { scope: 'any' } }], 'main');
+    expect(config.commits).toMatchObject({ convention: 'conventional', scope: 'any' });
+    expect(config.prs.target).toBe('dev');
+    expect(config.branches.protected).toEqual(['main']);
   });
 
   it('requires label groups and milestones only when configured', async () => {
