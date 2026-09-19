@@ -1,0 +1,242 @@
+{
+  "name": "sift",
+  "version": "0.1.0",
+  "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
+  "author": {
+    "name": "octalide"
+  },
+  "license": "MIT",
+  "types": "./types/sift.d.ts",
+  "userConfig": {
+    "backend": {
+      "type": "string",
+      "title": "Judge backend",
+      "description": "auto uses Jev when a key is present and the session's small model otherwise. off disables every judged feature and leaves only mechanical checks.",
+      "options": [
+        "auto",
+        "jev",
+        "model",
+        "off"
+      ],
+      "default": "auto"
+    },
+    "apiKey": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "Jev key. Leave unset to read TYPESAFE_API_KEY from the environment.",
+      "sensitive": true
+    },
+    "jevModel": {
+      "type": "string",
+      "title": "Jev model",
+      "default": "jev-latest",
+      "description": "TypeSafe model name sent with every Jev request."
+    },
+    "jevBaseUrl": {
+      "type": "string",
+      "title": "Jev endpoint",
+      "default": "https://api.typesafe.ai/v1/systemone",
+      "description": "System One endpoint. Change it only for a proxy or a compatible local server."
+    },
+    "fallbackModel": {
+      "type": "string",
+      "title": "Model backend alias",
+      "description": "Model used by the model backend, an alias such as haiku or a full id.",
+      "default": "haiku"
+    },
+    "shadow": {
+      "type": "boolean",
+      "title": "Shadow mode",
+      "description": "Every module logs what it would have done and does nothing. Use it to calibrate thresholds before trusting them.",
+      "default": false
+    },
+    "compact": {
+      "type": "boolean",
+      "title": "Context compaction",
+      "description": "Replace the compaction summary with the transcript minus the tool calls and results the judge marks stale. Text is never touched.",
+      "default": true
+    },
+    "compactKeepThreshold": {
+      "type": "number",
+      "title": "Compaction keep threshold",
+      "default": 0.5,
+      "description": "Minimum probability that a tool call or its result is still needed. Below it the call is dropped or the result truncated."
+    },
+    "compactPinRecent": {
+      "type": "number",
+      "title": "Compaction pinned recent messages",
+      "default": 6,
+      "description": "Newest messages never touched by compaction."
+    },
+    "compactMinReduction": {
+      "type": "number",
+      "title": "Compaction minimum reduction ratio",
+      "default": 0.25,
+      "description": "Compaction falls back to the built-in summary when the estimated reduction is below this ratio."
+    },
+    "compactTruncateHead": {
+      "type": "number",
+      "title": "Compaction truncated result head chars",
+      "default": 300,
+      "description": "Characters of a truncated tool result kept before the omission note."
+    },
+    "compactAtPercent": {
+      "type": "number",
+      "title": "Compact at context percent",
+      "description": "Request compaction after a turn once the context passes this fill. 0 leaves compaction to the engine's own trigger.",
+      "default": 0
+    },
+    "prune": {
+      "type": "boolean",
+      "title": "Tool output pruning",
+      "description": "Score long tool outputs before the model reads them and drop chunks the judge marks unneeded. Full output is archived for recovery.",
+      "default": true
+    },
+    "pruneFloorTokens": {
+      "type": "number",
+      "title": "Prune floor (estimated tokens)",
+      "default": 4000,
+      "description": "Tool outputs under this estimated size pass through untouched."
+    },
+    "pruneChunkLines": {
+      "type": "number",
+      "title": "Prune chunk size (lines)",
+      "default": 25,
+      "description": "Lines per scored chunk."
+    },
+    "pruneKeepThreshold": {
+      "type": "number",
+      "title": "Prune keep threshold",
+      "default": 0.5,
+      "description": "Minimum probability that a chunk is needed. Below it the chunk is replaced by an omission note."
+    },
+    "pruneTools": {
+      "type": "string",
+      "title": "Pruned tools",
+      "description": "Comma separated tool names whose output is pruned. Bash and Read are supported.",
+      "default": "Bash,Read"
+    },
+    "watch": {
+      "type": "boolean",
+      "title": "Repo watch",
+      "description": "Poll a GitHub repo for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts.",
+      "default": false
+    },
+    "watchRepo": {
+      "type": "string",
+      "title": "Watched repo",
+      "description": "owner/name. Empty watches the session's own repo.",
+      "default": ""
+    },
+    "watchMinInterval": {
+      "type": "number",
+      "title": "Watch poll interval when active (s)",
+      "default": 60,
+      "description": "Seconds between polls while the repo is changing."
+    },
+    "watchMaxInterval": {
+      "type": "number",
+      "title": "Watch poll interval when idle (s)",
+      "default": 300,
+      "description": "Seconds between polls once the repo is idle. Idle polls are conditional requests and cost no API quota."
+    },
+    "watchDelivery": {
+      "type": "string",
+      "title": "Watch delivery",
+      "description": "prompt submits each actionable event as a user turn. log only writes transcript lines.",
+      "options": [
+        "prompt",
+        "log"
+      ],
+      "default": "prompt"
+    },
+    "watchIgnoreSelf": {
+      "type": "boolean",
+      "title": "Watch ignores own writes",
+      "description": "Events authored by the gh login this session runs as are deferred, not delivered.",
+      "default": true
+    },
+    "watchIgnoreBots": {
+      "type": "boolean",
+      "title": "Watch ignores bot accounts",
+      "default": true,
+      "description": "Events authored by bot accounts are dropped."
+    },
+    "watchCi": {
+      "type": "string",
+      "title": "Watch CI events",
+      "description": "failures delivers failed runs on protected branches, all delivers every completed run, none delivers no CI.",
+      "options": [
+        "failures",
+        "all",
+        "none"
+      ],
+      "default": "failures"
+    },
+    "watchTriage": {
+      "type": "boolean",
+      "title": "Watch triage with the judge",
+      "description": "Run the triage pack on issue and PR events. Off delivers everything the rules do not defer.",
+      "default": true
+    },
+    "watchDeferMaxAgeHours": {
+      "type": "number",
+      "title": "Deferred event max age (h)",
+      "default": 24,
+      "description": "A deferred event older than this is delivered on its own so nothing waits forever."
+    },
+    "grade": {
+      "type": "boolean",
+      "title": "Grading tools",
+      "description": "Register sift_grade (packs: issue, pr, commit, release, rules) and sift_judge (raw typed questions) as tools.",
+      "default": true
+    },
+    "gate": {
+      "type": "boolean",
+      "title": "Command gate",
+      "description": "Judge Bash, Write and Edit calls against safety propositions before they run. Denies on a violated band.",
+      "default": false
+    },
+    "gateFailClosed": {
+      "type": "boolean",
+      "title": "Gate denies on unclear",
+      "default": true,
+      "description": "Deny a call when a fail-severity proposition lands in the unclear band. Off allows it."
+    },
+    "classify": {
+      "type": "boolean",
+      "title": "Answer engine classifications",
+      "description": "Serve the engine's own model.classify calls from the judge backend.",
+      "default": false
+    },
+    "route": {
+      "type": "boolean",
+      "title": "Effort routing",
+      "description": "Score each prompt and lower the request effort for routine turns. Experimental.",
+      "default": false
+    },
+    "routeMinEffort": {
+      "type": "string",
+      "title": "Route floor",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "low",
+      "description": "Lowest effort the router may choose."
+    },
+    "routeMaxEffort": {
+      "type": "string",
+      "title": "Route ceiling",
+      "options": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "description": "Highest effort the router may choose."
+    }
+  }
+}
