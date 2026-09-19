@@ -145,7 +145,10 @@ export function questionsFor(calls: Call[]): Questions {
     q[`keep_${c.id}`] = {
       type: 'noul',
       instructions: `Call ${c.id} (${c.tool}) and its result are still needed for the work that remains in this conversation.`,
-      criteria: 'A result that was superseded by a later call, fully acted on already, or unrelated to the current task is not needed.',
+      criteria: {
+        true: 'The result informs work that has not happened yet.',
+        false: 'The result was superseded by a later call, fully acted on already, or is unrelated to the current task.',
+      },
     };
     if (c.result && c.result.text.length > 0) {
       q[`full_${c.id}`] = {
