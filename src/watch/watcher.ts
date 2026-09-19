@@ -52,10 +52,10 @@ export class Watcher {
     this.state = ((await this.host.store.get(this.key)) as WatchState | undefined) ?? initialState();
     if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.gh.login();
     if (this.state.paused) {
-      this.host.status(`sift watch ${this.options.repo}: paused`);
+      this.host.status(`watch paused (${this.options.repo})`);
       return;
     }
-    this.host.status(`sift watch ${this.options.repo}`);
+    this.host.status(`watching ${this.options.repo}`);
     void this.tick();
   }
 
@@ -70,7 +70,7 @@ export class Watcher {
     this.state.paused = true;
     await this.save();
     this.stop();
-    this.host.status(`sift watch ${this.options.repo}: paused`);
+    this.host.status(`watch paused (${this.options.repo})`);
   }
 
   async resume(): Promise<void> {
