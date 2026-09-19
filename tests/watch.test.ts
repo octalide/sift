@@ -190,7 +190,7 @@ describe('watcher', () => {
       {
         gh,
         store: { get: async () => undefined, set: async () => {} },
-        judge: { name: 'fake', ask: async () => ({ ok: false, backend: 'fake', latencyMs: 0, error: 'off' }) },
+        judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) },
         pack: BUILTIN_PACKS['triage']!,
         config: DEFAULT_CONFIG,
         now: () => 1_000_000,
