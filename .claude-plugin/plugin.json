@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
@@ -85,6 +85,12 @@
       "title": "Compact at context percent",
       "description": "Request compaction after a turn once the context passes this fill. 0 leaves compaction to the engine's own trigger.",
       "default": 0
+    },
+    "ledgerPath": {
+      "type": "string",
+      "title": "Ledger file",
+      "description": "A file holding the session's durable state. While it exists, compaction keeps the ledger's live contents, the last prompt, the pinned turns and the judged working set, and drops every prior summary. Empty means ~/.local/state/fleet/<owner>_<name>/ledger.md for the session's repository.",
+      "default": ""
     },
     "prune": {
       "type": "boolean",

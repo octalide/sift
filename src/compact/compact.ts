@@ -69,7 +69,7 @@ export type CompactResult = {
   error?: string;
 };
 
-function messageChars(m: Message): number {
+export function messageChars(m: Message): number {
   return (
     m.text.length +
     m.toolUses.reduce((n, u) => n + JSON.stringify(u.input).length + (u.text?.length ?? 0), 0) +
@@ -77,11 +77,12 @@ function messageChars(m: Message): number {
   );
 }
 
-export function collectCalls(messages: readonly Message[], pinnedFrom: number): Call[] {
+// the first message is the session's opening prompt and stays put unless the caller says otherwise
+export function collectCalls(messages: readonly Message[], pinnedFrom: number, pinFirst = true): Call[] {
   const calls: Call[] = [];
   const byId = new Map<string, Call>();
   messages.forEach((m, i) => {
-    if (i === 0 || i >= pinnedFrom) return;
+    if ((pinFirst && i === 0) || i >= pinnedFrom) return;
     for (const use of m.toolUses) {
       const call: Call = { id: use.tool_use_id, label: `t${calls.length + 1}`, tool: use.tool, useIndex: i, use, chars: JSON.stringify(use.input).length };
       calls.push(call);
@@ -149,12 +150,15 @@ export function goalOf(messages: readonly Message[]): string {
 // the whole transcript as the judge reads it, shrunk in stages until it fits the budget: tool inputs truncated,
 // long texts abridged oldest first, old messages collapsed to a note, old calls shrunk to one line, old call-less
 // messages left out, runs of old call-only messages folded, old inputs dropped. every call stays visible at every stage
-export function buildState(messages: readonly Message[], calls: Call[], maxTokens: number, pinnedFrom: number, instructions?: string): FittedState {
-  const goal = goalOf(messages);
-  const stateOf = (history: Entry[]) => ({ context: STATE_CONTEXT, instructions: instructions ?? null, goal, history });
+export type StateOptions = { instructions?: string; goal?: string; pinFirst?: boolean };
+
+export function buildState(messages: readonly Message[], calls: Call[], maxTokens: number, pinnedFrom: number, options: StateOptions = {}): FittedState {
+  const goal = options.goal ?? goalOf(messages);
+  const stateOf = (history: Entry[]) => ({ context: STATE_CONTEXT, instructions: options.instructions ?? null, goal, history });
   const entryTokens = (e: Entry) => estimateTokensOf(e) + 1;
   const baseTokens = estimateTokensOf(stateOf([]));
-  const pinned = (e: Entry) => e.i === 0 || e.i >= pinnedFrom;
+  const pinFirst = options.pinFirst ?? true;
+  const pinned = (e: Entry) => (pinFirst && e.i === 0) || e.i >= pinnedFrom;
   const byMessage = new Map<number, Call[]>();
   for (const c of calls) byMessage.set(c.useIndex, [...(byMessage.get(c.useIndex) ?? []), c]);
 
@@ -267,6 +271,15 @@ export function questionsFor(calls: Call[]): Questions {
   return q;
 }
 
+export function truncatedResult(r: ToolResult, tool: string | undefined, truncateHead: number): ToolResult {
+  const omitted = r.text.length - truncateHead;
+  return {
+    tool_use_id: r.tool_use_id,
+    isError: r.isError,
+    text: `${r.text.slice(0, truncateHead)}\n[sift: ${omitted} chars of this ${tool ?? 'tool'} result omitted at compaction, rerun the call if needed]`,
+  };
+}
+
 export function applyDecisions(messages: readonly Message[], calls: Call[], decisions: CallDecision[], truncateHead: number): Message[] {
   const byId = new Map(decisions.map((d) => [d.id, d]));
   const callById = new Map(calls.map((c) => [c.id, c]));
@@ -284,16 +297,7 @@ export function applyDecisions(messages: readonly Message[], calls: Call[], deci
     const toolUses = m.toolUses.filter((u) => byId.get(u.tool_use_id)?.action !== 'drop');
     const toolResults = (m.toolResults ?? [])
       .filter((r) => byId.get(r.tool_use_id)?.action !== 'drop')
-      .map((r) => {
-        if (byId.get(r.tool_use_id)?.action !== 'truncate') return r;
-        const call = callById.get(r.tool_use_id);
-        const omitted = r.text.length - truncateHead;
-        return {
-          tool_use_id: r.tool_use_id,
-          isError: r.isError,
-          text: `${r.text.slice(0, truncateHead)}\n[sift: ${omitted} chars of this ${call?.tool ?? 'tool'} result omitted at compaction, rerun the call if needed]`,
-        };
-      });
+      .map((r) => (byId.get(r.tool_use_id)?.action === 'truncate' ? truncatedResult(r, callById.get(r.tool_use_id)?.tool, truncateHead) : r));
     if (m.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) continue;
     const rebuilt: Message = { role: m.role, text: m.text, toolUses };
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
@@ -311,15 +315,13 @@ export function decide(call: Call, keep: number, full: number, threshold: number
 
 const TOO_LARGE = new Set([400, 413]);
 
-export async function compact(messages: readonly Message[], judge: Judge, options: CompactOptions): Promise<CompactResult> {
-  const charsBefore = messages.reduce((n, m) => n + messageChars(m), 0);
-  const pinnedFrom = Math.max(1, messages.length - options.pinRecent);
-  const calls = collectCalls(messages, pinnedFrom);
-  const base = { charsBefore, charsAfter: charsBefore, requests: 0, stateTokens: 0, decisions: [] as CallDecision[] };
-  if (calls.length === 0) return { ...base, messages: [...messages] };
+export type Verdict = { requests: number; stateTokens: number; stage?: string; decisions: CallDecision[]; error?: string };
+
+// asks the judge about every collected call, shrinking the state to fit and retrying once on a size rejection
+export async function judgeCalls(messages: readonly Message[], calls: Call[], judge: Judge, pinnedFrom: number, options: CompactOptions, state: StateOptions = {}): Promise<Verdict> {
   const questions = questionsFor(calls);
   const ask = async (budget: number) => {
-    const fitted = buildState(messages, calls, budget, pinnedFrom, options.instructions);
+    const fitted = buildState(messages, calls, budget, pinnedFrom, { instructions: options.instructions, ...state });
     if (!fitted.fits) return { ...fitted, batches: [] as Questions[], results: [] as Awaited<ReturnType<Judge['ask']>>[] };
     const batches = batchQuestions(questions, fitted.tokens, options.maxRequestTokens);
     return { ...fitted, batches, results: await Promise.all(batches.map((q) => judge.ask(fitted.state, q))) };
@@ -330,22 +332,33 @@ export async function compact(messages: readonly Message[], judge: Judge, option
     attempt = await ask(Math.floor(options.maxStateTokens / 2));
   }
   const { tokens, batches, results, stage } = attempt;
-  if (!attempt.fits) return { ...base, messages: [...messages], stateTokens: tokens, error: `history too large for the judge (~${tokens} tokens after ${stage}, limit ${options.maxStateTokens})` };
+  const base = { requests: batches.length, stateTokens: tokens, stage, decisions: [] as CallDecision[] };
+  if (!attempt.fits) return { ...base, error: `history too large for the judge (~${tokens} tokens after ${stage}, limit ${options.maxStateTokens})` };
   const answers: Record<string, number> = {};
   for (const r of results) {
-    if (!r.ok) return { ...base, messages: [...messages], stateTokens: tokens, requests: batches.length, error: `${r.reason}: ${r.message}` };
+    if (!r.ok) return { ...base, error: `${r.reason}: ${r.message}` };
     for (const [id, a] of Object.entries(r.answers)) if (a.type === 'noul') answers[id] = a.p;
   }
-  const decisions = calls.map((c) => decide(c, answers[`keep_${c.label}`] ?? 1, answers[`full_${c.label}`] ?? 1, options.keepThreshold));
-  const out = applyDecisions(messages, calls, decisions, options.truncateHead);
+  return { ...base, decisions: calls.map((c) => decide(c, answers[`keep_${c.label}`] ?? 1, answers[`full_${c.label}`] ?? 1, options.keepThreshold)) };
+}
+
+export async function compact(messages: readonly Message[], judge: Judge, options: CompactOptions): Promise<CompactResult> {
+  const charsBefore = messages.reduce((n, m) => n + messageChars(m), 0);
+  const pinnedFrom = Math.max(1, messages.length - options.pinRecent);
+  const calls = collectCalls(messages, pinnedFrom);
+  const base = { charsBefore, charsAfter: charsBefore, requests: 0, stateTokens: 0, decisions: [] as CallDecision[] };
+  if (calls.length === 0) return { ...base, messages: [...messages] };
+  const verdict = await judgeCalls(messages, calls, judge, pinnedFrom, options);
+  if (verdict.error) return { ...base, messages: [...messages], stateTokens: verdict.stateTokens, requests: verdict.requests, error: verdict.error };
+  const out = applyDecisions(messages, calls, verdict.decisions, options.truncateHead);
   return {
     messages: out,
-    decisions,
+    decisions: verdict.decisions,
     charsBefore,
     charsAfter: out.reduce((n, m) => n + messageChars(m), 0),
-    requests: batches.length,
-    stateTokens: tokens,
-    stage,
+    requests: verdict.requests,
+    stateTokens: verdict.stateTokens,
+    stage: verdict.stage,
   };
 }
 
