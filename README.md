@@ -13,7 +13,7 @@ Everything sift does is built on that one call. Every module is a toggle, every 
 
 | module | hook | what it does | default |
 |---|---|---|---|
-| `compact` | `session.compact` | replaces the compaction summary with the transcript minus the tool calls and results the judge marks stale. User and assistant text is never touched | on |
+| `compact` | `session.compact` | replaces the compaction summary with the transcript minus the tool calls and results the judge marks stale. User and assistant text is never touched. A session with a ledger file compacts to the ledger instead, see [Compaction](#compaction) | on |
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed, archives the full output under `~/.cache/sift/<session>/` and leaves a recovery note in the stub | on |
 | `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `mcp__sift__judge` answers raw typed questions | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
@@ -51,6 +51,19 @@ claude --plugin-dir ./sift --settings '{"pluginConfigs":{"sift@inline":{"options
 ```
 
 `/sift` prints status and per-module decision counts (the same text is available to the model as the `mcp__sift__status` tool), with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by compaction and pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` the recent decisions with their scores, `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watcher (also the `mcp__sift__watch` tool). The `watch` option starts it at boot; `start` arms it in a session that came up without it.
+
+## Compaction
+
+Without a ledger, `compact` keeps every user and assistant text and asks the judge, call by call, whether a tool call and its full output still matter for the last three prompts. That suits a conversation, whose narrative is the state. It does not suit a long-lived agent session: text accumulates across rounds because nothing ever removes it, so each compaction starts from the residue of the last and the interval between compactions shrinks until the session spends its time compacting.
+
+An agent whose durable state lives outside the conversation (a ledger file, issues, git) has no narrative worth keeping. For such a session the policy changes. It applies while the ledger file exists: the `ledgerPath` option, or by default `~/.local/state/fleet/<owner>_<name>/ledger.md` for the session's repository, checked at each compaction.
+
+1. No prior compaction summary is carried. Every built-in summary message and every ledger message an earlier round inserted is dropped before anything is judged, so the residue is bounded by the ledger, not by history.
+2. The kept set is the ledger's current contents, re-read from disk and inserted as the first message so the model sees the live state, the last user prompt, the pinned recent messages (`compactPinRecent`), and the tool calls and results the judge marks as the working set of the item in flight, judged against the prompt and the ledger. Everything else drops, text included. A kept call is rebuilt without the narration around it.
+3. One question over the ledger alone decides whether anything is mid-item. When nothing is (every item finished, unstarted, or waiting on an outside event), the judge is not asked about the transcript at all and only the ledger, the last prompt and the pinned messages remain. That is a restart without a process restart.
+4. Each compaction records one line in the decision log (`/sift log`): `ledger: tokens <before> -> <after>, residue <n>, summaries dropped <n>, in flight yes|no, kept <messages>, <calls>, <requests>`. `residue` is what survived outside the ledger, the prompt and the pinned messages, the part that could grow. Whether it does is one grep.
+
+`compactMinReduction` does not apply under a ledger: the built-in summary is never a better outcome for such a session. A judge failure still falls back to it, and the next ledger compaction drops that summary again.
 
 ## Grading
 
