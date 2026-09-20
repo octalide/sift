@@ -1,6 +1,7 @@
 import type { EngineInterface, PluginOptions, Register, SessionMessage } from 'claude-code';
 
 import { compact, COMPACT_DEFAULTS, reduction, type Message } from '../src/compact/compact.ts';
+import { compactWithLedger } from '../src/compact/ledger.ts';
 import { gate as runGate, mentionsSecret } from '../src/gate/gate.ts';
 import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
 import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/config.ts';
@@ -32,6 +33,8 @@ type Options = {
   compactMinReduction: number;
   compactTruncateHead: number;
   compactAtPercent: number;
+  // the session's ledger file; empty means the fleet default for the session repo
+  ledgerPath: string;
   prune: boolean;
   pruneFloorTokens: number;
   pruneChunkLines: number;
@@ -72,6 +75,7 @@ const DEFAULTS: Options = {
   compactMinReduction: 0.25,
   compactTruncateHead: COMPACT_DEFAULTS.truncateHead,
   compactAtPercent: 0,
+  ledgerPath: '',
   prune: true,
   pruneFloorTokens: PRUNE_DEFAULTS.floorTokens,
   pruneChunkLines: PRUNE_DEFAULTS.chunkLines,
@@ -126,6 +130,8 @@ type Runtime = {
   startWatch: () => Promise<string | undefined>;
   sessionId: string;
   archiveDir: string;
+  // where the session's ledger would be; it counts only while the file exists
+  ledgerPath?: string;
   // peer messages consumed since the last delivery, reported as one digest line
   held: Held[];
 };
@@ -325,7 +331,8 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, archiveDir: `${home}/.cache/sift/${sessionId}`, held: [] };
+    const ledgerPath = options.ledgerPath || (repoInfo ? `${home}/.local/state/fleet/${repoInfo.nameWithOwner.replace('/', '_')}/ledger.md` : undefined);
+    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, archiveDir: `${home}/.cache/sift/${sessionId}`, ledgerPath, held: [] };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -476,6 +483,32 @@ export const register: Register = (on, rawOptions) => {
     const rt = runtime;
     if (!options.compact || !rt || e.trigger === 'precompute') return next(e);
     try {
+      if (rt.ledgerPath && (await $.fs.exists(rt.ledgerPath))) {
+        const ledger = await $.fs.read(rt.ledgerPath);
+        const result = await compactWithLedger(e.messages as unknown as Message[], rt.judge, {
+          ...COMPACT_DEFAULTS,
+          keepThreshold: options.compactKeepThreshold,
+          pinRecent: options.compactPinRecent,
+          truncateHead: options.compactTruncateHead,
+          instructions: e.instructions,
+          ledger,
+          ledgerPath: rt.ledgerPath,
+        });
+        // one line per compaction, grep-able: the numbers that say whether residue is growing
+        const report = `ledger: tokens ${result.tokensBefore} -> ${result.tokensAfter}, residue ${result.residueTokens}, summaries dropped ${result.summariesDropped}, in flight ${result.inFlight ? 'yes' : 'no'}, kept ${result.messages.length}/${e.messages.length}, ${result.decisions.filter((d) => d.action !== 'drop').length}/${result.decisions.length} calls kept, ${result.requests} request(s)`;
+        if (result.error) {
+          record('compact', 'fallback', { ok: false, reason: result.error, digest: report });
+          $.ui.log(`sift compact: built-in summary (${result.error})`);
+          return next(e);
+        }
+        record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: report, tokensRemoved: Math.max(0, result.tokensBefore - result.tokensAfter) });
+        if (options.shadow) {
+          $.ui.log(`sift compact (shadow): ${report}`);
+          return next(e);
+        }
+        $.ui.toast(`sift compact: ${report}`, { timeoutMs: 10_000 });
+        return { messages: result.messages as unknown as SessionMessage[] };
+      }
       const result = await compact(e.messages as unknown as Message[], rt.judge, {
         ...COMPACT_DEFAULTS,
         keepThreshold: options.compactKeepThreshold,
