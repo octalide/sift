@@ -422,7 +422,7 @@ export const register: Register = (on, rawOptions) => {
         }
       }
     }
-    const outbound = options.gateOutbound ? outboundOf(e.tool, e as unknown as Record<string, unknown>) : undefined;
+    const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
     if (outbound) {
       const rulesPack = rt.packs['rules'];
       const artifact = outbound.kind && outbound.action ? { kind: outbound.kind, action: outbound.action } : undefined;
