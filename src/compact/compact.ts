@@ -36,7 +36,7 @@ export type CompactOptions = {
 };
 
 export const COMPACT_DEFAULTS: CompactOptions = {
-  keepThreshold: 0.5,
+  keepThreshold: 0.35,
   pinRecent: 6,
   truncateHead: 300,
   maxStateTokens: Math.floor(JEV_LIMITS.stateTokens * 0.8),

@@ -63,6 +63,8 @@ An agent whose durable state lives outside the conversation (a ledger file, issu
 3. One question over the ledger alone decides whether anything is mid-item. When nothing is (every item finished, unstarted, or waiting on an outside event), the judge is not asked about the transcript at all and only the ledger, the last prompt and the pinned messages remain. That is a restart without a process restart.
 4. Each compaction records one line in the decision log (`/sift log`): `ledger: tokens <before> -> <after>, residue <n>, summaries dropped <n>, in flight yes|no, kept <messages>, <calls>, <requests>`. `residue` is what survived outside the ledger, the prompt and the pinned messages, the part that could grow. Whether it does is one grep.
 
+A call stays when its `keep_` probability reaches `compactKeepThreshold`, default 0.35. Jev's keep signal is low and narrow: replayed over a long agent session, the calls of the item in flight score 0.35 to 0.45 and stale ones about 0.2, so a threshold of 0.5 keeps nothing and every compaction becomes a full restart. Calibrate against your own traffic with `shadow` before moving it.
+
 `compactMinReduction` does not apply under a ledger: the built-in summary is never a better outcome for such a session. A judge failure still falls back to it, and the next ledger compaction drops that summary again.
 
 ## Grading
