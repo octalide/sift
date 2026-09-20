@@ -26,7 +26,7 @@ export type Pack = {
   description: string;
   checks: string[];
   questions: Record<string, PackQuestion>;
-  // generate one question per entry of a subject list (rules): the template's instructions take {text}
+  // generate one question per entry of a subject list (rules): the template's instructions take {text} and {subject}
   expand?: { from: string; template: PackQuestion };
 };
 

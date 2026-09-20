@@ -2,11 +2,13 @@ import type { Judge } from '../judge/types.ts';
 import { runPack } from '../packs/run.ts';
 import type { Pack, Report, Subject } from '../packs/types.ts';
 import type { RepoConfig } from '../github/config.ts';
+import type { GhAction, GhArtifact } from '../github/subjects.ts';
 
-// text a tool call is about to send somewhere people read, and the hard limit of that channel
-export type Outbound = { channel: string; text: string; maxChars?: number };
+// text a tool call is about to send somewhere people read, the hard limit of that channel, and which artifact it is
+export type Outbound = { channel: string; text: string; maxChars?: number; kind?: GhArtifact; action?: GhAction };
 
-type Extractor = { channel: string; maxChars?: number; extract: (tool: string, input: Record<string, unknown>) => string | undefined };
+type Extracted = Pick<Outbound, 'text' | 'kind' | 'action'>;
+type Extractor = { channel: string; maxChars?: number; extract: (tool: string, input: Record<string, unknown>) => Extracted | undefined };
 
 const DISCORD_LIMIT = 2000;
 const DISCORD_TOOLS: Record<string, string[]> = {
@@ -63,7 +65,7 @@ export const EXTRACTORS: Extractor[] = [
       const fields = DISCORD_TOOLS[tool];
       if (!fields) return undefined;
       const parts = fields.map((f) => input[f]).filter((v): v is string => typeof v === 'string' && v.length > 0);
-      return parts.length > 0 ? parts.join('\n') : undefined;
+      return parts.length > 0 ? { text: parts.join('\n') } : undefined;
     },
   },
   {
@@ -71,15 +73,18 @@ export const EXTRACTORS: Extractor[] = [
     extract: (tool, input) => {
       if (tool !== 'Bash') return undefined;
       const command = String(input['command'] ?? '');
-      return GH_WRITE.test(command) ? ghBody(command) : undefined;
+      const m = GH_WRITE.exec(command);
+      if (!m) return undefined;
+      const text = ghBody(command);
+      return text === undefined ? undefined : { text, kind: m[1] as GhArtifact, action: m[2] as GhAction };
     },
   },
 ];
 
 export function outboundOf(tool: string, input: Record<string, unknown>, extractors = EXTRACTORS): Outbound | undefined {
   for (const x of extractors) {
-    const text = x.extract(tool, input);
-    if (text !== undefined) return { channel: x.channel, text, maxChars: x.maxChars };
+    const got = x.extract(tool, input);
+    if (got !== undefined) return { channel: x.channel, maxChars: x.maxChars, ...got };
   }
   return undefined;
 }
@@ -93,7 +98,7 @@ export async function gateOutbound(out: Outbound, subject: Subject, pack: Pack, 
   }
   const report = await runPack(pack, subject, judge, config);
   if (report.judgeError) return { allow: true, reason: `judge unavailable (${report.judgeError})`, report, warnings: [] };
-  const rule = (id: string) => report.judged.find((j) => j.id === id)?.instructions.replace(/^The subject complies with this rule: /, '') ?? id;
+  const rule = (id: string) => report.judged.find((j) => j.id === id)?.instructions.replace(/^The subject(?: \([^)]*\))? complies with this rule: /, '') ?? id;
   const violated = report.judged.filter((j) => j.band === 'violated' && j.severity !== 'info');
   const unclear = report.judged.filter((j) => j.band === 'unclear' && j.severity !== 'info');
   const warnings = unclear.map((j) => `unclear: ${rule(j.id)}`);
