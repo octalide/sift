@@ -422,10 +422,11 @@ export const register: Register = (on, rawOptions) => {
         }
       }
     }
-    const outbound = options.gateOutbound ? outboundOf(e.tool, e as unknown as Record<string, unknown>) : undefined;
+    const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
     if (outbound) {
       const rulesPack = rt.packs['rules'];
-      const subject = rulesPack ? await rulesSubject(rt.gh, rt.repo, { kind: 'text', ref: outbound.text }, rt.config, readFile, existsFile) : undefined;
+      const artifact = outbound.kind && outbound.action ? { kind: outbound.kind, action: outbound.action } : undefined;
+      const subject = rulesPack ? await rulesSubject(rt.gh, rt.repo, { kind: 'text', ref: outbound.text, artifact }, rt.config, readFile, existsFile) : undefined;
       if (rulesPack && subject) {
         const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, rt.config);
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
