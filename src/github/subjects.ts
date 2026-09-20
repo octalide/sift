@@ -236,10 +236,27 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
   };
 }
 
+// the github artifact a body belongs to and what the call does to it
+export type GhArtifact = 'issue' | 'pr' | 'release';
+export type GhAction = 'create' | 'comment' | 'edit';
+
+// free text the rules are read against, and when known, the github artifact it is about to become
+export type RulesTarget = { kind: 'pr' | 'issue' | 'commit'; ref: string } | { kind: 'text'; ref: string; artifact?: { kind: GhArtifact; action: GhAction } };
+
+const ARTIFACT_NOUN: Record<GhArtifact, string> = { issue: 'GitHub issue', pr: 'pull request', release: 'GitHub release' };
+
+// what the text is, in the words the judge reads: "the body of a new GitHub issue"
+export function textAbout(artifact: { kind: GhArtifact; action: GhAction }): string {
+  const noun = ARTIFACT_NOUN[artifact.kind];
+  if (artifact.action === 'comment') return `a comment on a ${noun}`;
+  if (artifact.action === 'edit') return `the edited ${artifact.kind === 'release' ? 'notes' : 'body'} of a ${noun}`;
+  return `the ${artifact.kind === 'release' ? 'notes' : 'body'} of a new ${noun}`;
+}
+
 export async function rulesSubject(
   gh: Gh | undefined,
   repo: string | undefined,
-  target: { kind: 'pr' | 'issue' | 'text' | 'commit'; ref: string },
+  target: RulesTarget,
   config: RepoConfig,
   read: ReadLike,
   exists: ExistsLike,
@@ -253,23 +270,28 @@ export async function rulesSubject(
   const total = rules.length;
   rules.splice(config.rules.maxRules);
   let subject: Record<string, unknown> = { kind: target.kind, ref: target.ref };
+  let about: string | undefined;
   if (gh && repo && target.kind === 'pr') {
     const s = await prSubject(gh, repo, Number(target.ref.replace(/^#/, '')), config);
     subject = { kind: 'pr', ...s.state };
+    about = `pull request ${target.ref}`;
   } else if (gh && repo && target.kind === 'issue') {
     const s = await issueSubject(gh, repo, Number(target.ref.replace(/^#/, '')), config);
     subject = { kind: 'issue', ...s.state };
+    about = `issue ${target.ref}`;
   } else if (gh && target.kind === 'commit') {
     const s = await commitSubject(gh, target.ref, config);
     subject = { kind: 'commit', ...s.state };
-  } else {
-    subject = { kind: 'text', text: truncate(target.ref, BODY_CAP) };
+    about = `commit ${target.ref}`;
+  } else if (target.kind === 'text') {
+    about = target.artifact ? textAbout(target.artifact) : undefined;
+    subject = { kind: 'text', ...(target.artifact ? { artifact: target.artifact.kind, action: target.artifact.action, about } : {}), text: truncate(target.ref, BODY_CAP) };
   }
   return {
     kind: 'rules',
     ref: `${target.kind}:${truncate(target.ref, 40)}`,
     state: { subject, rules: rules.map((r, i) => ({ id: `r${i + 1}`, source: r.source, text: r.text })) },
-    facts: { rules, has_rules: rules.length > 0, total_rules: total },
+    facts: { rules, has_rules: rules.length > 0, total_rules: total, subject: about ? `The subject (${about})` : 'The subject' },
     options: {},
   };
 }

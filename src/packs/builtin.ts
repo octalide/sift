@@ -176,9 +176,9 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       from: 'rules',
       template: {
         type: 'noul',
-        instructions: 'The subject complies with this rule: {text}',
+        instructions: '{subject} complies with this rule: {text}',
         criteria: {
-          true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then).',
+          true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply.',
           false: 'The subject does something the rule forbids or omits something it requires.',
         },
         severity: 'warn',

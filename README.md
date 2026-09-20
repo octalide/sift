@@ -120,7 +120,7 @@ A release grade reads the checkout when the session is inside the repo being gra
 
 ## Outbound text
 
-With `gateOutbound: true` the text a tool call is about to send is checked before the call runs: Discord `send_message`, `send_dm`, `edit_message`, `send_webhook_message`, `create_forum_post` content and embed text, and the `--body`/`-b` value of `gh pr|issue|release create|comment|edit` in a Bash command, quoted or in a `$(cat <<'EOF' ... EOF)` heredoc. The channel's hard limit is mechanical (2000 characters for Discord) and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
+With `gateOutbound: true` the text a tool call is about to send is checked before the call runs: Discord `send_message`, `send_dm`, `edit_message`, `send_webhook_message`, `create_forum_post` content and embed text, and the `--body`/`-b` value of `gh pr|issue|release create|comment|edit` in a Bash command, quoted or in a `$(cat <<'EOF' ... EOF)` heredoc. The channel's hard limit is mechanical (2000 characters for Discord) and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`, each question naming what the text is (`The subject (the body of a new GitHub issue) complies with this rule: ...`) so a rule written for another artifact, a pull request rule against an issue body, is answered as not applying rather than broken: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
 
 ## Messages
 

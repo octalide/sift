@@ -11,9 +11,10 @@ export function materialize(pack: Pack, subject: Subject): { questions: Question
   const entries = Object.entries(pack.questions);
   if (pack.expand) {
     const list = (subject.facts[pack.expand.from] as { text: string }[] | undefined) ?? [];
+    const label = typeof subject.facts['subject'] === 'string' ? subject.facts['subject'] : 'The subject';
     list.forEach((item, i) => {
       const t = pack.expand!.template;
-      entries.push([`${pack.expand!.from}_${i + 1}`, { ...t, instructions: t.instructions.replace('{text}', item.text) }]);
+      entries.push([`${pack.expand!.from}_${i + 1}`, { ...t, instructions: t.instructions.replace('{subject}', label).replace('{text}', item.text) }]);
     });
   }
   for (const [id, q] of entries) {
