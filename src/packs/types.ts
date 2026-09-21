@@ -35,8 +35,8 @@ export type RankStep = {
   within?: { field: string; of: string };
   // the item field naming it in the report, or a template over its fields ("{n}: {text}"); the item index when absent
   label?: string;
-  // how the report lists the step: every item in order (each), or the best items by value (top)
-  list?: 'each' | 'top';
+  // how the report lists the step: every item in order (each), the best items by value (top), or only the items it ruled out (violated)
+  list?: 'each' | 'top' | 'violated';
   // how a top list is shown: by value, or in input order (a log's lines read in order)
   order?: 'value' | 'input';
   // how many a top list shows, and how many of the items not ruled out survive it
@@ -45,6 +45,8 @@ export type RankStep = {
   fields?: string[];
   // the state field the survivors are placed under, read by the steps after it and by the pack's questions
   feed?: string;
+  // the state fields the items are read against, the whole state when absent; an isolated step repeats them per item
+  context?: string[];
 };
 
 export type Pack = {
@@ -73,12 +75,13 @@ export type Judged = {
   instructions: string;
 };
 
-// one item of a rank step: judged on the step's ordering question, with every answer it got
-export type RankedItem = Judged & { index: number; label: string; answers: Answers };
+// one item of a rank step: judged on the step's ordering question, with every answer it got and every question
+// of the step judged for it (asked, the ordering question among them, each under <step>_<n>.<question>)
+export type RankedItem = Judged & { index: number; label: string; answers: Answers; asked: Judged[] };
 
 export type RankedStep = {
   step: string;
-  list: 'each' | 'top';
+  list: 'each' | 'top' | 'violated';
   // items the step was asked about, and how many it did not rule out
   total: number;
   kept: number;
@@ -96,7 +99,7 @@ export type Report = {
   verdict: Verdict;
   backend: string;
   judgeError?: string;
-  // answers under an id no question asked for, and by answers the judge left out of a ranked item, dropped without touching the verdict
+  // answers under an id no question asked for, and answers the judge left out of a ranked item, dropped without touching the verdict
   dropped?: number;
 };
 

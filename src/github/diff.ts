@@ -65,6 +65,26 @@ export function splitDiff(diff: string): FilePatch[] {
   return out;
 }
 
+export type Hunk = { file: string; header: string; text: string };
+
+// a unified diff split per hunk: the file it lands in, its @@ header line, and the lines under it.
+// a file with no hunk (a rename, a mode change, a binary) is one hunk with an empty header and the whole patch as text
+export function hunksOf(diff: string): Hunk[] {
+  const out: Hunk[] = [];
+  for (const file of splitDiff(diff)) {
+    const parts = file.patch.split(/^(?=@@ )/m).slice(1);
+    if (parts.length === 0) {
+      out.push({ file: file.path, header: '', text: file.patch });
+      continue;
+    }
+    for (const part of parts) {
+      const nl = part.indexOf('\n');
+      out.push(nl < 0 ? { file: file.path, header: part, text: '' } : { file: file.path, header: part.slice(0, nl), text: part.slice(nl + 1).replace(/\n$/, '') });
+    }
+  }
+  return out;
+}
+
 export type Drift = { path: string; pr: string; base: string };
 
 // the files both diffs touch, each with its patch from either side, in the order the pr diff lists them

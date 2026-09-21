@@ -5,7 +5,7 @@ import type { Git } from '../forge/git.ts';
 import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, splitLog, type Bump, type ParsedCommit } from './commits.ts';
 import { compareVersions, parseTag, SEMVER_PATTERN, type Version } from './version.ts';
 import { manifestChanges, manifestFormat, type ManifestChange } from './manifest.ts';
-import { driftOf, lineDiff, type Drift } from './diff.ts';
+import { driftOf, hunksOf, lineDiff, type Drift, type Hunk } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
 import { discoverRules, type RuleSource } from '../rules/discover.ts';
@@ -16,6 +16,7 @@ const BODY_CAP = 20_000;
 const DIFF_CAP = 60_000;
 const COMMENT_CAP = 6_000;
 const DRIFT_CAP = 12_000;
+const HUNK_CAP = 12_000;
 
 
 export function sectionsOf(markdown: string): Record<string, string> {
@@ -103,6 +104,12 @@ function driftState(prDiff: string, baseDiff: string): Drift[] {
   return driftOf(prDiff, baseDiff).map((d) => ({ path: d.path, pr: truncate(d.pr, DRIFT_CAP, '\n[patch truncated]'), base: truncate(d.base, DRIFT_CAP, '\n[patch truncated]') }));
 }
 
+// the hunks a subject carries, each capped alone; the state names them by file and header so a judge reading one hunk sees the shape of the whole change
+function hunkState(diff: string): { hunks: Hunk[]; changes: { file: string; header: string }[] } {
+  const hunks = hunksOf(diff).map((h) => ({ ...h, text: truncate(h.text, HUNK_CAP, '\n[hunk truncated]') }));
+  return { hunks, changes: hunks.map((h) => ({ file: h.file, header: h.header })) };
+}
+
 export async function prSubject(forge: Forge, repo: string, n: number, config: RepoConfig): Promise<Subject> {
   const pr = await forge.pull(repo, n);
   const body = pr.body;
@@ -121,6 +128,7 @@ export async function prSubject(forge: Forge, repo: string, n: number, config: R
   const failed = checks.filter((c) => c.done && !c.ok);
   const pending = checks.filter((c) => !c.done);
   const drift = driftState(diff, baseDiff);
+  const { hunks, changes } = hunkState(diff);
   return {
     kind: 'pr',
     ref: `${repo}#${n}`,
@@ -139,6 +147,7 @@ export async function prSubject(forge: Forge, repo: string, n: number, config: R
       checks: { failed: failed.map((c) => c.name), pending: pending.map((c) => c.name), total: checks.length },
       recent_comments: recent.map((c) => ({ by: c.author.login, text: truncate(c.body, COMMENT_CAP) })),
       diff: truncate(diff, DIFF_CAP, '\n[diff truncated]'),
+      changes,
       drift: drift.map((d) => d.path),
     },
     facts: {
@@ -150,6 +159,7 @@ export async function prSubject(forge: Forge, repo: string, n: number, config: R
       checks_pending: pending.map((c) => c.name),
       commits,
       drift,
+      hunks,
       has_issue: issue !== undefined,
       has_diff: diff.length > 0,
       has_drift: drift.length > 0,
@@ -179,6 +189,7 @@ export async function prRangeSubject(git: Git, range: string, config: RepoConfig
   const number = branchIssue(branch, config.branches.pattern);
   const issue = number !== undefined && issues ? await issues.forge.issue(issues.repo, number).catch(() => undefined) : undefined;
   const drift = driftState(diff, baseDiff);
+  const { hunks, changes } = hunkState(diff);
   return {
     kind: 'pr',
     ref: range,
@@ -189,12 +200,14 @@ export async function prRangeSubject(git: Git, range: string, config: RepoConfig
       linked_issue: issue ? { number: issue.number, title: issue.title, body: truncate(issue.body, BODY_CAP) } : null,
       commits: commits.map((c) => c.message.split('\n')[0]),
       diff: truncate(diff, DIFF_CAP, '\n[diff truncated]'),
+      changes,
       drift: drift.map((d) => d.path),
     },
     facts: {
       head: branch,
       commits,
       drift,
+      hunks,
       has_issue: issue !== undefined,
       has_diff: diff.length > 0,
       has_drift: drift.length > 0,
