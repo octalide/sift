@@ -1,6 +1,6 @@
 import { PACKS_DIR } from '../github/config.ts';
 import { BUILTIN_PACKS } from './builtin.ts';
-import type { Pack } from './types.ts';
+import type { Pack, PackQuestion, RankStep } from './types.ts';
 
 export type FsLike = {
   read: (path: string) => Promise<string>;
@@ -14,25 +14,45 @@ function isNoulCriteria(value: unknown): boolean {
   return typeof c['true'] === 'string' && typeof c['false'] === 'string';
 }
 
-export function validatePack(raw: unknown, name: string): Pack {
-  if (raw === null || typeof raw !== 'object') throw new Error(`pack ${name}: not an object`);
-  const p = raw as Partial<Pack>;
-  if (typeof p.subject !== 'string') throw new Error(`pack ${name}: missing subject`);
-  if (p.questions !== undefined && (p.questions === null || typeof p.questions !== 'object')) throw new Error(`pack ${name}: questions must be an object`);
-  for (const [id, q] of Object.entries(p.questions ?? {})) {
+function validateQuestions(raw: unknown, name: string, where: string): Record<string, PackQuestion> {
+  if (raw === undefined) return {};
+  if (raw === null || typeof raw !== 'object') throw new Error(`pack ${name}: ${where} must be an object`);
+  for (const [id, q] of Object.entries(raw as Record<string, PackQuestion>)) {
     if (!['noul', 'choice', 'score'].includes(q.type)) throw new Error(`pack ${name}: question ${id} has unknown type ${String(q.type)}`);
     if (typeof q.instructions !== 'string') throw new Error(`pack ${name}: question ${id} has no instructions`);
     if (q.type === 'score' && !Array.isArray(q.criteria)) throw new Error(`pack ${name}: score ${id} needs a criteria array`);
     if (q.type === 'noul' && q.criteria !== undefined && !isNoulCriteria(q.criteria)) throw new Error(`pack ${name}: noul ${id} criteria must be { true, false } strings`);
     if (q.type === 'choice' && !q.options && (q.criteria === null || typeof q.criteria !== 'object')) throw new Error(`pack ${name}: choice ${id} needs criteria or options`);
   }
+  return raw as Record<string, PackQuestion>;
+}
+
+function validateRank(raw: unknown, name: string): RankStep[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) throw new Error(`pack ${name}: rank must be an array of steps`);
+  return raw.map((step: Partial<RankStep>, i) => {
+    if (step === null || typeof step !== 'object' || typeof step.from !== 'string') throw new Error(`pack ${name}: rank step ${i + 1} needs from`);
+    const questions = validateQuestions(step.questions, name, `rank step ${i + 1} questions`);
+    if (Object.keys(questions).length === 0) throw new Error(`pack ${name}: rank step ${i + 1} needs at least one question`);
+    if (step.by !== undefined && !questions[step.by]) throw new Error(`pack ${name}: rank step ${i + 1} sorts by unknown question ${step.by}`);
+    if (step.within !== undefined && (typeof step.within.field !== 'string' || typeof step.within.of !== 'string')) throw new Error(`pack ${name}: rank step ${i + 1} within needs field and of`);
+    if (step.list !== undefined && !['each', 'top'].includes(step.list)) throw new Error(`pack ${name}: rank step ${i + 1} list must be each or top`);
+    return { ...step, from: step.from, questions };
+  });
+}
+
+export function validatePack(raw: unknown, name: string): Pack {
+  if (raw === null || typeof raw !== 'object') throw new Error(`pack ${name}: not an object`);
+  const p = raw as Partial<Pack>;
+  if (typeof p.subject !== 'string') throw new Error(`pack ${name}: missing subject`);
+  if ('expand' in p) throw new Error(`pack ${name}: expand is gone, write it as a rank step: { "rank": [{ "from": "<list>", "questions": { "<id>": <question> } }] }`);
   return {
     name: p.name ?? name,
     subject: p.subject as Pack['subject'],
     description: p.description ?? '',
     checks: Array.isArray(p.checks) ? p.checks : [],
-    questions: p.questions ?? {},
-    expand: p.expand,
+    questions: validateQuestions(p.questions, name, 'questions'),
+    rank: validateRank(p.rank, name),
   };
 }
 

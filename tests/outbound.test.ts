@@ -62,8 +62,8 @@ describe('rules subject for outbound text', () => {
     const s = await rulesSubject(undefined, undefined, { kind: 'text', ref: body, artifact: { kind: 'issue', action: 'create' } }, config, read, exists);
     expect(s.state['subject']).toMatchObject({ kind: 'text', artifact: 'issue', action: 'create', about: 'the body of a new GitHub issue', text: body });
     expect(s.facts['subject']).toBe('The subject (the body of a new GitHub issue)');
-    const { expansion } = materialize(BUILTIN_PACKS['rules']!, s);
-    const asked = expansion!.items.map((item, i) => fillQuestion(expansion!.questions['rules']!, entryOf(item, i)).instructions);
+    const step = materialize(BUILTIN_PACKS['rules']!, s).steps[0]!;
+    const asked = step.items.map((item, i) => fillQuestion(step.questions['rules']!, entryOf(item, i)).instructions);
     expect(asked[0]).toBe('The subject (the body of a new GitHub issue) complies with this rule: Pull requests: The body carries verification evidence.');
     expect(asked[1]).toContain('Closes #N');
   });
@@ -72,7 +72,7 @@ describe('rules subject for outbound text', () => {
     const s = await rulesSubject(undefined, undefined, { kind: 'text', ref: 'free text' }, config, read, exists);
     expect(s.state['subject']).toEqual({ kind: 'text', text: 'free text' });
     expect(s.facts['subject']).toBe('The subject');
-    expect(materialize(BUILTIN_PACKS['rules']!, s).expansion?.questions['rules']?.instructions).toMatch(/^The subject complies with this rule: \{text\}$/);
+    expect(materialize(BUILTIN_PACKS['rules']!, s).steps[0]?.questions['rules']?.instructions).toMatch(/^The subject complies with this rule: \{text\}$/);
   });
 
   it('describes each artifact and action', () => {

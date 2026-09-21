@@ -172,20 +172,24 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     description: 'Does the subject comply with each rule stated in the repository rule documents?',
     checks: ['rules.present'],
     questions: {},
-    expand: {
-      from: 'rules',
-      template: {
-        type: 'noul',
-        instructions: '{subject} complies with this rule: {text}',
-        criteria: {
-          true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply.',
-          false: 'The subject does something the rule forbids or omits something it requires.',
+    rank: [
+      {
+        from: 'rules',
+        questions: {
+          rules: {
+            type: 'noul',
+            instructions: '{subject} complies with this rule: {text}',
+            criteria: {
+              true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply.',
+              false: 'The subject does something the rule forbids or omits something it requires.',
+            },
+            severity: 'warn',
+            lo: 0.3,
+            hi: 0.6,
+          },
         },
-        severity: 'warn',
-        lo: 0.3,
-        hi: 0.6,
       },
-    },
+    ],
   },
   triage: {
     name: 'triage',

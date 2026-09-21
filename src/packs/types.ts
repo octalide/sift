@@ -1,4 +1,5 @@
-import type { Answer, Band, Question } from '../judge/types.ts';
+import type { Answer, Answers, Band, Question } from '../judge/types.ts';
+import type { RankMode } from '../judge/rank.ts';
 
 export type Severity = 'fail' | 'warn' | 'info';
 
@@ -18,7 +19,27 @@ export type PackQuestion = (Exclude<Question, { type: 'choice' }> | PackChoice) 
   inverted?: boolean;
 };
 
-export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text';
+export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'tree';
+
+// one rank over a subject list: every item is asked the step's questions, the subject state as context.
+// {field} in a question takes the item's field, {subject} the subject's own label
+export type RankStep = {
+  // the subject fact holding the items, each a record
+  from: string;
+  questions: Record<string, PackQuestion>;
+  // batched when absent
+  mode?: RankMode;
+  // the question whose value orders and bands the items, the first when absent
+  by?: string;
+  // hierarchy: keep only items whose field equals the field of an item the previous step did not rule out
+  within?: { field: string; of: string };
+  // the item field naming it in the report, the item index when absent
+  label?: string;
+  // how the report lists the step: every item in order (each), or the best items by value (top)
+  list?: 'each' | 'top';
+  // how many a top list shows
+  top?: number;
+};
 
 export type Pack = {
   name: string;
@@ -26,8 +47,8 @@ export type Pack = {
   description: string;
   checks: string[];
   questions: Record<string, PackQuestion>;
-  // generate one question per entry of a subject list (rules): the template's instructions take {text} and {subject}
-  expand?: { from: string; template: PackQuestion };
+  // ranks over subject lists, run in order after the questions
+  rank?: RankStep[];
 };
 
 export type Finding = {
@@ -44,6 +65,18 @@ export type Judged = {
   instructions: string;
 };
 
+// one item of a rank step: judged on the step's ordering question, with every answer it got
+export type RankedItem = Judged & { index: number; label: string; answers: Answers };
+
+export type RankedStep = {
+  step: string;
+  list: 'each' | 'top';
+  // items the step was asked about, and how many it did not rule out
+  total: number;
+  kept: number;
+  items: RankedItem[];
+};
+
 export type Verdict = 'pass' | 'warn' | 'fail' | 'unknown';
 
 export type Report = {
@@ -51,6 +84,7 @@ export type Report = {
   subject: string;
   mechanical: Finding[];
   judged: Judged[];
+  ranked: RankedStep[];
   verdict: Verdict;
   backend: string;
   judgeError?: string;

@@ -119,9 +119,10 @@ export async function gateOutbound(out: Outbound, subject: Subject, pack: Pack, 
   }
   const report = await runPack(pack, subject, judge, config);
   if (report.judgeError) return { allow: true, reason: `judge unavailable (${report.judgeError})`, report, warnings: [] };
-  const rule = (id: string) => report.judged.find((j) => j.id === id)?.instructions.replace(/^The subject(?: \([^)]*\))? complies with this rule: /, '') ?? id;
-  const violated = report.judged.filter((j) => j.band === 'violated' && j.severity !== 'info');
-  const unclear = report.judged.filter((j) => j.band === 'unclear' && j.severity !== 'info');
+  const judged = [...report.judged, ...report.ranked.flatMap((r) => r.items)];
+  const rule = (id: string) => judged.find((j) => j.id === id)?.instructions.replace(/^The subject(?: \([^)]*\))? complies with this rule: /, '') ?? id;
+  const violated = judged.filter((j) => j.band === 'violated' && j.severity !== 'info');
+  const unclear = judged.filter((j) => j.band === 'unclear' && j.severity !== 'info');
   const warnings = unclear.map((j) => `unclear: ${rule(j.id)}`);
   if (violated.length > 0) return { allow: false, reason: `breaks: ${violated.map((j) => rule(j.id)).join(' | ')}`, report, warnings };
   return { allow: true, reason: 'clear', report, warnings };
