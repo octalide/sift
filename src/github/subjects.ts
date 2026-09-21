@@ -242,7 +242,7 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
   const range = lastTag ? `${lastTag}..${source.head}` : source.head;
   const commits = (await source.log(lastTag)).map((c) => parseCommit(c.sha, c.message, config.commits.format));
   const version = config.release.versionPattern ? last?.version : undefined;
-  const commitBump = requiredBump(commits, version, config.release.zeroVerBreaking);
+  const commitBump = requiredBump(commits, config.commits.bumps ?? {}, version, config.release.zeroVerBreaking);
   const manifests: ManifestChange[] = [];
   const unparsed: string[] = [];
   for (const rule of config.release.manifests) {

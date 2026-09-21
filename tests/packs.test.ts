@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Git } from '../src/forge/git.ts';
-import { parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
+import { CONVENTIONAL_BUMPS, parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
 import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, SEMVER_PATTERN, CALVER_PATTERN } from '../src/github/version.ts';
 import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/github/manifest.ts';
 import { driftOf, lineDiff, splitDiff } from '../src/github/diff.ts';
@@ -30,17 +30,35 @@ describe('conventional commits', () => {
 
   it('computes the required bump', () => {
     const log = parseLog('\u001eaaa\nfix: a\n\u001ebbb\nfeat: b\n\u001eccc\nchore: c\n');
-    expect(requiredBump(log)).toBe('minor');
-    expect(requiredBump([parseCommit('x', 'refactor!: y')])).toBe('major');
-    expect(requiredBump([parseCommit('x', 'docs: y')])).toBe('none');
+    expect(requiredBump(log, CONVENTIONAL_BUMPS)).toBe('minor');
+    expect(requiredBump([parseCommit('x', 'refactor!: y')], CONVENTIONAL_BUMPS)).toBe('major');
+    expect(requiredBump([parseCommit('x', 'docs: y')], CONVENTIONAL_BUMPS)).toBe('none');
+    expect(requiredBump([parseCommit('x', 'perf: y')], CONVENTIONAL_BUMPS)).toBe('patch');
     const v = (raw: string) => parseVersion(raw, SEMVER_PATTERN)!;
-    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], v('0.17.2'))).toBe('minor');
-    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], v('0.17.2'), 'major')).toBe('major');
-    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], v('1.0.0'))).toBe('major');
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], CONVENTIONAL_BUMPS, v('0.17.2'))).toBe('minor');
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], CONVENTIONAL_BUMPS, v('0.17.2'), 'major')).toBe('major');
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], CONVENTIONAL_BUMPS, v('1.0.0'))).toBe('major');
     expect(bumpVersion(v('0.3.1'), 'minor', SEMVER_PATTERN)).toBe('0.4.0');
     expect(bumpVersion(v('1.3.1'), 'major', SEMVER_PATTERN)).toBe('2.0.0');
     expect(bumpVersion(v('1.9.9-rc.1'), 'patch', SEMVER_PATTERN)).toBe('1.9.10');
     expect(bumpBetween(v('1.2.3'), v('1.3.0'))).toBe('minor');
+  });
+
+  it('reads the bump each type calls for from the configured map', () => {
+    const bumps = { change: 'minor' as const, docs: 'patch' as const, feat: 'none' as const };
+    expect(requiredBump(parseLog('\u001eaaa\nfeat: a\n\u001ebbb\ndocs: b\n'), bumps)).toBe('patch');
+    expect(requiredBump([parseCommit('x', 'change: y')], bumps)).toBe('minor');
+    expect(requiredBump([parseCommit('x', 'feat: y')], bumps)).toBe('none');
+    expect(requiredBump([parseCommit('x', 'feat!: y')], bumps)).toBe('major');
+    expect(requiredBump([parseCommit('x', 'feat: y')], {})).toBe('none');
+    const custom = resolveConfig({ commits: { convention: 'conventional', bumps }, release: { scheme: 'semver' } });
+    expect(custom.commits.bumps).toEqual(bumps);
+    expect(resolveConfig({ commits: { convention: 'conventional' } }).commits.bumps).toEqual(CONVENTIONAL_BUMPS);
+    expect(resolveConfig({}).commits.bumps).toEqual(CONVENTIONAL_BUMPS);
+    expect(resolveConfig({ commits: { format: String.raw`^(?<type>\w+): ` } }).commits.bumps).toEqual({});
+    expect(() => resolveConfig({ commits: { bumps: { feat: 'huge' } } })).toThrow('commits.bumps.feat');
+    const s: Subject = { kind: 'release', ref: 'HEAD', state: {}, facts: { has_commits: true, bump: 'none' }, options: {} };
+    expect(runChecks(BUILTIN_PACKS['release']!, s, custom).map((f) => f.message)).toEqual(['nothing since the last tag calls for a release (no change, docs, breaking change, manifest change)']);
   });
 
   it('parses commits against a custom format', () => {

@@ -50,19 +50,24 @@ export function scopeHeader(c: ParsedCommit): string {
 
 export type Bump = 'major' | 'minor' | 'patch' | 'none';
 
+export const BUMPS: readonly Bump[] = ['major', 'minor', 'patch', 'none'];
+
+// the bump each conventional commit type calls for; a type not listed calls for none
+export const CONVENTIONAL_BUMPS: Record<string, Bump> = { feat: 'minor', fix: 'patch', perf: 'patch' };
+
 const BUMP_RANK: Record<Bump, number> = { none: 0, patch: 1, minor: 2, major: 3 };
 
 export function maxBump(a: Bump, b: Bump): Bump {
   return BUMP_RANK[a] >= BUMP_RANK[b] ? a : b;
 }
 
-// the bump the commit types alone call for; a breaking change below 1.0.0 requires zeroVerBreaking
-export function requiredBump(commits: ParsedCommit[], version?: Version, zeroVerBreaking: 'major' | 'minor' = 'minor'): Bump {
+// the bump the commits alone call for: each type's entry in bumps, a breaking change the breaking bump regardless of
+// type, which below 1.0.0 is zeroVerBreaking
+export function requiredBump(commits: ParsedCommit[], bumps: Record<string, Bump>, version?: Version, zeroVerBreaking: 'major' | 'minor' = 'minor'): Bump {
   let bump: Bump = 'none';
   for (const c of commits) {
     if (c.breaking) bump = maxBump(bump, version && isZeroVer(version) ? zeroVerBreaking : 'major');
-    else if (c.type === 'feat') bump = maxBump(bump, 'minor');
-    else if (c.type === 'fix' || c.type === 'perf') bump = maxBump(bump, 'patch');
+    else if (c.type !== undefined) bump = maxBump(bump, bumps[c.type] ?? 'none');
   }
   return bump;
 }

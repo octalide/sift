@@ -1,9 +1,10 @@
-import { CONVENTIONAL_FORMAT } from './commits.ts';
+import { BUMPS, CONVENTIONAL_BUMPS, CONVENTIONAL_FORMAT, type Bump } from './commits.ts';
 import { CALVER_PATTERN, SEMVER_PATTERN } from './version.ts';
 import type { Channel } from '../gate/channels.ts';
 
 // presets expand to a regex at resolve time; an explicit pattern beside one wins
 export const COMMIT_FORMATS = { conventional: CONVENTIONAL_FORMAT } as const;
+export const COMMIT_BUMPS: Record<keyof typeof COMMIT_FORMATS, Record<string, Bump>> = { conventional: CONVENTIONAL_BUMPS };
 // matched against type(scope), or the bare type without a scope
 export const SCOPE_PATTERNS = { issue: String.raw`^(chore\(.*\)|[^(]+(\(#\d+\))?)$`, none: String.raw`^[^(]*$` } as const;
 export const VERSION_PATTERNS = { semver: SEMVER_PATTERN, calver: CALVER_PATTERN } as const;
@@ -15,6 +16,9 @@ export type RepoConfig = {
     // regex over the subject line with the named groups type, scope, breaking and description
     format?: string;
     types: string[];
+    // the release bump each type calls for; a type not listed calls for none, and a breaking change is a breaking
+    // bump whatever its type. unset, the convention's preset fills it (conventional: feat minor, fix and perf patch)
+    bumps?: Record<string, Bump>;
     // preset for scopePattern: issue requires #<n> (chore excepted), any accepts anything, none forbids a scope
     scope: keyof typeof SCOPE_PATTERNS | 'any';
     // regex over the header's type(scope), or the bare type when there is no scope
@@ -114,6 +118,11 @@ export function resolveConfig(layers: unknown | unknown[], defaultBranch?: strin
 
 function expandPresets(config: RepoConfig): RepoConfig {
   const commits = { ...config.commits };
+  // commits parse with the conventional header when no format is set at all, so the bumps follow the same fallback
+  if (commits.bumps === undefined) commits.bumps = commits.convention !== 'none' ? COMMIT_BUMPS[commits.convention] : commits.format === undefined ? CONVENTIONAL_BUMPS : {};
+  for (const [type, bump] of Object.entries(commits.bumps)) {
+    if (!BUMPS.includes(bump)) throw new Error(`sift config: commits.bumps.${type} is ${JSON.stringify(bump)}, not one of ${BUMPS.join(', ')}`);
+  }
   if (commits.format === undefined && commits.convention !== 'none') commits.format = COMMIT_FORMATS[commits.convention];
   if (commits.scopePattern === undefined && commits.scope !== 'any') commits.scopePattern = SCOPE_PATTERNS[commits.scope];
   const { target, ...prs } = config.prs as RepoConfig['prs'] & { target?: string };
