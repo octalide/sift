@@ -14,7 +14,7 @@ Everything sift does is built on that one call, directly or through `rank`, whic
 | module | hook | what it does | default |
 |---|---|---|---|
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed and leaves a one-line note in their place with the omitted line range and how to get it back (re-read the file by range for Read, rerun the command for Bash). Nothing is kept on disk | on |
-| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one), `mcp__sift__judge` answers raw typed questions and `mcp__sift__rank` asks the same questions of many items | on |
+| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, locate, or a repo-defined one), `mcp__sift__judge` answers raw typed questions and `mcp__sift__rank` asks the same questions of many items | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
 | `gateOutbound` | `tool.call` (pre) | checks text about to leave the session (a Discord message, a `gh pr`, `gh issue` or `gh release` create, comment or edit body) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
@@ -60,6 +60,8 @@ grade(pack: "release", subject: "v1.4.0")      # or "release" for the required b
 grade(pack: "release", subject: "v1.4.0", repo: "o/r", ref: "dev")  # any repo, no checkout needed
 grade(pack: "rules", subject: "42")            # a PR against the repo's rule documents
 grade(pack: "rules", subject: "x", text: "...") # free text against the rules
+grade(pack: "locate", subject: "17")           # the files to read or change for issue 17, top 20 per level
+grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free text
 ```
 
 A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable).
@@ -173,7 +175,9 @@ A noul's optional `criteria` is Jev's shape, `{ "true": "...", "false": "..." }`
 
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, and `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`).
 
-A pack may also carry `rank`, a list of steps run in order after the questions, each one `rank` over a subject list with the subject state as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by), `list` (`each` prints every item in order, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`) and `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out (a band other than violated), which makes steps hierarchical. The rules pack is one `each` step over the rule paragraphs.
+A pack may also carry `rank`, a list of steps run in order after the questions, each one `rank` over a subject list with the subject state as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by), `list` (`each` prints every item in order, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`) and `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out (a band other than violated), which makes steps hierarchical. The rules pack is one `each` step over the rule paragraphs; locate is two `top` steps, directories then the files within those not ruled out, so each rank reads only what could matter.
+
+The `tree` subject is a text (an issue's title and body, or free text) over an index of the checkout built in code from `git ls-files`: every directory with its file count and a sample of names, every file with its first non-empty lines and the exported or top-level symbol names a per-extension regex finds. `node_modules` and similar trees, lockfiles, binaries by extension, files with nul bytes and files over 200 kB never enter it.
 
 Subject kinds and the checks they support:
 
@@ -184,6 +188,7 @@ Subject kinds and the checks they support:
 | `commit` | `commit.format` |
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
+| `tree` | `tree.indexed` |
 | `event`, `text`, `command` | none |
 
 ## Watch

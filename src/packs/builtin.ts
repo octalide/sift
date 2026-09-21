@@ -191,6 +191,51 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       },
     ],
   },
+  locate: {
+    name: 'locate',
+    subject: 'tree',
+    description: 'Which files must be read or changed to implement this?',
+    checks: ['tree.indexed'],
+    questions: {},
+    // directories first, then the files of the directories not ruled out, so each rank reads only what could matter
+    rank: [
+      {
+        from: 'dirs',
+        label: 'path',
+        list: 'top',
+        questions: {
+          holds: {
+            type: 'noul',
+            instructions: 'Files needed to implement this are in the directory {path}.',
+            criteria: {
+              true: 'Implementing the text means reading or changing at least one file that lives directly in this directory, judged from its name and the files it holds.',
+              false: 'Nothing in this directory bears on the text: unrelated code, assets, generated output, or tooling the change does not touch.',
+            },
+            severity: 'info',
+            lo: 0.25,
+            hi: 0.6,
+          },
+        },
+      },
+      {
+        from: 'files',
+        within: { field: 'dir', of: 'path' },
+        label: 'path',
+        list: 'top',
+        questions: {
+          needed: {
+            type: 'noul',
+            instructions: 'The file {path} must be read or changed to implement this.',
+            criteria: {
+              true: 'The change lands in this file, or the file defines what the change builds on and must be read first.',
+              false: 'The file is unrelated to the text, or a general dependency anyone would already know.',
+            },
+            severity: 'info',
+          },
+        },
+      },
+    ],
+  },
   triage: {
     name: 'triage',
     subject: 'event',
