@@ -14,6 +14,7 @@ import type { Answer, Judge, Questions } from '../src/judge/types.ts';
 import { DecisionLog, type Cost } from '../src/log.ts';
 import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
+import { parseSubject, type ParsedKind } from '../src/packs/subject.ts';
 import type { Pack, Report, Subject } from '../src/packs/types.ts';
 import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { estimateTokens, truncate } from '../src/tokens.ts';
@@ -172,21 +173,28 @@ export const register: Register = (on, rawOptions) => {
     };
     const number = () => Number(ref.replace(/^#/, ''));
     const fs = { read: (p: string) => rt.git(['show', `HEAD:${p}`]).catch(() => readFile(p)), exists: (p: string) => existsFile(p) };
+    // the subject is parsed, and a bad one refused, before any forge request; a url names its own repo
+    const parsed = <K extends ParsedKind>(kind: K) => parseSubject(kind, ref, rt.forge, opts.repo);
     switch (pack.subject) {
-      case 'issue':
-        return issueSubject(rt.forge, needRepo(), number(), rt.config);
-      case 'pr':
-        return prSubject(rt.forge, needRepo(), number(), rt.config);
+      case 'issue': {
+        const p = parsed('issue');
+        return issueSubject(rt.forge, p.repo ?? needRepo(), p.number, rt.config);
+      }
+      case 'pr': {
+        const p = parsed('pr');
+        return prSubject(rt.forge, p.repo ?? needRepo(), p.number, rt.config);
+      }
       case 'commit':
-        return commitSubject(rt.git, ref || 'HEAD', rt.config);
+        return commitSubject(rt.git, parsed('commit').ref, rt.config);
       case 'release': {
+        const p = parsed('release');
         // the checkout serves its own repo; any other repo, or no checkout at all, is read from the forge
         const local = rt.repo !== undefined && (opts.repo === undefined || opts.repo === rt.repo);
         const source = local
           ? localSource(rt.git, opts.ref ?? 'HEAD', readFile, existsFile)
           : remoteSource(rt.forge, needRepo(), opts.ref ?? defaultTarget(rt.config) ?? (await rt.forge.defaultBranch(needRepo())));
         const s = await releaseSubject(source, rt.config);
-        if (ref && ref !== 'release') s.facts['proposed'] = ref;
+        if (p.proposed !== undefined) s.facts['proposed'] = p.proposed;
         return s;
       }
       case 'rules': {
@@ -334,12 +342,12 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs: issue (subject: issue number), pr (PR number), commit (sha or range like main..HEAD), release (subject: "release" or a proposed version like v1.4.0, ref: the branch it is cut from, repo: any repo, no checkout needed), rules (subject: PR number, issue number with text="issue", commit, or free text in text), locate (subject: issue number or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (subject: issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, or a PR URL), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number, an issue number with text="issue", a commit, or free text in text), locate (an issue number, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {
             pack: { type: 'string', description: 'pack name' },
-            subject: { type: 'string', description: 'issue or PR number, commit or range, "release", or a version' },
+            subject: { type: 'string', description: 'what the pack grades: an issue or PR number (N or #N) or URL, a commit ref or range, "release" or a version. See the pack list for what each accepts' },
             repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from the code host' },
             text: { type: 'string', description: 'free text subject for the rules and locate packs, the plan for the plan pack, or "issue" to grade an issue number against the rules' },
             ref: { type: 'string', description: 'release pack: the branch or sha the release is cut from. Defaults to HEAD in a checkout, else the configured PR target branch, else the default branch' },
@@ -402,7 +410,8 @@ export const register: Register = (on, rawOptions) => {
   on('tool.call', { tool: 'mcp__sift__grade' }, async ($, e) => {
     const input = e as unknown as { pack: string; subject: string; repo?: string; text?: string; ref?: string; top?: number };
     try {
-      const report = await grade(ready(), input.pack, String(input.subject), { repo: input.repo, text: input.text, ref: input.ref, top: input.top });
+      const subject = input.subject === undefined || input.subject === null ? '' : String(input.subject);
+      const report = await grade(ready(), input.pack, subject, { repo: input.repo, text: input.text, ref: input.ref, top: input.top });
       return { result: [{ type: 'text', text: formatReport(report) }] };
     } catch (error) {
       return { deny: `sift grade failed: ${messageOf(error)}` };

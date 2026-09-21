@@ -1,7 +1,7 @@
 import { Gh, GhError, type ApiResponse } from '../github/gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
 import { shellWord } from '../shell.ts';
-import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeUser, ForgeWrite, Issue, IssueSummary, PullHead, PullRequest, Rate, Review, ReviewComment, Run, Template, WatchItem } from './forge.ts';
+import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgeUser, ForgeWrite, Issue, IssueSummary, PullHead, PullRequest, Rate, Review, ReviewComment, Run, Template, WatchItem } from './forge.ts';
 
 type GhUser = { login: string; type?: string };
 type GhIssue = {
@@ -70,6 +70,9 @@ export type RawItem = {
 };
 
 const GH_WRITE = /^\s*gh\s+(pr|issue|release)\s+(create|comment|edit)\b/;
+// the html and api urls of an issue or pull request; anything past the number (a comment anchor, /files) is ignored
+const GH_URL = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+\/[^/\s#?]+)\/(issues|pull)\/(\d+)(?:[/?#].*)?$/;
+const GH_API_URL = /^https?:\/\/api\.github\.com\/repos\/([^/\s]+\/[^/\s#?]+)\/(issues|pulls)\/(\d+)(?:[/?#].*)?$/;
 
 // the value after --body or -b: a quoted word, or a heredoc inside $(cat <<'EOF' ... EOF); else the path after --body-file or -F
 export function ghBody(command: string): ForgeWrite['body'] {
@@ -313,5 +316,11 @@ export class GitHubForge implements Forge {
     const m = GH_WRITE.exec(command);
     if (!m) return undefined;
     return { kind: m[1] as ForgeArtifact, action: m[2] as ForgeAction, body: ghBody(command) };
+  }
+
+  parseUrl(url: string): ForgeLink | undefined {
+    const m = GH_URL.exec(url.trim()) ?? GH_API_URL.exec(url.trim());
+    if (!m) return undefined;
+    return { repo: m[1]!, kind: m[2] === 'issues' ? 'issue' : 'pr', number: Number(m[3]) };
   }
 }

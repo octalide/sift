@@ -53,8 +53,8 @@ claude --plugin-dir ./sift --settings '{"pluginConfigs":{"sift@inline":{"options
 The tools are registered as `mcp__sift__grade`, `mcp__sift__judge` and `mcp__sift__rank`.
 
 ```
-grade(pack: "pr", subject: "42")
-grade(pack: "issue", subject: "17")
+grade(pack: "pr", subject: "42")               # or "#42", or the PR's URL
+grade(pack: "issue", subject: "17")            # or "#17", or an issue URL, which may name another repo
 grade(pack: "commit", subject: "main..HEAD")
 grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
 grade(pack: "release", subject: "v1.4.0", repo: "o/r", ref: "dev")  # any repo, no checkout needed
@@ -64,6 +64,8 @@ grade(pack: "locate", subject: "17")           # the files to read or change for
 grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free text
 grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17: covers it, adds nothing, decides nothing it leaves open
 ```
+
+The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `commit` takes a ref or range, `release` takes a tag or `release`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
 
 A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable).
 
