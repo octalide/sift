@@ -1,3 +1,4 @@
+import { rank } from '../judge/rank.ts';
 import type { Judge, Questions } from '../judge/types.ts';
 import { estimateTokens, JEV_LIMITS, truncate } from '../tokens.ts';
 
@@ -57,41 +58,17 @@ export function chunkText(text: string, chunkLines: number, maxChunks: number): 
   return chunks;
 }
 
-function questionsFor(chunks: Chunk[]): Questions {
-  const q: Questions = {};
-  for (const c of chunks) {
-    if (c.protected) continue;
-    q[`c${c.k}`] = {
-      type: 'noul',
-      instructions: `At least one line in chunk ${c.k} (lines ${c.from}-${c.to}) is needed to carry out the task or answer the user.`,
-      criteria: {
-        true: 'The chunk holds a result, diagnostic, or value the task asks about.',
-        false: 'The chunk is progress output, repeated boilerplate, or a listing the task does not refer to.',
-      },
-    };
-  }
-  return q;
-}
-
-// splits the chunks into requests whose state stays under the budget
-function batches(chunks: Chunk[], context: PruneContext, maxRequestTokens: number): Chunk[][] {
-  const overhead = estimateTokens(JSON.stringify({ tool: context.tool, input: context.input, task: truncate(context.task, 2000) })) + 200;
-  const out: Chunk[][] = [];
-  let current: Chunk[] = [];
-  let tokens = overhead;
-  for (const c of chunks) {
-    const cost = estimateTokens(c.text) + 60;
-    if (tokens + cost > maxRequestTokens && current.length > 0) {
-      out.push(current);
-      current = [];
-      tokens = overhead;
-    }
-    current.push(c);
-    tokens += cost;
-  }
-  if (current.length > 0) out.push(current);
-  return out;
-}
+// one question per chunk, the chunk named by its index and line range in the state
+const NEEDED: Questions = {
+  needed: {
+    type: 'noul',
+    instructions: 'At least one line in chunk {k} (lines {lines}) is needed to carry out the task or answer the user.',
+    criteria: {
+      true: 'The chunk holds a result, diagnostic, or value the task asks about.',
+      false: 'The chunk is progress output, repeated boilerplate, or a listing the task does not refer to.',
+    },
+  },
+};
 
 // the one-line stub left where a run of chunks was dropped: the range and the call that gets it back
 export type OmissionNote = (from: number, to: number) => string;
@@ -134,26 +111,16 @@ export async function prune(text: string, context: PruneContext, judge: Judge, o
   const chunks = chunkText(text, options.chunkLines, options.maxChunks);
   const judged = chunks.filter((c) => !c.protected);
   if (judged.length === 0) return none('every chunk protected');
-  const scores: Record<number, number> = {};
-  const groups = batches(chunks, context, options.maxRequestTokens);
-  const results = await Promise.all(
-    groups.map((group) =>
-      judge.ask(
-        {
-          tool: context.tool,
-          input: context.input,
-          task: truncate(context.task, 2000),
-          note: groups.length > 1 ? `part of a larger output, chunks ${group[0]!.k}-${group[group.length - 1]!.k}` : undefined,
-          chunks: group.map((c) => ({ k: c.k, lines: `${c.from}-${c.to}`, text: c.text })),
-        },
-        questionsFor(group),
-      ),
-    ),
+  // every chunk rides in the state so the judge reads the whole output, protected ones are asked about and ignored
+  const ranked = await rank(
+    chunks.map((c) => ({ lines: `${c.from}-${c.to}`, text: c.text })),
+    NEEDED,
+    judge,
+    { mode: 'batched', context: { tool: context.tool, input: context.input, task: truncate(context.task, 2000) }, maxRequestTokens: options.maxRequestTokens },
   );
-  for (const r of results) {
-    if (!r.ok) return { ...none('judge failed'), skipped: undefined, error: `${r.reason}: ${r.message}` };
-    for (const [id, a] of Object.entries(r.answers)) if (a.type === 'noul') scores[Number(id.slice(1))] = a.p;
-  }
+  if (!ranked.ok) return { ...none('judge failed'), skipped: undefined, error: `${ranked.reason}: ${ranked.message}` };
+  const scores: Record<number, number> = {};
+  for (const r of ranked.items) if (!chunks[r.index]!.protected) scores[r.index] = r.value;
   const keep = (c: Chunk) => c.protected || (scores[c.k] ?? 1) >= options.keepThreshold;
   const kept = chunks.filter(keep).length;
   return {
@@ -162,6 +129,6 @@ export async function prune(text: string, context: PruneContext, judge: Judge, o
     kept,
     dropped: chunks.length - kept,
     scores,
-    requests: groups.length,
+    requests: ranked.requests,
   };
 }
