@@ -95,6 +95,9 @@ export type ForgeAction = 'create' | 'comment' | 'edit';
 // a write the forge's cli is about to make: the body inline, or the file it will be read from
 export type ForgeWrite = { kind: ForgeArtifact; action: ForgeAction; body: { text: string } | { file: string } | undefined };
 
+// an issue or pull request a url on the forge names, with the repo as the forge paths it
+export type ForgeLink = { repo: string; kind: 'issue' | 'pr'; number: number };
+
 export interface Forge {
   // the forge's name as prose names it
   readonly name: string;
@@ -145,4 +148,6 @@ export interface Forge {
 
   // the artifact write a shell command makes through the forge's cli, undefined for any other command
   write(command: string): ForgeWrite | undefined;
+  // the issue or pull request a url in the forge's own shape names, undefined for any other text
+  parseUrl(url: string): ForgeLink | undefined;
 }
