@@ -2,7 +2,6 @@ import type { EngineInterface, PluginOptions, Register, SessionMessage } from 'c
 
 import { compact, COMPACT_DEFAULTS, reduction, type Message } from '../src/compact/compact.ts';
 import { compactWithLedger } from '../src/compact/ledger.ts';
-import { gate as runGate, mentionsSecret } from '../src/gate/gate.ts';
 import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
 import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/config.ts';
 import { Gh } from '../src/github/gh.ts';
@@ -16,7 +15,6 @@ import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
 import type { Pack, Report, Subject } from '../src/packs/types.ts';
 import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
-import { routeEffort, type Effort } from '../src/route/route.ts';
 import { estimateTokens, estimateTokensOf } from '../src/tokens.ts';
 import { Watcher } from '../src/watch/watcher.ts';
 
@@ -51,14 +49,9 @@ type Options = {
   watchTriage: boolean;
   watchDeferMaxAgeHours: number;
   grade: boolean;
-  gate: boolean;
   message: boolean;
-  gateFailClosed: boolean;
   gateOutbound: boolean;
   classify: boolean;
-  route: boolean;
-  routeMinEffort: Effort;
-  routeMaxEffort: Effort;
   // conventions applied under every repo's .sift/config.json: a path or inline json
   config: string;
 };
@@ -92,14 +85,9 @@ const DEFAULTS: Options = {
   watchTriage: true,
   watchDeferMaxAgeHours: 24,
   grade: true,
-  gate: false,
   message: false,
-  gateFailClosed: true,
   gateOutbound: false,
   classify: false,
-  route: false,
-  routeMinEffort: 'low',
-  routeMaxEffort: 'high',
   config: '',
 };
 
@@ -408,27 +396,11 @@ export const register: Register = (on, rawOptions) => {
     return result.ok ? { result: [{ type: 'text', text }] } : { deny: text };
   });
 
-  // gate before, prune after, on the same call
+  // outbound gate before, prune after, on the same call
   on('tool.call', async ($, e, next) => {
     if (e.tool.startsWith('mcp__sift__')) return next(e);
     const rt = runtime;
     if (!rt) return next(e);
-    const gated = options.gate && (e.tool === 'Bash' || e.tool === 'Write' || e.tool === 'Edit');
-    if (gated) {
-      const gatePack = rt.packs['gate'];
-      const input = e as unknown as Record<string, unknown>;
-      const g = { tool: e.tool, input, cwd: await $.session.cwd(), repoRoot: rt.root, task: await lastUserText($) };
-      if (mentionsSecret(g)) {
-        record('gate', 'skipped', { digest: `${e.tool} mentions a secret, not sent to the judge` });
-      } else if (gatePack) {
-        const decision = await runGate(g, gatePack, rt.judge, rt.config, options.gateFailClosed);
-        record('gate', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${e.tool}: ${decision.reason}` });
-        if (!decision.allow) {
-          if (options.shadow) $.ui.log(`sift gate (shadow): would deny ${e.tool}: ${decision.reason}`);
-          else return { deny: `sift gate: ${decision.reason}. Ask the user before retrying.` };
-        }
-      }
-    }
     const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
     if (outbound) {
       const rulesPack = rt.packs['rules'];
@@ -614,19 +586,6 @@ export const register: Register = (on, rawOptions) => {
     record('classify', options.shadow ? 'would-answer' : 'answered', { digest: e.text.slice(0, 60), answers: { label: `${answer.choice}@${answer.confidence.toFixed(2)}` } });
     if (options.shadow) return next(e);
     return { value: answer.choice };
-  });
-
-  on('turn.step', async function* ($, e, next) {
-    const rt = runtime;
-    if (!options.route || !rt || e.index !== 0 || e.agentId !== undefined || e.effort === undefined) return yield* next(e);
-    const routePack = rt.packs['route'];
-    if (!routePack) return yield* next(e);
-    const prompt = await lastUserText($);
-    const decision = await routeEffort(prompt, routePack, rt.judge, rt.config, options.routeMinEffort, options.routeMaxEffort);
-    record('route', decision.effort ? (options.shadow ? 'would-route' : 'routed') : 'none', { digest: prompt.slice(0, 60), answers: { effort: decision.label } });
-    if (!decision.effort || options.shadow || decision.effort === e.effort) return yield* next(e);
-    $.ui.status(`sift route: ${decision.effort}`);
-    return yield* next({ ...e, effort: decision.effort });
   });
 
   const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : String(n));

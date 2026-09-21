@@ -18,10 +18,8 @@ Everything sift does is built on that one call. Every module is a toggle, every 
 | `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `mcp__sift__judge` answers raw typed questions | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
 | `message` | `session.receive` | judges every message from another session before it is queued: nothing actionable is held into a digest line that rides with the next delivery or prompt, the rest arrives with its scores on the first line | off |
-| `gate` | `tool.call` (pre) | judges Bash, Write and Edit calls against safety propositions and denies on a violated band | off |
 | `gateOutbound` | `tool.call` (pre) | checks text about to leave the session (a Discord message, a `gh pr`, `gh issue` or `gh release` create, comment or edit body) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
-| `route` | `turn.step` | lowers request effort for prompts the judge scores as routine | off |
 
 `shadow: true` makes every module log what it would have done without doing it. Use it to calibrate thresholds against your own traffic before trusting them.
 
@@ -227,5 +225,3 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
 
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
 - The prune and compact modules estimate tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT). Compact fits the whole history into Jev's 32k state limit by shrinking old messages in stages, every call staying visible; a session past roughly 1200 tool calls falls back to the built-in summary. A size rejection from Jev triggers one retry at half the budget.
-- The gate never sends a command that mentions a credential to the judge, and it is off by default. It is a second opinion, not a sandbox.
-- `route` is experimental and off by default.
