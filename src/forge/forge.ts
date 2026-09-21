@@ -142,6 +142,8 @@ export interface Forge {
   // every check on a commit, check runs and statuses alike
   checks(repo: string, sha: string): Promise<Check[]>;
 
+  // the kind of template a path is, from the locations the forge documents; undefined anywhere else
+  template(path: string): Template['kind'] | undefined;
   // issue and pull request templates from every location the forge documents
   templates(repo: string): Promise<Template[]>;
   tags(repo: string): Promise<string[]>;

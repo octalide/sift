@@ -141,13 +141,21 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
   return { docs, rules, candidates: result.candidates, kept: result.kept, cached: false };
 }
 
-// the checkout: tracked paths from git, text from the working tree, templates from the forge when one is bound
-export function checkoutSource(root: string, git: Git, fs: { read: (path: string) => Promise<string>; exists: (path: string) => Promise<boolean> }, forge?: Forge, repo?: string): RuleSource {
+// the checkout: tracked paths from git, text from the working tree. templates are the tracked paths at the
+// locations the bound forge documents, read from the tree: the forge itself is never asked for them
+export function checkoutSource(root: string, git: Git, fs: { read: (path: string) => Promise<string>; exists: (path: string) => Promise<boolean> }, forge?: Forge): RuleSource {
+  const list = async () => (await git(['ls-files', '-z'])).split('\0').filter(Boolean);
+  const read = async (path: string) => ((await fs.exists(`${root}/${path}`)) ? fs.read(`${root}/${path}`) : undefined);
   return {
     scope: root,
-    list: async () => (await git(['ls-files', '-z'])).split('\0').filter(Boolean),
-    read: async (path) => ((await fs.exists(`${root}/${path}`)) ? fs.read(`${root}/${path}`) : undefined),
-    templates: async () => (forge && repo ? (await forge.templates(repo)).map((t) => ({ path: t.name, text: t.body })) : []),
+    list,
+    read,
+    templates: async () => {
+      if (!forge) return [];
+      const paths = (await list()).filter((p) => forge.template(p) !== undefined);
+      const docs = await pool(paths, 16, async (path) => ({ path, text: await read(path) }));
+      return docs.filter((d): d is Doc => d.text !== undefined);
+    },
     remote: (r, path, ref) => (forge ? forge.file(r, path, ref) : Promise.resolve(undefined)),
   };
 }

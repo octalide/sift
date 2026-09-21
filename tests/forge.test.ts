@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GitHubForge, splitJobLog } from '../src/forge/github.ts';
+import { GitHubForge, splitJobLog, templateKind } from '../src/forge/github.ts';
 
 type Reply = { status?: number; body?: unknown; etag?: string };
 
@@ -77,6 +77,23 @@ describe('github forge', () => {
       { kind: 'issue', name: '.github/ISSUE_TEMPLATE/feature.md', body: '# feature.md' },
       { kind: 'pr', name: '.github/PULL_REQUEST_TEMPLATE.md', body: '# pr' },
     ]);
+  });
+
+  it('names the kind of template at every documented location and nowhere else', () => {
+    expect(templateKind('ISSUE_TEMPLATE.md')).toBe('issue');
+    expect(templateKind('docs/issue_template.yml')).toBe('issue');
+    expect(templateKind('.github/ISSUE_TEMPLATE/bug.yaml')).toBe('issue');
+    expect(templateKind('ISSUE_TEMPLATE/feature.md')).toBe('issue');
+    expect(templateKind('PULL_REQUEST_TEMPLATE.md')).toBe('pr');
+    expect(templateKind('.github/pull_request_template.md')).toBe('pr');
+    expect(templateKind('docs/PULL_REQUEST_TEMPLATE/feature.md')).toBe('pr');
+    expect(templateKind('.github/ISSUE_TEMPLATE/config.yml')).toBeUndefined();
+    expect(templateKind('.github/PULL_REQUEST_TEMPLATE/a.yml')).toBeUndefined();
+    expect(templateKind('PULL_REQUEST_TEMPLATE.yml')).toBeUndefined();
+    expect(templateKind('src/ISSUE_TEMPLATE.md')).toBeUndefined();
+    expect(templateKind('a/.github/ISSUE_TEMPLATE/bug.md')).toBeUndefined();
+    expect(templateKind('.github/workflows/ci.yml')).toBeUndefined();
+    expect(templateKind('README.md')).toBeUndefined();
   });
 
   it('lists every file at a ref from the recursive tree, the default branch when none is named', async () => {
