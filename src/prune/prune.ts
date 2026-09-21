@@ -24,7 +24,6 @@ export type PruneContext = {
   input: Record<string, unknown>;
   // the newest user text, what the model is working on
   task: string;
-  archivePath?: string;
 };
 
 export type PruneResult = {
@@ -94,15 +93,27 @@ function batches(chunks: Chunk[], context: PruneContext, maxRequestTokens: numbe
   return out;
 }
 
-export function assemble(chunks: Chunk[], keep: (c: Chunk) => boolean, archivePath?: string): string {
+// the one-line stub left where a run of chunks was dropped: the range and the call that gets it back
+export type OmissionNote = (from: number, to: number) => string;
+
+export function omissionNote(context: PruneContext): OmissionNote {
+  const stub = (from: number, to: number, recover: string) => `[sift: lines ${from}-${to} (${to - from + 1} lines) omitted as not needed for the current task, ${recover}]`;
+  if (context.tool === 'Read') {
+    // output lines map to file lines through the call's offset, so the note is in file lines
+    const base = Math.max(1, Number(context.input['offset']) || 1);
+    const path = String(context.input['file_path'] ?? 'the file');
+    return (from, to) => stub(base + from - 1, base + to - 1, `re-read ${path} with offset ${base + from - 1} limit ${to - from + 1}`);
+  }
+  if (context.tool === 'Bash') return (from, to) => stub(from, to, 'rerun the command for the full output');
+  return (from, to) => stub(from, to, 'rerun the tool call for the full output');
+}
+
+export function assemble(chunks: Chunk[], keep: (c: Chunk) => boolean, note: OmissionNote): string {
   const parts: string[] = [];
   let omitted: Chunk[] = [];
   const flush = () => {
     if (omitted.length === 0) return;
-    const from = omitted[0]!.from;
-    const to = omitted[omitted.length - 1]!.to;
-    const where = archivePath ? `, full output at ${archivePath}` : '';
-    parts.push(`[sift: lines ${from}-${to} (${to - from + 1} lines) omitted as not needed for the current task${where}]`);
+    parts.push(note(omitted[0]!.from, omitted[omitted.length - 1]!.to));
     omitted = [];
   };
   for (const c of chunks) {
@@ -146,7 +157,7 @@ export async function prune(text: string, context: PruneContext, judge: Judge, o
   const keep = (c: Chunk) => c.protected || (scores[c.k] ?? 1) >= options.keepThreshold;
   const kept = chunks.filter(keep).length;
   return {
-    text: assemble(chunks, keep, context.archivePath),
+    text: assemble(chunks, keep, omissionNote(context)),
     chunks: chunks.length,
     kept,
     dropped: chunks.length - kept,
