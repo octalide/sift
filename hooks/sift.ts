@@ -117,7 +117,6 @@ type Runtime = {
   // builds and starts the watcher; returns the reason when it cannot
   startWatch: () => Promise<string | undefined>;
   sessionId: string;
-  archiveDir: string;
   // where the session's ledger would be; it counts only while the file exists
   ledgerPath?: string;
   // peer messages consumed since the last delivery, reported as one digest line
@@ -320,7 +319,7 @@ export const register: Register = (on, rawOptions) => {
       return undefined;
     };
     const ledgerPath = options.ledgerPath || (repoInfo ? `${home}/.local/state/fleet/${repoInfo.nameWithOwner.replace('/', '_')}/ledger.md` : undefined);
-    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, archiveDir: `${home}/.cache/sift/${sessionId}`, ledgerPath, held: [] };
+    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, ledgerPath, held: [] };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -420,16 +419,10 @@ export const register: Register = (on, rawOptions) => {
     if (!options.prune || !pruneTools(options).includes(e.tool) || r.deny !== undefined || r.isError) return r;
     const text = e.tool === 'Bash' ? (r.result as { stdout?: string } | undefined)?.stdout : e.tool === 'Read' ? (r.result as { type?: string; file?: { content?: string } } | undefined)?.file?.content : undefined;
     if (typeof text !== 'string' || estimateTokens(text) < options.pruneFloorTokens) return r;
-    const archivePath = `${rt.archiveDir}/${e.tool_use_id ?? Date.now()}.txt`;
-    try {
-      await $.fs.write(archivePath, text);
-    } catch {
-      // archive is a convenience; pruning proceeds with a recovery note that names the tool call instead
-    }
     const input = e as unknown as Record<string, unknown>;
     const pruned = await prune(
       text,
-      { tool: e.tool, input, task: await lastUserText($), archivePath },
+      { tool: e.tool, input, task: await lastUserText($) },
       rt.judge,
       { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold },
     );

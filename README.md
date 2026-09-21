@@ -14,7 +14,7 @@ Everything sift does is built on that one call. Every module is a toggle, every 
 | module | hook | what it does | default |
 |---|---|---|---|
 | `compact` | `session.compact` | replaces the compaction summary with the transcript minus the tool calls and results the judge marks stale. User and assistant text is never touched. A session with a ledger file compacts to the ledger instead, see [Compaction](#compaction) | on |
-| `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed, archives the full output under `~/.cache/sift/<session>/` and leaves a recovery note in the stub | on |
+| `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed and leaves a one-line note in their place with the omitted line range and how to get it back (re-read the file by range for Read, rerun the command for Bash). Nothing is kept on disk | on |
 | `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `mcp__sift__judge` answers raw typed questions | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
 | `message` | `session.receive` | judges every message from another session before it is queued: nothing actionable is held into a digest line that rides with the next delivery or prompt, the rest arrives with its scores on the first line | off |
