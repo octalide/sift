@@ -1,7 +1,7 @@
 import type { Judge } from '../judge/types.ts';
 import { runPack } from '../packs/run.ts';
 import type { Pack, Report, Subject } from '../packs/types.ts';
-import type { RepoConfig } from '../github/config.ts';
+import type { RepoConfig } from '../repo/config.ts';
 import { defaultChannels, textOf, type Channel } from './channels.ts';
 
 // text a tool call is about to send somewhere people read, the hard limit of that channel, and what the text is;

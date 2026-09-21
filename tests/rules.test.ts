@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { templateKind } from '../src/forge/github.ts';
-import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
-import { rulesSubject } from '../src/github/subjects.ts';
+import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
+import { rulesSubject } from '../src/repo/subjects.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { runPack } from '../src/packs/run.ts';

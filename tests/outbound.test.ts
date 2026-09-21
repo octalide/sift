@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_CONFIG } from '../src/github/config.ts';
+import { DEFAULT_CONFIG } from '../src/repo/config.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { GitHubForge, GH_WRITES } from '../src/forge/github.ts';
 import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
@@ -7,7 +7,7 @@ import { channelTable, commandBody, defaultChannels, textAbout, type Channel } f
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
 import { materialize } from '../src/packs/run.ts';
-import { rulesSubject } from '../src/github/subjects.ts';
+import { rulesSubject } from '../src/repo/subjects.ts';
 import type { Subject } from '../src/packs/types.ts';
 import { shellWord } from '../src/shell.ts';
 import { memorySource, memoryStore, yesJudge } from './fake-source.ts';

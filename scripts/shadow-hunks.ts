@@ -5,8 +5,8 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { GitHubForge } from '../src/forge/github.ts';
-import { resolveConfig } from '../src/github/config.ts';
-import { prSubject } from '../src/github/subjects.ts';
+import { resolveConfig } from '../src/repo/config.ts';
+import { prSubject } from '../src/repo/subjects.ts';
 import { JEV_DEFAULTS, JevJudge } from '../src/judge/jev.ts';
 import type { Judge, Judgement, Questions, Usage } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';

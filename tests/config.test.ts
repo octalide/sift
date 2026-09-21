@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { configLayers, globalConfigPath, resolveConfig } from '../src/github/config.ts';
+import { configLayers, globalConfigPath, resolveConfig } from '../src/repo/config.ts';
 
 describe('global config', () => {
   it('prefers XDG_CONFIG_HOME and falls back to ~/.config', () => {

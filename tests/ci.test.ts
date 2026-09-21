@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ciSubject, cleanLine, logSubject, textLog, trimLog } from '../src/ci/log.ts';
 import type { JobLog } from '../src/forge/forge.ts';
-import { DEFAULT_CONFIG } from '../src/github/config.ts';
-import { diffFiles } from '../src/github/diff.ts';
+import { DEFAULT_CONFIG } from '../src/repo/config.ts';
+import { diffFiles } from '../src/repo/diff.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';

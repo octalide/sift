@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_CONFIG } from '../src/github/config.ts';
+import { DEFAULT_CONFIG } from '../src/repo/config.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { excerptOf, ignored, indexTree, symbolsOf, treeSubject, type Tree } from '../src/locate/tree.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';

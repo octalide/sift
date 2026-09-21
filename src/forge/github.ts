@@ -1,4 +1,4 @@
-import { Gh, GhError, type ApiResponse } from '../github/gh.ts';
+import { Gh, GhError, type ApiResponse } from './gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
 import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgeUser, ForgeWrite, Issue, IssueSummary, Job, JobLog, LogStep, PullHead, PullRequest, Rate, Review, ReviewComment, Run, Template, WatchItem } from './forge.ts';
 

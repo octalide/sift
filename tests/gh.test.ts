@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { localGit } from '../src/forge/git.ts';
-import { Gh } from '../src/github/gh.ts';
+import { Gh } from '../src/forge/gh.ts';
 
 describe('Gh spawn cwd', () => {
   it('resolves the working directory on every spawn, not once at construction', async () => {

@@ -1,7 +1,7 @@
 import { bandOf } from '../judge/bands.ts';
 import { entryOf, fill, fillQuestion, rank } from '../judge/rank.ts';
 import { DEFAULT_THRESHOLDS, type Answer, type Judge, type Questions, type Question } from '../judge/types.ts';
-import type { RepoConfig } from '../github/config.ts';
+import type { RepoConfig } from '../repo/config.ts';
 import { CHECKS } from './checks.ts';
 import type { Finding, Judged, Pack, PackQuestion, RankedItem, RankedStep, RankStep, Report, Subject, Verdict } from './types.ts';
 import { batchQuestions, estimateTokensOf, JEV_LIMITS } from '../tokens.ts';

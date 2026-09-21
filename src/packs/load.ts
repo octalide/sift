@@ -1,4 +1,4 @@
-import { PACKS_DIR } from '../github/config.ts';
+import { PACKS_DIR } from '../repo/config.ts';
 import { BUILTIN_PACKS } from './builtin.ts';
 import type { Pack, PackQuestion, RankStep } from './types.ts';
 
