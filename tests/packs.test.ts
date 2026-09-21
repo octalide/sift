@@ -476,23 +476,41 @@ describe('pack materialization', () => {
     expect(formatReport(report)).toContain('1 answer dropped: unasked or missing');
   });
 
-  it('reads a plan beside its issue and fails on an unasked decision', async () => {
-    const forge = fakeForge({ issue: async (_r, n) => ({ ...(await fakeForge().issue('o/r', n)), title: 'plan pack', body: 'New pack `plan`.' }) });
-    const s = await planSubject(forge, 'o/r', 61, 'add the pack');
+  it('reads a plan beside its issue and warns, never fails, on an unasked decision', async () => {
+    const forge = fakeForge({ issue: async (_r, n) => ({ ...(await fakeForge().issue('o/r', n)), title: 'watch: name the agent per ref', body: 'Arm the watch with a ref, deliver ci settled to the agent that armed it.' }) });
+    // the two plans of PR #120: the first lists its implementation choices, the second dropped them to satisfy the grader
+    const decided = 'arm stores {agent, ref}, a leading # on the ref is stripped once, a later arm on the same ref replaces the entry, and the arming notice names the ref';
+    const literal = 'arm stores {agent, ref}, the ref is compared as given and nothing is parsed from it';
+    const s = await planSubject(forge, 'o/r', 119, decided);
     expect(s.kind).toBe('plan');
-    expect(s.ref).toBe('o/r#61');
-    expect(s.state).toMatchObject({ number: 61, issue: { title: 'plan pack', body: 'New pack `plan`.' }, plan: 'add the pack' });
+    expect(s.ref).toBe('o/r#119');
+    expect(s.state).toMatchObject({ number: 119, issue: { title: 'watch: name the agent per ref' }, plan: decided });
     expect(s.facts['has_plan']).toBe(true);
     expect(BUILTIN_PACKS['plan']!.checks).toEqual([]);
-    const report = await runPack(
+    const first = await runPack(
       BUILTIN_PACKS['plan']!,
       s,
-      answering({ covers: { type: 'noul', p: 0.9 }, adds_nothing: { type: 'noul', p: 0.1 }, decides_unasked: { type: 'noul', p: 0.9 } }),
+      answering({ covers: { type: 'noul', p: 0.86 }, adds_nothing: { type: 'noul', p: 0.1 }, decides_unasked: { type: 'noul', p: 0.75 } }),
       DEFAULT_CONFIG,
     );
-    const bands = Object.fromEntries(report.judged.map((j) => [j.id, j.band]));
-    expect(bands).toEqual({ covers: 'satisfied', adds_nothing: 'satisfied', decides_unasked: 'violated' });
-    expect(report.verdict).toBe('fail');
+    expect(Object.fromEntries(first.judged.map((j) => [j.id, j.band]))).toEqual({ covers: 'satisfied', adds_nothing: 'satisfied', decides_unasked: 'violated' });
+    expect(first.judged.find((j) => j.id === 'decides_unasked')).toMatchObject({ severity: 'warn' });
+    expect(first.verdict).toBe('warn');
+    const second = await runPack(
+      BUILTIN_PACKS['plan']!,
+      await planSubject(forge, 'o/r', 119, literal),
+      answering({ covers: { type: 'noul', p: 0.85 }, adds_nothing: { type: 'noul', p: 0.1 }, decides_unasked: { type: 'noul', p: 0.6 } }),
+      DEFAULT_CONFIG,
+    );
+    expect(second.judged.find((j) => j.id === 'decides_unasked')).toMatchObject({ band: 'unclear', severity: 'warn' });
+    expect(second.verdict).toBe('pass');
+    const missing = await runPack(
+      BUILTIN_PACKS['plan']!,
+      s,
+      answering({ covers: { type: 'noul', p: 0.2 }, adds_nothing: { type: 'noul', p: 0.1 }, decides_unasked: { type: 'noul', p: 0.1 } }),
+      DEFAULT_CONFIG,
+    );
+    expect(missing.verdict).toBe('fail');
   });
 });
 
