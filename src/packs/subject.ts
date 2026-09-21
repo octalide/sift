@@ -8,11 +8,19 @@ export type ParsedSubject =
   // base..head in the checkout, the pull request it would open
   | { kind: 'pr'; range: string }
   | { kind: 'commit'; ref: string }
-  | { kind: 'release'; proposed?: string };
+  | { kind: 'release'; proposed?: string }
+  | { kind: 'mixed'; subject: MixedSubject };
+
+// what a subject that may be a reference or free text turned out to name
+export type MixedSubject =
+  | { kind: 'issue' | 'pr'; number: number; repo?: string }
+  | { kind: 'commit'; ref: string }
+  | { kind: 'text'; text: string };
 
 export type ParsedKind = ParsedSubject['kind'];
 
 const NUMBER = /^#?(\d+)$/;
+const COMMIT = /^[0-9a-f]{7,40}$|\.\./;
 const URL = /^[a-z][a-z0-9+.-]*:\/\//i;
 const RANGE = /^[^\s#-][^\s]*\.\.[^\s]*$/;
 const A_NOUN: Record<'issue' | 'pr', string> = { issue: 'an issue', pr: 'a pull request' };
@@ -28,15 +36,18 @@ export function expectedSubject(kind: ParsedKind, forge: Pick<Forge, 'name'>): s
       return 'a commit ref (a sha, branch or tag) or range (main..HEAD)';
     case 'release':
       return 'a tag or version (v1.4.0), or "release" for the required bump alone';
+    case 'mixed':
+      return `an issue or pull request number (N or #N), a ${forge.name} issue or pull request URL, a commit ref or range, or free text`;
   }
 }
 
 const shown = (ref: string): string => (ref.length > 60 ? `${ref.slice(0, 57)}...` : ref);
 
 // parses the subject of a grade call for a pack of the given kind, refusing with the expected forms named.
-// repo is the explicit repo of the call, when given; a url naming a different repo is refused
-export function parseSubject<K extends ParsedKind>(kind: K, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string): Extract<ParsedSubject, { kind: K }>;
-export function parseSubject(kind: ParsedKind, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string): ParsedSubject {
+// repo is the explicit repo of the call, when given; a url naming a different repo is refused.
+// bare is what a bare number names for the mixed kind, an issue unless said
+export function parseSubject<K extends ParsedKind>(kind: K, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string, bare?: 'issue' | 'pr'): Extract<ParsedSubject, { kind: K }>;
+export function parseSubject(kind: ParsedKind, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string, bare: 'issue' | 'pr' = 'issue'): ParsedSubject {
   const raw = (ref ?? '').trim();
   const expected = expectedSubject(kind, forge);
   if (!raw) throw new Error(`${kind} pack: no subject; expected ${expected}`);
@@ -74,6 +85,17 @@ export function parseSubject(kind: ParsedKind, ref: string | undefined, forge: P
       if (raw.startsWith('#')) return refuse('subject is an issue number, not a version');
       if (/\s/.test(raw)) return refuse('subject reads as text, not a tag');
       return { kind, proposed: raw };
+    }
+    case 'mixed': {
+      const n = NUMBER.exec(raw);
+      if (n) return { kind, subject: { kind: bare, number: Number(n[1]) } };
+      if (link) {
+        if (repo !== undefined && repo !== link.repo) return refuse(`subject URL names ${link.repo} but repo is ${repo}`);
+        return { kind, subject: { kind: link.kind, number: link.number, repo: link.repo } };
+      }
+      if (URL.test(raw)) return refuse(`subject is a URL ${forge.name} does not serve as an issue or a pull request`);
+      if (COMMIT.test(raw)) return { kind, subject: { kind: 'commit', ref: raw } };
+      return { kind, subject: { kind: 'text', text: raw } };
     }
   }
 }

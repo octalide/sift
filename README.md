@@ -66,7 +66,7 @@ grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free t
 grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17: covers it, adds nothing, decides nothing it leaves open
 ```
 
-The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
+The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. `rules` and `locate` take the same reference forms, a bare number naming a pull request for `rules` (an issue with `text: "issue"`) and an issue for `locate`, a commit ref or range for `rules`, or free text in `text`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
 
 A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, drift, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable).
 

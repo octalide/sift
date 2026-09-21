@@ -60,6 +60,22 @@ describe('grade subject', () => {
     expect(refused('commit', '--all')).toContain('starts with a dash');
   });
 
+  it('yields a reference, a commit or text for a mixed subject and refuses only what can be nothing', () => {
+    expect(parseSubject('mixed', '42', forge)).toEqual({ kind: 'mixed', subject: { kind: 'issue', number: 42 } });
+    expect(parseSubject('mixed', ' #42 ', forge, undefined, 'pr')).toEqual({ kind: 'mixed', subject: { kind: 'pr', number: 42 } });
+    expect(parseSubject('mixed', 'https://fake/o/r/issue/80', forge, undefined, 'pr')).toEqual({ kind: 'mixed', subject: { kind: 'issue', number: 80, repo: 'o/r' } });
+    expect(parseSubject('mixed', 'https://fake/o/r/pr/3', forge, 'o/r')).toEqual({ kind: 'mixed', subject: { kind: 'pr', number: 3, repo: 'o/r' } });
+    expect(parseSubject('mixed', 'abc1234', forge)).toEqual({ kind: 'mixed', subject: { kind: 'commit', ref: 'abc1234' } });
+    expect(parseSubject('mixed', 'main..HEAD', forge)).toEqual({ kind: 'mixed', subject: { kind: 'commit', ref: 'main..HEAD' } });
+    expect(parseSubject('mixed', 'the watcher misses body edits', forge)).toEqual({ kind: 'mixed', subject: { kind: 'text', text: 'the watcher misses body edits' } });
+    expect(parseSubject('mixed', 'NaN', forge)).toEqual({ kind: 'mixed', subject: { kind: 'text', text: 'NaN' } });
+    expect(refused('mixed', undefined)).toContain('mixed pack: no subject');
+    expect(refused('mixed', '  ')).toContain(expectedSubject('mixed', forge));
+    expect(refused('mixed', 'https://elsewhere.example/o/r/issues/3')).toContain('a URL Fake does not serve as an issue or a pull request');
+    expect(refused('mixed', 'https://fake/o/r/issue/3', 'x/y')).toContain('names o/r but repo is x/y');
+    expect(expectedSubject('mixed', forge)).toBe('an issue or pull request number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text');
+  });
+
   it('accepts a tag or "release" for a release and refuses what cannot be one', () => {
     expect(parseSubject('release', 'release', forge)).toEqual({ kind: 'release' });
     expect(parseSubject('release', 'v1.4.0', forge)).toEqual({ kind: 'release', proposed: 'v1.4.0' });
