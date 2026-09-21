@@ -5,7 +5,7 @@ import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
-import { Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
+import { armedNotice, armingAgent, Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
 
 const rules: WatchRules = { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: true, login: 'me', protectedBranches: ['main', 'dev'], branchPattern: '^(feat|fix)/\\d+$' };
@@ -338,6 +338,56 @@ describe('watcher', () => {
     expect(delivered[0]).toContain('ci stalled: pr #3 feat/3 @abc1234: Feat 3 (1 of 1 checks pending: build)');
     expect(delivered[0]).toContain('by alice · https://x/pull/3 · ci stalled on pr');
     expect(watcher.snapshot().pending['3@abc1234def']?.stalled).toBe(true);
+  });
+
+  it('names the subagent that armed the watch on every delivery, and nothing when the main loop did', async () => {
+    const settledForge = () => {
+      let test = false;
+      return fakeForge({
+        login: async () => 'me',
+        items: script(changed([slim(1)])),
+        // tick 1: seed with the pr open and its checks running. tick 2: both finished
+        runs: script(changed([run(10, 'build', false, null), run(11, 'test', false, null)]), () => {
+          test = true;
+          return changed([run(10, 'build', true, 'success'), run(11, 'test', true, 'success')], 'r2');
+        }),
+        pulls: script(changed([pull()]), same()),
+        checks: async () => [check('build', true), check('test', test)],
+      });
+    };
+    const options = { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules };
+    const store = new Map<string, unknown>();
+    const delivered: string[] = [];
+    const armed = new Watcher({ forge: settledForge(), ...silent({ store: { get: async (k) => store.get(k), set: async (k, v) => void store.set(k, v) } }), now: () => 1_000_000, deliver: async (t) => void delivered.push(t) }, options);
+    await armed.start();
+    await armed.arm('issue-113');
+    expect((store.get('watch:o/r') as { armedBy?: string }).armedBy).toBe('issue-113');
+    await armed.tick();
+    await armed.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.split('\n')[0]).toBe('[sift watch o/r for issue-113]');
+    expect(delivered[0]).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks)');
+
+    delivered.length = 0;
+    const main = new Watcher({ forge: settledForge(), ...silent(), now: () => 1_000_000, deliver: async (t) => void delivered.push(t) }, options);
+    await main.start();
+    await main.arm(undefined);
+    await main.tick();
+    await main.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.split('\n')[0]).toBe('[sift watch o/r]');
+  });
+
+  it('tells a subagent that armed the watch where deliveries go, by the name SendMessage reaches it by', () => {
+    const agents = [{ id: 'a1', name: 'issue-113' }, { id: 'a2' }];
+    expect(armingAgent(undefined, agents)).toBeUndefined();
+    expect(armingAgent('a1', agents)).toBe('issue-113');
+    expect(armingAgent('a2', agents)).toBe('a2');
+    expect(armingAgent('a3', agents)).toBe('a3');
+    const notice = armedNotice('issue-113');
+    expect(notice).toContain('armed from agent issue-113');
+    expect(notice).toContain("session's main loop");
+    expect(notice).toContain('for issue-113');
   });
 
   it('checks a new issue against the issue pack, the filer\'s own included, and delivers its findings', async () => {
