@@ -5,7 +5,7 @@ import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
-import { Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
+import { armedNotice, armingAgent, armRef, Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
 
 const rules: WatchRules = { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: true, login: 'me', protectedBranches: ['main', 'dev'], branchPattern: '^(feat|fix)/\\d+$' };
@@ -338,6 +338,132 @@ describe('watcher', () => {
     expect(delivered[0]).toContain('ci stalled: pr #3 feat/3 @abc1234: Feat 3 (1 of 1 checks pending: build)');
     expect(delivered[0]).toContain('by alice · https://x/pull/3 · ci stalled on pr');
     expect(watcher.snapshot().pending['3@abc1234def']?.stalled).toBe(true);
+  });
+
+  it('names the subagent that armed the watch on every delivery, and nothing when the main loop did', async () => {
+    const settledForge = () => {
+      let test = false;
+      return fakeForge({
+        login: async () => 'me',
+        items: script(changed([slim(1)])),
+        // tick 1: seed with the pr open and its checks running. tick 2: both finished
+        runs: script(changed([run(10, 'build', false, null), run(11, 'test', false, null)]), () => {
+          test = true;
+          return changed([run(10, 'build', true, 'success'), run(11, 'test', true, 'success')], 'r2');
+        }),
+        pulls: script(changed([pull()]), same()),
+        checks: async () => [check('build', true), check('test', test)],
+      });
+    };
+    const options = { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules };
+    const store = new Map<string, unknown>();
+    const delivered: string[] = [];
+    const armed = new Watcher({ forge: settledForge(), ...silent({ store: { get: async (k) => store.get(k), set: async (k, v) => void store.set(k, v) } }), now: () => 1_000_000, deliver: async (t) => void delivered.push(t) }, options);
+    await armed.start();
+    await armed.arm('issue-113');
+    expect((store.get('watch:o/r') as { armedBy?: string }).armedBy).toBe('issue-113');
+    await armed.tick();
+    await armed.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.split('\n')[0]).toBe('[sift watch o/r for issue-113]');
+    expect(delivered[0]).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks)');
+
+    delivered.length = 0;
+    const main = new Watcher({ forge: settledForge(), ...silent(), now: () => 1_000_000, deliver: async (t) => void delivered.push(t) }, options);
+    await main.start();
+    await main.arm(undefined);
+    await main.tick();
+    await main.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.split('\n')[0]).toBe('[sift watch o/r]');
+  });
+
+  it('names the agent armed for a pr on its ci verdict line, and the last armer on a verdict no agent is armed for', async () => {
+    const options = { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules };
+    // two prs, 3 on feat/3 and 4 on feat/4, whose checks all finish in the second tick
+    const twoPulls = () => {
+      let done = false;
+      return fakeForge({
+        login: async () => 'me',
+        items: script(changed([slim(1)])),
+        runs: script(changed([run(10, 'build', false, null), run(20, 'build', false, null, 'def5678abc')]), () => {
+          done = true;
+          return changed([run(10, 'build', true, 'success'), run(20, 'build', true, 'failure', 'def5678abc')], 'r2');
+        }),
+        pulls: script(changed([pull(), { number: 4, title: 'Feat 4', branch: 'feat/4', sha: 'def5678abc', url: 'https://x/pull/4', user: 'bob' }]), same()),
+        checks: async (_r, sha) => [check('build', done, done ? (sha === 'def5678abc' ? 'failure' : 'success') : null)],
+      });
+    };
+    const armed = async (arms: [string | undefined, string | undefined][]) => {
+      const store = new Map<string, unknown>();
+      const delivered: string[] = [];
+      const watcher = new Watcher({ forge: twoPulls(), ...silent({ store: { get: async (k) => store.get(k), set: async (k, v) => void store.set(k, v) } }), now: () => 1_000_000, deliver: async (t) => void delivered.push(t) }, options);
+      await watcher.start();
+      for (const [by, ref] of arms) await watcher.arm(by, ref);
+      await watcher.tick();
+      await watcher.tick();
+      expect(delivered).toHaveLength(1);
+      return { lines: delivered[0]!.split('\n'), state: store.get('watch:o/r') as { armedBy?: string; armedFor?: { agent: string; ref: string }[] } };
+    };
+
+    // a match by pr number
+    let out = await armed([['issue-3', '3']]);
+    expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
+    expect(out.lines[0]).toBe('[sift watch o/r for issue-3]');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    // pr 4 matches no entry and falls back to the last armer
+    expect(out.lines).toContain('for issue-3: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+
+    // a miss: armed for a pr that is not settling, both lines fall back
+    out = await armed([['issue-9', '9']]);
+    expect(out.lines.filter((l) => l.startsWith('for issue-9: ci settled'))).toHaveLength(2);
+
+    // two agents on two prs in one poll, one by number and one by head branch, each line names its own agent
+    out = await armed([['issue-3', '3'], ['issue-4', 'feat/4'], ['issue-4', 'feat/4']]);
+    expect(out.state.armedBy).toBe('issue-4');
+    expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }, { agent: 'issue-4', ref: 'feat/4' }]);
+    expect(out.lines[0]).toBe('[sift watch o/r for issue-4]');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-4: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+
+    // a leading # on a pr number is stripped when the ref is stored, so #3 names pr 3
+    out = await armed([['issue-3', '#3']]);
+    expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(armRef('#3')).toBe('3');
+    expect(armRef('3')).toBe('3');
+    expect(armRef('feat/3')).toBe('feat/3');
+    expect(armRef('#feat/3')).toBe('#feat/3');
+
+    // one ref names one agent: a later arm for the same pr replaces the entry, the newest wins
+    out = await armed([['issue-3', '3'], ['issue-3b', '#3']]);
+    expect(out.state.armedFor).toEqual([{ agent: 'issue-3b', ref: '3' }]);
+    expect(out.lines).toContain('for issue-3b: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).not.toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+
+    // a start without a ref keeps the set and replaces the name; a main-loop start clears both
+    out = await armed([['issue-3', '3'], ['issue-5', undefined]]);
+    expect(out.state.armedBy).toBe('issue-5');
+    expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-5: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    out = await armed([['issue-3', '3'], [undefined, undefined]]);
+    expect(out.state.armedBy).toBeUndefined();
+    expect(out.state.armedFor).toBeUndefined();
+    expect(out.lines[0]).toBe('[sift watch o/r]');
+    expect(out.lines).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+  });
+
+  it('tells a subagent that armed the watch where deliveries go, by the name SendMessage reaches it by', () => {
+    const agents = [{ id: 'a1', name: 'issue-113' }, { id: 'a2' }];
+    expect(armingAgent(undefined, agents)).toBeUndefined();
+    expect(armingAgent('a1', agents)).toBe('issue-113');
+    expect(armingAgent('a2', agents)).toBe('a2');
+    expect(armingAgent('a3', agents)).toBe('a3');
+    const notice = armedNotice('issue-113');
+    expect(notice).toContain('armed from agent issue-113');
+    expect(notice).toContain("session's main loop");
+    expect(notice).toContain('for issue-113');
   });
 
   it('checks a new issue against the issue pack, the filer\'s own included, and delivers its findings', async () => {

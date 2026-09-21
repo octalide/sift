@@ -6,7 +6,7 @@ import { formatReport, runChecks, runPack } from '../packs/run.ts';
 import { issueSubject } from '../repo/subjects.ts';
 import { ciSubject } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
-import { diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
+import { armedAgent, diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
 
 export type WatchOptions = {
@@ -101,6 +101,19 @@ export class Watcher {
     this.state = initialState();
     await this.save();
     await this.start();
+  }
+
+  // records who armed the watch: a subagent's name, or nothing when the main loop did, which also forgets the
+  // per-pr set. a subagent naming its pr (number or head branch) takes that ref in the set, one agent per ref, the
+  // newest arm winning as armedBy does. deliveries always reach the main loop, the names on them tell it whom to relay to
+  async arm(by: string | undefined, ref?: string): Promise<void> {
+    this.state.armedBy = by;
+    if (!by) delete this.state.armedFor;
+    else if (ref) {
+      const key = armRef(ref);
+      this.state.armedFor = [...(this.state.armedFor ?? []).filter((a) => a.ref !== key), { agent: by, ref: key }];
+    }
+    await this.save();
   }
 
   snapshot(): WatchState {
@@ -421,9 +434,10 @@ export class Watcher {
   }
 
   private render(items: { event: WatchEvent; label: string }[]): string {
-    const lines = [`[sift watch ${this.options.repo}]`];
+    const lines = [`[sift watch ${this.options.repo}${this.state.armedBy ? ` for ${this.state.armedBy}` : ''}]`];
     for (const { event, label } of items) {
-      lines.push(`${formatEvent(event)}`);
+      const agent = armedAgent(event, this.state);
+      lines.push(`${agent ? `for ${agent}: ` : ''}${formatEvent(event)}`);
       lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''}`);
       if (event.findings?.length) lines.push(`  filing: ${event.findings.join('; ')}`);
       for (const report of event.reports ?? []) lines.push(...report.split('\n').map((l) => `  ${l}`));
@@ -452,6 +466,22 @@ export class Watcher {
     }
     return detail;
   }
+}
+
+// the ref as the set keys it: a pr number with or without its leading #, or a head branch as given
+export function armRef(ref: string): string {
+  return ref.replace(/^#(?=\d+$)/, '');
+}
+
+// the name SendMessage reaches a tool.call's agent by: its listed name, else its id, nothing on the main loop
+export function armingAgent(agentId: string | undefined, agents: { id: string; name?: string }[]): string | undefined {
+  if (!agentId) return undefined;
+  return agents.find((a) => a.id === agentId)?.name ?? agentId;
+}
+
+// what a subagent that armed the watch is told: the plugin submits prompts to the session's main loop only
+export function armedNotice(by: string): string {
+  return `armed from agent ${by}: deliveries are submitted to the session's main loop, not to this agent. Nothing reaches you unless the session relays it (each delivery names you as \`for ${by}\`), so do not end your turn expecting a delivery to arrive on its own.`;
 }
 
 export function summarize(deferred: Deferred[]): string {

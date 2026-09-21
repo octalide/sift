@@ -363,12 +363,14 @@ export class GitHubForge implements Forge {
     return (await this.gh.pages<GhJob>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}/jobs`, '[.jobs[] | {id, run_id, head_sha, name, status, conclusion, html_url}]')).map(job);
   }
 
+  // the logs endpoint refuses any accept but json and answers a 302 to the log's download url, which gh follows
+  // under its default accept, so the response read here is the download itself
   async jobLog(repo: string, id: string): Promise<JobLog> {
-    const [j, text] = await Promise.all([
+    const [j, log] = await Promise.all([
       this.gh.json<GhJob>(`repos/${repo}/actions/jobs/${encodeURIComponent(id)}`),
-      this.gh.text(`repos/${repo}/actions/jobs/${encodeURIComponent(id)}/logs`, 'text/plain', { raw: true }),
+      this.gh.api(`repos/${repo}/actions/jobs/${encodeURIComponent(id)}/logs`, { raw: true }),
     ]);
-    return { job: j.name, run: String(j.run_id), sha: j.head_sha, url: j.html_url, steps: splitJobLog(text) };
+    return { job: j.name, run: String(j.run_id), sha: j.head_sha, url: j.html_url, steps: splitJobLog(log.body) };
   }
 
   parseUrl(url: string): ForgeLink | undefined {

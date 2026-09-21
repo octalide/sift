@@ -77,7 +77,7 @@ A pack is data: a subject kind, a list of mechanical checks, typed questions wit
 | `issue` | an issue number or URL | is the issue well formed, correctly typed, scoped to this repo, implementable without a decision it does not make, and ready to work on |
 | `pr` | a PR number or URL, or a `base..head` range | does the PR do what its issue asks, nothing more, without workarounds, and is it safe to merge, drift against the base included |
 | `hunks` | the same as `pr` | which hunk of the diff is wrong: unrelated to the stated purpose, a workaround, or a behaviour change no test covers |
-| `plan` | an issue number, the plan in `text` | does the plan cover the issue, add nothing beyond it, and decide nothing the issue leaves open |
+| `plan` | an issue number, the plan in `text` | does the plan cover the issue, add nothing beyond it, and decide nothing the issue leaves open; a warn means the plan lists its decisions in the PR body |
 | `commit` | a ref or range | do the commits follow the repository's commit format and describe their diffs honestly |
 | `ci` | a job id, a run id, or a log in `text` | why the job failed: the lines that explain it, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository |
 | `rules` | a PR, an issue, a ref or range, or free text | does the subject comply with each rule the repository's rule documents state |
@@ -121,7 +121,7 @@ The `issue` pack asks whether the body is substantive, which type label fits, wh
 
 ### plan
 
-The `plan` pack reads an issue and a plan for it from `text` and asks three questions: `covers` (every point the issue asks for is met by a step, or the plan says why it is left out), `adds_nothing` (no step changes something the issue does not mention unless the change is needed to land one it does), and `decides_unasked` (no step picks between options the issue leaves open where the outcome differs by the pick: an interface, a name or format others depend on, an approach, a case the issue does not cover). A violated `covers` or `decides_unasked` fails the report.
+The `plan` pack reads an issue and a plan for it from `text` and asks three questions: `covers` (every point the issue asks for is met by a step, or the plan says why it is left out), `adds_nothing` (no step changes something the issue does not mention unless the change is needed to land one it does), and `decides_unasked` (no step settles something the issue leaves open that others will depend on: a new or changed public interface, a stored format, behaviour a caller outside the change depends on, a choice between two architectures; normalising an input, a collision or ordering rule inside one module, the wording of a message, or a test's shape are not decisions). A violated `covers` fails the report. A violated `adds_nothing` or `decides_unasked` warns: the plan goes ahead and lists its decisions in the PR body.
 
 ### ci
 
@@ -350,10 +350,10 @@ The tools are registered under the plugin's name, so the model sees `mcp__sift__
 | `grade` | `pack`, `subject`, optional `repo`, `text`, `ref`, `top` | the pack's report as text |
 | `judge` | `state`, `questions` | the answers |
 | `rank` | `items`, `questions`, optional `mode`, `context`, `by`, `choice`, `fields` | the items with their answers, and the sorted view |
-| `watch` | `action`: `status`, `start`, `poll`, `pause`, `resume`, `reset`, `deferred` | the watch's state |
+| `watch` | `action`: `status`, `start`, `poll`, `pause`, `resume`, `reset`, `deferred`; `for`: on a `start` from a subagent, the PR it waits on, its number or head branch | the watch's state |
 | `status` | nothing | backend, modules, whether the watch runs, decision counts |
 
-`grade`, `judge` and `rank` are registered when the `grade` option is on, `watch` and `status` always. `watch start` arms the watch in a session that came up without the `watch` option, `poll` polls once now, `reset` forgets the cursor and reseeds. A session that will act on repository events calls `status` at start to learn whether they will arrive as prompts.
+`grade`, `judge` and `rank` are registered when the `grade` option is on, `watch` and `status` always. `watch start` arms the watch in a session that came up without the `watch` option, `poll` polls once now, `reset` forgets the cursor and reseeds. Deliveries are prompts to the session's main loop, whichever loop armed the watch: a `watch start` from a subagent records that agent's name, says so in the tool result (deliveries reach the agent only when the session relays them), and every delivery header names it (`[sift watch o/r for issue-113]`) so the relay is one `SendMessage`. A later `watch start` replaces the name, one from the main loop clears it. Several subagents waiting on one watch each pass `for`, the PR number or head branch they wait on, and the watch keeps the set of `{ agent, ref }` pairs beside the name: a `ci settled` or `ci stalled` line whose PR number or head branch matches a pair is written as `for issue-113: ci settled success: pr #113 ...`, naming the agent whose PR it is, and one that matches none names the agent that armed last. A `start` from the main loop clears the set with the name. One ref names one agent: a later `start` for the same PR replaces the entry, the newest arm winning as the name does. A leading `#` on a PR number is stripped when the ref is stored, so `#42` and `42` are the same PR. Nothing else about agent names or branch conventions is inferred. A session that will act on repository events calls `status` at start to learn whether they will arrive as prompts.
 
 `/sift` prints status and per-module decision counts (the same text as the `status` tool), with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, and `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watch as the tool does.
 
@@ -403,6 +403,8 @@ npm test               # vitest, pure logic only
 npm run validate       # claude plugin validate
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
 ```
+
+CI runs the same three commands on every pull request and reports them through a `gate` check, which the rulesets on `dev` and `main` require.
 
 `types/claude-code.d.ts` is the engine's generated declaration. Regenerate it with `/plugin-types` after a Claude Code upgrade and rerun the typecheck. The function-hook surface is early access and changes between releases.
 

@@ -68,11 +68,17 @@ export type WatchState = {
   deferred: Deferred[];
   paused: boolean;
   login?: string;
+  // the name of the subagent whose watch start armed the watch; absent when the main loop did
+  armedBy?: string;
+  // the agents that armed the watch for a pr, by its number or head branch, so each ci verdict names the agent whose pr it is
+  armedFor?: ArmedFor[];
   interval: number;
   lastPoll?: number;
   lastDelivery?: number;
   failures: number;
 };
+
+export type ArmedFor = { agent: string; ref: string };
 
 export type Deferred = {
   event: WatchEvent;
@@ -223,4 +229,11 @@ export function formatEvent(e: WatchEvent): string {
   if (e.kind === 'ci' && e.stalled) return `ci stalled: pr #${e.number} ${e.title}`;
   const head = e.kind === 'ci' ? `ci ${e.conclusion ?? 'unknown'}: ${e.title}` : `${e.kind} #${e.number} ${e.changes.join(', ')}: ${e.title}`;
   return head;
+}
+
+// the agent a ci verdict is for: the one armed for the pr's number or head branch, else whoever armed the watch last
+export function armedAgent(e: WatchEvent, state: Pick<WatchState, 'armedBy' | 'armedFor'>): string | undefined {
+  if (e.kind !== 'ci' || !(e.settled || e.stalled)) return undefined;
+  const match = (state.armedFor ?? []).find((a) => a.ref === String(e.number) || a.ref === e.branch);
+  return match?.agent ?? state.armedBy;
 }
