@@ -1,7 +1,7 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
 import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
-import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/config.ts';
+import { CONFIG_PATH, configLayers, globalConfigPath, resolveConfig, type RepoConfig } from '../src/github/config.ts';
 import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
@@ -42,7 +42,7 @@ type Options = {
   grade: boolean;
   gateOutbound: boolean;
   classify: boolean;
-  // conventions applied under every repo's .sift/config.json: a path or inline json
+  // conventions under every repo's .sift/config.json: a path or inline json, replacing the global file
   config: string;
 };
 
@@ -109,6 +109,12 @@ async function optionConfig($: EngineInterface, value: string, root: string): Pr
   if (v.startsWith('{')) return JSON.parse(v);
   const path = v.startsWith('/') ? v : `${root}/${v}`;
   if (!(await $.fs.exists(path))) throw new Error(`sift config ${path} not found`);
+  return JSON.parse(await $.fs.read(path));
+}
+
+// parsed contents of a json file, undefined when there is no such file
+async function readJson($: EngineInterface, path: string | undefined): Promise<unknown> {
+  if (!path || !(await $.fs.exists(path))) return undefined;
   return JSON.parse(await $.fs.read(path));
 }
 
@@ -238,8 +244,15 @@ export const register: Register = (on, rawOptions) => {
     const gh = new Gh((argv, init) => $.process.run(argv, init), spawnCwd);
     const repoInfo = await gh.repoInfo();
     const root = await spawnCwd();
-    const repoConfig = (await $.fs.exists(`${root}/${CONFIG_PATH}`)) ? JSON.parse(await $.fs.read(`${root}/${CONFIG_PATH}`)) : undefined;
-    const config = resolveConfig([await optionConfig($, options.config, root), repoConfig], repoInfo?.defaultBranch);
+    const globalPath = globalConfigPath({ XDG_CONFIG_HOME: await $.env.get('XDG_CONFIG_HOME'), HOME: await $.env.get('HOME') });
+    const config = resolveConfig(
+      configLayers({
+        option: await optionConfig($, options.config, root),
+        global: await readJson($, globalPath),
+        repo: await readJson($, `${root}/${CONFIG_PATH}`),
+      }),
+      repoInfo?.defaultBranch,
+    );
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
     const startWatch = async (): Promise<string | undefined> => {
       const rt = ready();

@@ -85,3 +85,23 @@ export function resolveConfig(layers: unknown | unknown[], defaultBranch?: strin
   }
   return config;
 }
+
+// the global file: $XDG_CONFIG_HOME/sift/config.json, else ~/.config/sift/config.json
+export function globalConfigPath(env: { XDG_CONFIG_HOME?: string | null; HOME?: string | null }): string | undefined {
+  const base = env.XDG_CONFIG_HOME || (env.HOME ? `${env.HOME}/.config` : undefined);
+  return base ? `${base}/sift/config.json` : undefined;
+}
+
+export type ConfigSources = {
+  // the config option, parsed; set, it replaces the global file
+  option?: unknown;
+  // the global file, parsed, when it exists
+  global?: unknown;
+  // the repository's .sift/config.json, parsed, when it exists
+  repo?: unknown;
+};
+
+// layers in application order: defaults, then the option or the global file, then the repository file
+export function configLayers(sources: ConfigSources): unknown[] {
+  return [sources.option !== undefined ? sources.option : sources.global, sources.repo];
+}
