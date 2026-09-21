@@ -80,9 +80,9 @@ export async function judgeEvent(pack: Pack, subject: Subject, judge: Judge, con
   const actionable = report.judged.find((j) => j.id === 'actionable');
   const kind = report.judged.find((j) => j.id === 'kind');
   const urgency = report.judged.find((j) => j.id === 'urgency');
-  const p = actionable?.answer.type === 'noul' ? actionable.answer.p : undefined;
-  const kindLabel = kind?.answer.type === 'choice' ? kind.answer.choice : undefined;
-  const urgencyLabel = urgency?.answer.type === 'score' ? urgency.answer.legend.split(':')[0] : undefined;
+  const p = actionable?.answer?.type === 'noul' ? actionable.answer.p : undefined;
+  const kindLabel = kind?.answer?.type === 'choice' ? kind.answer.choice : undefined;
+  const urgencyLabel = urgency?.answer?.type === 'score' ? urgency.answer.legend.split(':')[0] : undefined;
   const parts = [p !== undefined ? `actionable ${p.toFixed(2)}` : '', kindLabel ? `kind ${kindLabel}` : '', urgencyLabel ? `urgency ${urgencyLabel}` : ''].filter(Boolean);
   // unclear delivers: the cost of a wasted look is lower than a missed question
   const action = actionable && actionable.band === 'violated' ? 'defer' : 'deliver';

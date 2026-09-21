@@ -448,10 +448,32 @@ describe('pack materialization', () => {
     expect(report.dropped).toBe(2);
     expect(report.judgeError).toBeUndefined();
     expect(report.verdict).toBe('warn');
-    expect(formatReport(report)).toContain('judge answered 2 questions it was not asked, dropped');
+    expect(formatReport(report)).toContain('2 answers dropped: unasked or missing');
     const exact: Judge = { name: 'fake', ask: async (_state, questions) => ({ ok: true, answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: 'noul', p: 0.9 }])), backend: 'fake', latencyMs: 1 }) };
     const clean = await runPack(BUILTIN_PACKS['pr']!, s, exact, DEFAULT_CONFIG);
     expect(clean.dropped).toBeUndefined();
+  });
+
+  it('bands a rank item the judge left without its by answer unclear and counts it dropped', async () => {
+    // answers every question asked at 0.9, except the by question of the second ranked item
+    const judge: Judge = {
+      name: 'fake',
+      ask: async (_state, questions) => ({
+        ok: true,
+        answers: Object.fromEntries(Object.keys(questions).filter((id) => id !== 'rules_1').map((id) => [id, { type: 'noul', p: 0.9 }])),
+        backend: 'fake',
+        latencyMs: 1,
+      }),
+    };
+    const s: Subject = { kind: 'rules', ref: 'x', state: {}, facts: { rules: [{ text: 'no em dashes' }, { text: 'tests pass' }, { text: 'no semicolons' }] }, options: {} };
+    const report = await runPack(BUILTIN_PACKS['rules']!, s, judge, DEFAULT_CONFIG);
+    expect(report.judgeError).toBeUndefined();
+    expect(report.ranked[0]!.items.map((j) => j.band)).toEqual(['satisfied', 'unclear', 'satisfied']);
+    expect(report.ranked[0]!.items[1]!.answer).toBeUndefined();
+    expect(report.ranked[0]!.kept).toBe(3);
+    expect(report.dropped).toBe(1);
+    expect(formatReport(report)).toContain('unanswered');
+    expect(formatReport(report)).toContain('1 answer dropped: unasked or missing');
   });
 
   it('reads a plan beside its issue and fails on an unasked decision', async () => {

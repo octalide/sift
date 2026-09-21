@@ -66,7 +66,8 @@ export type Finding = {
 
 export type Judged = {
   id: string;
-  answer: Answer;
+  // absent when the judge left the question unanswered, the band is then unclear
+  answer?: Answer;
   band: Band;
   severity: Severity;
   instructions: string;
@@ -95,7 +96,7 @@ export type Report = {
   verdict: Verdict;
   backend: string;
   judgeError?: string;
-  // answers under an id no question asked for, dropped without touching the verdict
+  // answers under an id no question asked for, and by answers the judge left out of a ranked item, dropped without touching the verdict
   dropped?: number;
 };
 
