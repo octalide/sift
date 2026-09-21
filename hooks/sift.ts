@@ -176,9 +176,8 @@ export const register: Register = (on, rawOptions) => {
       if (!repo) throw new Error(`no repository: pass repo as the ${rt.forge.name} path or run inside a checkout with a ${rt.forge.name} remote`);
       return repo;
     };
-    const number = () => Number(ref.replace(/^#/, ''));
     // the subject is parsed, and a bad one refused, before any forge request; a url names its own repo
-    const parsed = <K extends ParsedKind>(kind: K) => parseSubject(kind, ref, rt.forge, opts.repo);
+    const parsed = <K extends ParsedKind>(kind: K, bare?: 'issue' | 'pr') => parseSubject(kind, ref, rt.forge, opts.repo, bare);
     switch (pack.subject) {
       case 'issue': {
         const p = parsed('issue');
@@ -204,14 +203,27 @@ export const register: Register = (on, rawOptions) => {
         return s;
       }
       case 'rules': {
-        const kind = /^#?\d+$/.test(ref) ? (opts.text === 'issue' ? 'issue' : 'pr') : /^[0-9a-f]{7,40}$|\.\./.test(ref) ? 'commit' : 'text';
-        return rulesSubject({ forge: rt.forge, git: rt.git, repo, source: ruleSource(rt, opts.repo), judge: rt.judge, store: rt.store }, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config);
+        // a bare number is a pull request unless text says it is an issue; a text subject is the text itself
+        const p = parsed('mixed', opts.text === 'issue' ? 'issue' : 'pr').subject;
+        const host = { forge: rt.forge, git: rt.git, repo, source: ruleSource(rt, opts.repo), judge: rt.judge, store: rt.store };
+        if (p.kind === 'text') return rulesSubject(host, { kind: 'text', ref: opts.text ?? p.text }, rt.config);
+        if (p.kind === 'commit') return rulesSubject(host, p, rt.config);
+        return rulesSubject({ ...host, repo: p.repo ?? needRepo() }, { kind: p.kind, number: p.number }, rt.config);
       }
       case 'tree': {
-        // an issue number with a repo is its title and body, anything else is the text itself
-        const isIssue = /^#?\d+$/.test(ref) && opts.text === undefined && repo !== undefined;
-        const issue = isIssue ? await rt.forge.issue(repo, number()) : undefined;
-        const text = issue ? `${issue.title}\n\n${issue.body}` : (opts.text ?? ref);
+        // text is the subject when given; otherwise an issue or pull request is its title and body, anything else the text itself
+        const p = opts.text === undefined ? parsed('mixed').subject : { kind: 'text' as const, text: opts.text };
+        let text: string;
+        let label: string;
+        if (p.kind === 'text' || p.kind === 'commit') {
+          text = p.kind === 'text' ? p.text : p.ref;
+          label = truncate(text, 40);
+        } else {
+          const at = p.repo ?? needRepo();
+          const item = p.kind === 'issue' ? await rt.forge.issue(at, p.number) : await rt.forge.pull(at, p.number);
+          text = `${item.title}\n\n${item.body}`;
+          label = `${at}#${p.number}`;
+        }
         if (!rt.root) throw new Error('no checkout: the tree subject indexes the working directory');
         const root = rt.root;
         const index = await indexTree({
@@ -219,7 +231,7 @@ export const register: Register = (on, rawOptions) => {
           size: async (p) => (await statFile(`${root}/${p}`)).size,
           read: (p) => readFile(`${root}/${p}`),
         });
-        return treeSubject(text, issue ? `${repo}#${number()}` : truncate(text, 40), index);
+        return treeSubject(text, label, index);
       }
       case 'plan': {
         if (opts.text === undefined) throw new Error('the plan pack reads the plan from text: grade(pack: "plan", subject: "<issue number>", text: "<plan>")');
@@ -358,7 +370,7 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number, an issue number with text="issue", a commit, or free text in text), locate (an issue number, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number or URL, an issue number with text="issue" or an issue URL, a commit ref or range, or free text in text), locate (an issue number or URL, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {

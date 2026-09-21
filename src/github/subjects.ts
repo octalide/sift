@@ -286,7 +286,7 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
 }
 
 // free text the rules are read against, and when known, what it is about to become in the words the judge reads
-export type RulesTarget = { kind: 'pr' | 'issue' | 'commit'; ref: string } | { kind: 'text'; ref: string; about?: string };
+export type RulesTarget = { kind: 'pr' | 'issue'; number: number } | { kind: 'commit'; ref: string } | { kind: 'text'; ref: string; about?: string };
 
 // the checkout or repository the rules are read from, the judge that discovers them and the store that caches them
 export type RulesHost = { forge?: Forge; git?: Git; repo?: string; source: RuleSource; judge: Judge; store: StoreLike };
@@ -297,16 +297,17 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
   const rules = [...found.rules];
   const total = rules.length;
   rules.splice(config.rules.maxRules);
-  let subject: Record<string, unknown> = { kind: target.kind, ref: target.ref };
+  const ref = target.kind === 'text' || target.kind === 'commit' ? target.ref : `#${target.number}`;
+  let subject: Record<string, unknown> = { kind: target.kind, ref };
   let about: string | undefined;
   if (forge && repo && target.kind === 'pr') {
-    const s = await prSubject(forge, repo, Number(target.ref.replace(/^#/, '')), config);
+    const s = await prSubject(forge, repo, target.number, config);
     subject = { kind: 'pr', ...s.state };
-    about = `pull request ${target.ref}`;
+    about = `pull request ${ref}`;
   } else if (forge && repo && target.kind === 'issue') {
-    const s = await issueSubject(forge, repo, Number(target.ref.replace(/^#/, '')), config);
+    const s = await issueSubject(forge, repo, target.number, config);
     subject = { kind: 'issue', ...s.state };
-    about = `issue ${target.ref}`;
+    about = `issue ${ref}`;
   } else if (git && target.kind === 'commit') {
     const s = await commitSubject(git, target.ref, config);
     subject = { kind: 'commit', ...s.state };
@@ -317,7 +318,7 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
   }
   return {
     kind: 'rules',
-    ref: `${target.kind}:${truncate(target.ref, 40)}`,
+    ref: `${target.kind}:${truncate(ref, 40)}`,
     state: { subject },
     facts: {
       rules,
