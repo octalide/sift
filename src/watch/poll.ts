@@ -68,6 +68,8 @@ export type WatchState = {
   deferred: Deferred[];
   paused: boolean;
   login?: string;
+  // the name of the subagent whose watch start armed the watch; absent when the main loop did
+  armedBy?: string;
   interval: number;
   lastPoll?: number;
   lastDelivery?: number;

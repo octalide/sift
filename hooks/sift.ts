@@ -21,7 +21,7 @@ import { parseSubject, type ParsedKind } from '../src/packs/subject.ts';
 import type { Pack, Report, Subject } from '../src/packs/types.ts';
 import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { estimateTokens, truncate } from '../src/tokens.ts';
-import { Watcher } from '../src/watch/watcher.ts';
+import { armedNotice, armingAgent, Watcher } from '../src/watch/watcher.ts';
 
 type Options = {
   backend: Backend;
@@ -573,14 +573,15 @@ export const register: Register = (on, rawOptions) => {
     ].join('\n');
   }
 
-  // the watch controls, shared by /sift watch and the watch tool
-  async function watchControl(rt: Runtime, sub: string): Promise<string> {
+  // the watch controls, shared by /sift watch and the watch tool. armedBy is the subagent a start runs in, if any
+  async function watchControl(rt: Runtime, sub: string, armedBy?: string): Promise<string> {
     if (sub === 'start') {
       const reason = await rt.startWatch();
       if (reason) return `watch cannot start: ${reason}`;
     }
     const w = rt.watcher;
     if (!w) return 'watch is off (start it with the start action, or set the watch option to start it at boot)';
+    if (sub === 'start') await w.arm(armedBy);
     if (sub === 'pause') await w.pause();
     else if (sub === 'resume') await w.resume();
     else if (sub === 'reset') await w.reset();
@@ -593,6 +594,7 @@ export const register: Register = (on, rawOptions) => {
       `watch ${options.watchRepo || rt.repo}: ${st.paused ? 'paused' : 'running'}, ${Object.keys(st.items).length} items, ${Object.keys(st.runs).length} runs cached`,
       `interval ${Math.round(st.interval / 1000)}s, last poll ${st.lastPoll ? new Date(st.lastPoll).toISOString() : 'never'}, failures ${st.failures}`,
       `deferred ${st.deferred.length}, self login ${st.login ?? 'unknown'}, cursor ${st.cursor}`,
+      ...(sub === 'start' && armedBy ? [armedNotice(armedBy)] : []),
     ].join('\n');
   }
 
@@ -601,7 +603,8 @@ export const register: Register = (on, rawOptions) => {
     const action = String((e as unknown as { action?: string }).action ?? 'status');
     if (!rt) return { result: [{ type: 'text', text: 'sift is not bound yet' }] };
     if (!['status', 'start', 'poll', 'pause', 'resume', 'reset', 'deferred'].includes(action)) return { deny: `unknown watch action ${action}` };
-    return { result: [{ type: 'text', text: await watchControl(rt, action) }] };
+    const armedBy = action === 'start' && e.agentId ? armingAgent(e.agentId, await $.agent.list()) : undefined;
+    return { result: [{ type: 'text', text: await watchControl(rt, action, armedBy) }] };
   });
 
   on('tool.call', { tool: 'mcp__sift__status' }, async () => {

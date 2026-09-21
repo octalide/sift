@@ -103,6 +103,13 @@ export class Watcher {
     await this.start();
   }
 
+  // records who armed the watch: a subagent's name, or nothing when the main loop did. deliveries always
+  // reach the main loop, the name on them tells it whom to relay to
+  async arm(by: string | undefined): Promise<void> {
+    this.state.armedBy = by;
+    await this.save();
+  }
+
   snapshot(): WatchState {
     return this.state;
   }
@@ -421,7 +428,7 @@ export class Watcher {
   }
 
   private render(items: { event: WatchEvent; label: string }[]): string {
-    const lines = [`[sift watch ${this.options.repo}]`];
+    const lines = [`[sift watch ${this.options.repo}${this.state.armedBy ? ` for ${this.state.armedBy}` : ''}]`];
     for (const { event, label } of items) {
       lines.push(`${formatEvent(event)}`);
       lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''}`);
@@ -452,6 +459,17 @@ export class Watcher {
     }
     return detail;
   }
+}
+
+// the name SendMessage reaches a tool.call's agent by: its listed name, else its id, nothing on the main loop
+export function armingAgent(agentId: string | undefined, agents: { id: string; name?: string }[]): string | undefined {
+  if (!agentId) return undefined;
+  return agents.find((a) => a.id === agentId)?.name ?? agentId;
+}
+
+// what a subagent that armed the watch is told: the plugin submits prompts to the session's main loop only
+export function armedNotice(by: string): string {
+  return `armed from agent ${by}: deliveries are submitted to the session's main loop, not to this agent. Nothing reaches you unless the session relays it (each delivery names you as \`for ${by}\`), so do not end your turn expecting a delivery to arrive on its own.`;
 }
 
 export function summarize(deferred: Deferred[]): string {
