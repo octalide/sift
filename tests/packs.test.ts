@@ -658,6 +658,8 @@ describe('github helpers', () => {
     expect((s.state as { linked_issue: { number: number } }).linked_issue.number).toBe(12);
     expect((s.state as { commits: string[] }).commits).toEqual(['feat(#12): twelve']);
     expect(s.facts['has_drift']).toBe(true);
+    expect(s.facts['hunks']).toEqual([{ file: 'x.ts', header: '@@ -1 +1 @@', text: '-a\n+b' }]);
+    expect((s.state as { changes: unknown }).changes).toEqual([{ file: 'x.ts', header: '@@ -1 +1 @@' }]);
     for (const key of ['linked', 'base', 'checks_failed', 'sections']) expect(s.facts[key]).toBeUndefined();
     const findings = runChecks(BUILTIN_PACKS['pr']!, s, config);
     expect(findings.map((f) => f.check)).toEqual(['pr.drift']);
