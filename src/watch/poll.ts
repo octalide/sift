@@ -1,4 +1,4 @@
-import type { Check, Run, WatchItem } from '../forge/forge.ts';
+import type { Check, PullHead, Run, WatchItem } from '../forge/forge.ts';
 
 export type { Run } from '../forge/forge.ts';
 
@@ -43,7 +43,7 @@ export type WatchEvent = {
 };
 
 // bump when the stored shape changes; a store from an older version is reseeded
-export const STATE_VERSION = 6;
+export const STATE_VERSION = 7;
 
 export type WatchState = {
   version: number;
@@ -58,6 +58,8 @@ export type WatchState = {
   pending: Record<string, PendingHead>;
   // pr@sha -> the open pr head with no check or status on it yet, looked up once; neither settled nor pending
   unchecked: Record<string, true>;
+  // the open pr heads as of the last 200 on the pulls probe; a 304 leaves it in place
+  pulls: PullHead[];
   etags: { issues?: string; runs?: string; pulls?: string };
   deferred: Deferred[];
   paused: boolean;
@@ -96,6 +98,7 @@ export function initialState(): WatchState {
     settled: {},
     pending: {},
     unchecked: {},
+    pulls: [],
     etags: {},
     deferred: [],
     paused: false,
