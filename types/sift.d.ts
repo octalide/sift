@@ -55,7 +55,7 @@ export type Sift = {
   // the same questions over many items: batched fills each request with items, isolated sends one request per item.
   // {k} in a question is the item index, {field} a field of an object item, {text} a string item
   rank: <T extends string | Record<string, unknown>>(items: T[], questions: Record<string, SiftQuestion>, options: SiftRankOptions) => Promise<SiftRankResult<T>>;
-  // run a pack over a subject: an issue or PR number, a commit range, "release", or text; top cuts a locate list
+  // run a pack over a subject: an issue or PR number, a commit range, "release", a job or run id, or text; top cuts a ranked list
   grade: (pack: string, subject: string, options?: { repo?: string; text?: string; ref?: string; top?: number }) => Promise<SiftReport>;
   // the backend name in use
   backend: () => string;

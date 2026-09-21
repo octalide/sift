@@ -2,8 +2,9 @@ import type { RepoConfig } from '../github/config.ts';
 import type { Forge, PullHead, Rate } from '../forge/forge.ts';
 import type { Judge } from '../judge/types.ts';
 import type { Finding, Pack } from '../packs/types.ts';
-import { runChecks } from '../packs/run.ts';
+import { formatReport, runChecks, runPack } from '../packs/run.ts';
 import { issueSubject } from '../github/subjects.ts';
+import { ciSubject } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
 import { diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
@@ -29,6 +30,8 @@ export type WatchHost = {
   pack: Pack;
   // the issue pack's mechanical checks run on every new issue, the filer's own included
   issuePack?: Pack;
+  // the ci pack runs on each failed check of a settled pr head and its report rides with the delivery
+  ciPack?: Pack;
   config: RepoConfig;
   now: () => number;
   deliver: (text: string) => Promise<void>;
@@ -238,7 +241,10 @@ export class Watcher {
     }
     this.expireDeferred();
     if (deliver.length === 0) return;
-    for (const d of deliver) this.host.onDecision?.(d.event, 'deliver', d.label);
+    for (const d of deliver) {
+      this.host.onDecision?.(d.event, 'deliver', d.label);
+      if (d.event.settled && d.event.conclusion === 'failure') d.event.reports = await this.ciReports(d.event);
+    }
     await this.host.deliver(this.render(deliver));
     this.state.deferred = [];
     this.state.lastDelivery = this.host.now();
@@ -317,7 +323,7 @@ export class Watcher {
     const key = headKey(pr);
     this.state.settled = trimSettled({ ...this.state.settled, [key]: verdict.conclusion });
     delete this.state.pending[key];
-    const failed = verdict.failed.length > 0 ? `, failed: ${verdict.failed.join(', ')}` : '';
+    const failed = verdict.failed.length > 0 ? `, failed: ${verdict.failed.map((c) => c.name).join(', ')}` : '';
     return {
       id: `ci-settled#${key}`,
       kind: 'ci',
@@ -332,8 +338,29 @@ export class Watcher {
       ok: verdict.conclusion === 'success',
       branch: pr.branch,
       settled: true,
+      failed: verdict.failed,
       isNew: true,
     };
+  }
+
+  // the ci pack over each failed check that has a log, one report per job; a check the forge keeps no log for is named alone
+  private async ciReports(e: WatchEvent): Promise<string[]> {
+    const pack = this.host.ciPack;
+    if (!pack) return [];
+    const out: string[] = [];
+    for (const check of e.failed ?? []) {
+      if (check.id === undefined) {
+        out.push(`${check.name}: no log to read`);
+        continue;
+      }
+      try {
+        const subject = await ciSubject(this.host.forge, this.options.repo, { job: check.id });
+        out.push(formatReport(await runPack(pack, subject, this.host.judge, this.host.config)));
+      } catch (error) {
+        out.push(`${check.name}: could not read the log (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    return out;
   }
 
   // every open head not yet tracked is looked up once: unfinished checks make it pending from now, so a head whose
@@ -399,6 +426,7 @@ export class Watcher {
       lines.push(`${formatEvent(event)}`);
       lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''}`);
       if (event.findings?.length) lines.push(`  filing: ${event.findings.join('; ')}`);
+      for (const report of event.reports ?? []) lines.push(...report.split('\n').map((l) => `  ${l}`));
     }
     if (this.state.deferred.length > 0) lines.push(`deferred meanwhile: ${summarize(this.state.deferred)}`);
     return lines.join('\n');

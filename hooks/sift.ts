@@ -334,6 +334,7 @@ export const register: Register = (on, rawOptions) => {
           judge,
           pack: triagePack,
           issuePack: rt.packs['issue'],
+          ciPack: rt.packs['ci'],
           config,
           now: () => Date.now(),
           deliver: async (text) => {

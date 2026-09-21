@@ -36,6 +36,10 @@ export type WatchEvent = {
   settled?: boolean;
   // checks on the head of an open pr did not all finish within the stall interval; number is the pr
   stalled?: boolean;
+  // settled only: the checks that failed, with the job id of each whose log the forge keeps
+  failed?: FailedCheck[];
+  // settled failure only: the ci pack's report on each failed check with a log, attached at delivery
+  reports?: string[];
   // mechanical findings of the issue pack on a new issue
   findings?: string[];
   // set when the event is new
@@ -200,10 +204,12 @@ export function trimSettled(settled: Record<string, string>, keep = 200): Record
   return Object.fromEntries(keys.map((k) => [k, settled[k]!]));
 }
 
+export type FailedCheck = Pick<Check, 'name' | 'id'>;
+
 // the verdict on a head once every check has finished, undefined while any is pending
-export function settleChecks(checks: Check[]): { conclusion: 'success' | 'failure'; total: number; failed: string[] } | undefined {
+export function settleChecks(checks: Check[]): { conclusion: 'success' | 'failure'; total: number; failed: FailedCheck[] } | undefined {
   if (checks.some((c) => !c.done)) return undefined;
-  const bad = checks.filter((c) => !c.ok).map((c) => c.name);
+  const bad = checks.filter((c) => !c.ok).map((c) => ({ name: c.name, ...(c.id === undefined ? {} : { id: c.id }) }));
   return { conclusion: bad.length > 0 ? 'failure' : 'success', total: checks.length, failed: bad };
 }
 
