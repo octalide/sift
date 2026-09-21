@@ -29,6 +29,8 @@ const PLAIN_NOUNS: Record<ForgeArtifact, string> = { issue: 'issue', pr: 'pull r
 export function textAbout(artifact: { kind: ForgeArtifact; action: ForgeAction }, nouns: Record<ForgeArtifact, string> = PLAIN_NOUNS): string {
   const noun = nouns[artifact.kind];
   if (artifact.action === 'comment') return `a comment on a ${noun}`;
+  if (artifact.action === 'review') return `a review on a ${noun}`;
+  if (artifact.action === 'merge') return 'a merge commit message';
   if (artifact.action === 'edit') return `the edited ${artifact.kind === 'release' ? 'notes' : 'body'} of a ${noun}`;
   return `the ${artifact.kind === 'release' ? 'notes' : 'body'} of a new ${noun}`;
 }
@@ -56,7 +58,11 @@ export function channelTable(defaults: Channel[], over: Channel[]): Channel[] {
 
 const flagPattern = (flags: string[]): RegExp => new RegExp(String.raw`(?:^|\s)(?:${flags.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?:=|\s+)`);
 
-// the value after a body flag: a quoted word, or a heredoc inside $(cat <<'EOF' ... EOF); else the path after a file flag
+// a heredoc on the command's stdin: the lines between the << line and the delimiter alone on its own line
+const STDIN_HEREDOC = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n([\s\S]*?)\n[ \t]*\1[ \t]*(?:\n|$)/;
+
+// the value after a body flag: a quoted word, or a heredoc inside $(cat <<'EOF' ... EOF); else the path after a file flag,
+// or the heredoc on stdin when that path is -
 export function commandBody(command: string, source: Extract<TextSource, { command: string }>): Body | undefined {
   const flag = flagPattern(source.body).exec(command);
   if (flag) {
@@ -70,7 +76,10 @@ export function commandBody(command: string, source: Extract<TextSource, { comma
   const fileFlag = flagPattern(source.file).exec(command);
   if (!fileFlag) return undefined;
   const file = shellWord(command.slice(fileFlag.index + fileFlag[0].length));
-  return file === undefined ? undefined : { file };
+  if (file === undefined) return undefined;
+  if (file !== '-') return { file };
+  const stdin = STDIN_HEREDOC.exec(command);
+  return stdin ? { text: stdin[2]! } : { file };
 }
 
 // the text a call sends through the channel, undefined when the call is not on it or carries none

@@ -72,7 +72,7 @@ export type RawItem = {
 const GH_URL = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+\/[^/\s#?]+)\/(issues|pull)\/(\d+)(?:[/?#].*)?$/;
 const GH_API_URL = /^https?:\/\/api\.github\.com\/repos\/([^/\s]+\/[^/\s#?]+)\/(issues|pulls)\/(\d+)(?:[/?#].*)?$/;
 
-// gh pr and gh issue take --body and --body-file; gh release takes --notes and --notes-file, and has no comment
+// gh pr and gh issue take --body and --body-file (pr review and pr merge too); gh release takes --notes and --notes-file, and has no comment
 const ghWrite = (kind: ForgeArtifact, action: ForgeAction, noun: string): ForgeWrite => ({
   kind,
   action,
@@ -81,7 +81,8 @@ const ghWrite = (kind: ForgeArtifact, action: ForgeAction, noun: string): ForgeW
   file: [`--${noun}-file`, '-F'],
 });
 export const GH_WRITES: ForgeWrite[] = [
-  ...(['pr', 'issue'] as const).flatMap((kind) => (['create', 'comment', 'edit'] as const).map((action) => ghWrite(kind, action, 'body'))),
+  ...(['create', 'comment', 'edit', 'review', 'merge'] as const).map((action) => ghWrite('pr', action, 'body')),
+  ...(['create', 'comment', 'edit'] as const).map((action) => ghWrite('issue', action, 'body')),
   ...(['create', 'edit'] as const).map((action) => ghWrite('release', action, 'notes')),
 ];
 

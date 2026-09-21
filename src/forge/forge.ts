@@ -90,7 +90,7 @@ export type Template = { kind: 'issue' | 'pr'; name: string; body: string };
 
 // the artifact a body belongs to and what a write does to it
 export type ForgeArtifact = 'issue' | 'pr' | 'release';
-export type ForgeAction = 'create' | 'comment' | 'edit';
+export type ForgeAction = 'create' | 'comment' | 'edit' | 'review' | 'merge';
 
 // a write the forge's cli makes: a regex over the command, the flags carrying the body inline, the flags naming a file it is read from
 export type ForgeWrite = { kind: ForgeArtifact; action: ForgeAction; command: string; body: string[]; file: string[] };
