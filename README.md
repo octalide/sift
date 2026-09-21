@@ -404,6 +404,8 @@ npm run validate       # claude plugin validate
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
 ```
 
+CI runs the same three commands on every pull request and reports them through a `gate` check, which the rulesets on `dev` and `main` require.
+
 `types/claude-code.d.ts` is the engine's generated declaration. Regenerate it with `/plugin-types` after a Claude Code upgrade and rerun the typecheck. The function-hook surface is early access and changes between releases.
 
 ## Caveats
