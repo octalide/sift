@@ -109,7 +109,7 @@ describe('locate pack', () => {
     expect(() => validatePack({ subject: 'rules', expand: { from: 'rules', template: q } }, 'old')).toThrow(/expand is gone/);
     expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: {} }] }, 'bad')).toThrow(/at least one question/);
     expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, by: 'zz' }] }, 'bad')).toThrow(/unknown question zz/);
-    expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, list: 'some' }] }, 'bad')).toThrow(/each or top/);
+    expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, list: 'some' }] }, 'bad')).toThrow(/each, top or violated/);
     expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, order: 'size' }] }, 'bad')).toThrow(/value or input/);
     expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, feed: '' }] }, 'bad')).toThrow(/feed must name/);
   });

@@ -43,12 +43,13 @@ export type SiftReport = {
   subject: string;
   mechanical: { check: string; severity: 'fail' | 'warn' | 'info'; message: string }[];
   judged: SiftJudged[];
-  // one entry per rank step of the pack, its items in order (each) or the best by value (top)
-  ranked: { step: string; list: 'each' | 'top'; total: number; kept: number; items: (SiftJudged & { index: number; label: string; answers: Record<string, SiftAnswer> })[] }[];
+  // one entry per rank step of the pack, its items in order (each), the best by value (top), or those ruled out (violated);
+  // an item is judged on the step's ordering question, asked holds every question of the step judged for it
+  ranked: { step: string; list: 'each' | 'top' | 'violated'; total: number; kept: number; items: (SiftJudged & { index: number; label: string; answers: Record<string, SiftAnswer>; asked: SiftJudged[] })[] }[];
   verdict: 'pass' | 'warn' | 'fail' | 'unknown';
   backend: string;
   judgeError?: string;
-  // answers under an id no question asked for, and by answers the judge left out of a ranked item, dropped without touching the verdict
+  // answers under an id no question asked for, and answers the judge left out of a ranked item, dropped without touching the verdict
   dropped?: number;
 };
 

@@ -36,9 +36,10 @@ function validateRank(raw: unknown, name: string): RankStep[] | undefined {
     if (Object.keys(questions).length === 0) throw new Error(`pack ${name}: rank step ${i + 1} needs at least one question`);
     if (step.by !== undefined && !questions[step.by]) throw new Error(`pack ${name}: rank step ${i + 1} sorts by unknown question ${step.by}`);
     if (step.within !== undefined && (typeof step.within.field !== 'string' || typeof step.within.of !== 'string')) throw new Error(`pack ${name}: rank step ${i + 1} within needs field and of`);
-    if (step.list !== undefined && !['each', 'top'].includes(step.list)) throw new Error(`pack ${name}: rank step ${i + 1} list must be each or top`);
+    if (step.list !== undefined && !['each', 'top', 'violated'].includes(step.list)) throw new Error(`pack ${name}: rank step ${i + 1} list must be each, top or violated`);
     if (step.order !== undefined && !['value', 'input'].includes(step.order)) throw new Error(`pack ${name}: rank step ${i + 1} order must be value or input`);
     if (step.feed !== undefined && (typeof step.feed !== 'string' || step.feed === '')) throw new Error(`pack ${name}: rank step ${i + 1} feed must name a state field`);
+    if (step.context !== undefined && (!Array.isArray(step.context) || !step.context.every((f) => typeof f === 'string'))) throw new Error(`pack ${name}: rank step ${i + 1} context must be an array of state fields`);
     return { ...step, from: step.from, questions };
   });
 }

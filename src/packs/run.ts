@@ -117,32 +117,42 @@ function labelOf(step: RankStep, item: Record<string, unknown>, index: number): 
 
 type StepResult = { ranked: RankedStep; kept: Record<string, unknown>[]; dropped: number; backend: string } | { error: string; backend: string };
 
-// the items a step did not rule out, in input order: every band but violated, and for a top list no more than the top shows
+// the state fields a step reads its items against
+function contextOf(state: Record<string, unknown>, fields: string[] | undefined): Record<string, unknown> {
+  if (!fields) return state;
+  const out: Record<string, unknown> = {};
+  for (const f of fields) if (state[f] !== undefined) out[f] = state[f];
+  return out;
+}
+
+// the items a step did not rule out, in input order: every band but violated on any of the step's questions,
+// and for a top list no more than the top shows
 async function runStep(s: Step, items: Record<string, unknown>[], state: Record<string, unknown>, judgeBackend: Judge, top: number | undefined): Promise<StepResult> {
   const list = s.step.list ?? 'each';
   if (items.length === 0) return { ranked: { step: s.step.from, list, total: 0, kept: 0, items: [] }, kept: [], dropped: 0, backend: judgeBackend.name };
-  const result = await rank(items, s.questions, judgeBackend, { mode: s.step.mode ?? 'batched', context: state, by: s.by, fields: s.step.fields });
+  const result = await rank(items, s.questions, judgeBackend, { mode: s.step.mode ?? 'batched', context: contextOf(state, s.step.context), by: s.by, fields: s.step.fields });
   if (!result.ok) return { backend: result.backend, error: `${result.reason}: ${result.message}` };
-  // an item the judge left without its by answer is unclear and counted as dropped, never thrown on
+  // a question the judge left unanswered for an item is unclear and counted as dropped, never thrown on
   let missing = 0;
   const all = result.items.map((r) => {
-    const asked = fillQuestion(s.questions[s.by]!, entryOf(r.item, r.index));
+    const entry = entryOf(r.item, r.index);
     const id = `${s.step.from}_${r.index + 1}`;
-    const answer = r.answers[s.by];
-    if (!answer) missing++;
-    const judged: RankedItem = {
-      ...(answer ? judge(id, answer, s.meta[s.by]!, asked.instructions) : { id, band: 'unclear', severity: s.meta[s.by]!.severity, instructions: asked.instructions }),
-      index: r.index,
-      label: labelOf(s.step, r.item, r.index),
-      answers: r.answers,
-    };
+    const asked = Object.entries(s.questions).map(([qid, q]) => {
+      const instructions = fillQuestion(q, entry).instructions;
+      const answer = r.answers[qid];
+      if (!answer) missing++;
+      return answer ? judge(`${id}.${qid}`, answer, s.meta[qid]!, instructions) : { id: `${id}.${qid}`, band: 'unclear' as const, severity: s.meta[qid]!.severity, instructions };
+    });
+    const by = asked[Object.keys(s.questions).indexOf(s.by)]!;
+    const judged: RankedItem = { ...by, id, index: r.index, label: labelOf(s.step, r.item, r.index), answers: r.answers, asked };
     return { judged, item: r.item, value: r.value };
   });
   const byIndex = (a: { judged: RankedItem }, b: { judged: RankedItem }) => a.judged.index - b.judged.index;
   const byValue = [...all].sort((a, b) => b.value - a.value || byIndex(a, b));
   const best = list === 'top' ? byValue.slice(0, top ?? s.step.top ?? TOP_DEFAULT) : all;
-  const shown = s.step.order === 'input' ? [...best].sort(byIndex) : best;
-  const kept = best.filter((r) => r.judged.band !== 'violated').sort(byIndex);
+  const ruledOut = (r: { judged: RankedItem }) => r.judged.asked.some((j) => j.band === 'violated');
+  const shown = list === 'violated' ? best.filter(ruledOut) : s.step.order === 'input' ? [...best].sort(byIndex) : best;
+  const kept = best.filter((r) => !ruledOut(r)).sort(byIndex);
   return { ranked: { step: s.step.from, list, total: items.length, kept: kept.length, items: shown.map((r) => r.judged) }, kept: kept.map((r) => r.item), dropped: result.dropped + missing, backend: result.backend };
 }
 
@@ -196,7 +206,7 @@ export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge,
     mechanical,
     judged,
     ranked,
-    verdict: verdictOf(mechanical, [...judged, ...ranked.flatMap((r) => r.items)], judgeError !== undefined),
+    verdict: verdictOf(mechanical, [...judged, ...ranked.flatMap((r) => r.items.flatMap((i) => i.asked))], judgeError !== undefined),
     backend,
     judgeError,
     ...(dropped > 0 ? { dropped } : {}),
@@ -217,7 +227,12 @@ export function formatReport(report: Report): string {
   // steps first, then the questions, the order they ran in
   for (const r of report.ranked) {
     if (r.list === 'each') {
-      for (const j of r.items) lines.push(`  [${j.band}] ${j.id} = ${value(j)}: ${j.instructions}`);
+      for (const i of r.items) for (const j of i.asked) lines.push(`  [${j.band}] ${j.id} = ${value(j)}: ${j.instructions}`);
+      continue;
+    }
+    if (r.list === 'violated') {
+      lines.push(`  ${r.step}: ${r.total - r.kept} of ${r.total} ruled out`);
+      for (const i of r.items) for (const j of i.asked) if (j.band === 'violated') lines.push(`    [violated] ${i.label}: ${j.id.slice(i.id.length + 1)} = ${value(j)}`);
       continue;
     }
     lines.push(`  ${r.step}: top ${r.items.length} of ${r.total}, ${r.kept} not ruled out`);
