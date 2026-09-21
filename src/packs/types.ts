@@ -18,7 +18,7 @@ export type PackQuestion = (Exclude<Question, { type: 'choice' }> | PackChoice) 
   inverted?: boolean;
 };
 
-export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'command' | 'message';
+export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'message';
 
 export type Pack = {
   name: string;
