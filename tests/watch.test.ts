@@ -3,7 +3,7 @@ import { Gh } from '../src/github/gh.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
-import { diffItems, diffRuns, hashOf, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
+import { diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { Watcher, summarize } from '../src/watch/watcher.ts';
 
@@ -38,6 +38,7 @@ describe('item diffing', () => {
     expect(settleChecks([done, { name: 'test', status: 'completed', conclusion: 'success' }], [{ context: 'ext', state: 'success' }])).toEqual({ conclusion: 'success', total: 3, failed: [] });
     expect(settleChecks([done, { name: 'test', status: 'completed', conclusion: 'failure' }], [])).toEqual({ conclusion: 'failure', total: 2, failed: ['test'] });
     expect(settleChecks([], [])).toEqual({ conclusion: 'success', total: 0, failed: [] });
+    expect(pendingChecks([done, { name: 'test', status: 'queued', conclusion: null }], [{ context: 'ext', state: 'pending' }])).toEqual({ pending: ['test', 'ext'], total: 3 });
   });
 
   it('keeps no bodies in the store', () => {
@@ -146,7 +147,7 @@ describe('watcher', () => {
           return { cancel: () => {} };
         },
       },
-      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: false, ignoreBots: true, ci: 'failures', triage: true, protectedBranches: ['main'] } },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: false, ignoreBots: true, ci: 'failures', triage: true, protectedBranches: ['main'] } },
     );
     await watcher.start();
     await watcher.tick();
@@ -200,7 +201,7 @@ describe('watcher', () => {
         schedule: () => ({ cancel: () => {} }),
         onDecision: (e, action, label) => decisions.push(`${action} ${e.id} ${label}`),
       },
-      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'], branchPattern: '^feat/\\d+$' } },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'], branchPattern: '^feat/\\d+$' } },
     );
     await watcher.start();
     await watcher.tick();
@@ -212,6 +213,120 @@ describe('watcher', () => {
     expect(delivered[0]).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks)');
     expect(delivered[0]).toContain('https://x/pull/3 · ci settled on pr');
     expect(watcher.snapshot().settled).toEqual({ '3@abc1234def': 'success' });
+    expect(watcher.snapshot().pending).toEqual({});
+  });
+
+  it('delivers a pr head whose checks stay unfinished past the stall interval as stalled, once, then its verdict when it settles', async () => {
+    const run = (id: number, name: string, status: string, conclusion: string | null) => ({ id, name, head_branch: 'feat/3', event: 'push', status, conclusion, head_sha: 'abc1234def', html_url: `https://x/runs/${id}`, actor: { login: 'me' }, updated_at: '1' });
+    const pulls = page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha: 'abc1234def' }, html_url: 'https://x/pull/3' }]);
+    const checks = (test: string) => [page({ check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }, { name: 'test', status: test, conclusion: test === 'completed' ? 'success' : null }] }), page({ statuses: [] })];
+    const gh = fakeGh([
+      page({ login: 'me' }),
+      // tick 1: seed with both workflows running
+      page([issue(1)]),
+      page([slim(1)]),
+      page({ workflow_runs: [run(10, 'build', 'in_progress', null), run(11, 'test', 'in_progress', null)] }),
+      // tick 2: build finished, test still running: the head is pending
+      notModified,
+      page({ workflow_runs: [run(10, 'build', 'completed', 'success'), run(11, 'test', 'in_progress', null)] }, '"r2"'),
+      pulls,
+      ...checks('in_progress'),
+      // tick 3: nothing changed, the stall interval has passed, test still running
+      notModified,
+      notModified,
+      pulls,
+      ...checks('in_progress'),
+      // tick 4: nothing changed, no calls beyond the probes
+      notModified,
+      notModified,
+      // tick 5: test finished
+      notModified,
+      page({ workflow_runs: [run(10, 'build', 'completed', 'success'), run(11, 'test', 'completed', 'success')] }, '"r3"'),
+      pulls,
+      ...checks('completed'),
+    ]);
+    const delivered: string[] = [];
+    let now = 1_000_000;
+    const watcher = new Watcher(
+      {
+        gh,
+        store: { get: async () => undefined, set: async () => {} },
+        judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) },
+        pack: BUILTIN_PACKS['triage']!,
+        config: DEFAULT_CONFIG,
+        now: () => now,
+        deliver: async (t) => void delivered.push(t),
+        log: () => {},
+        status: () => {},
+        schedule: () => ({ cancel: () => {} }),
+      },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 3600_000, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'], branchPattern: '^feat/\\d+$' } },
+    );
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    expect(watcher.snapshot().pending).toEqual({ '3@abc1234def': { number: 3, title: 'Feat 3', branch: 'feat/3', sha: 'abc1234def', url: 'https://x/pull/3', user: 'me', since: 1_000_000, stalled: false } });
+    now += 3600_000;
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('ci stalled: pr #3 feat/3 @abc1234: Feat 3 (1 of 2 checks pending: test)');
+    expect(delivered[0]).toContain('by me · https://x/pull/3 · ci stalled on pr');
+    expect(delivered[0]).toContain('deferred meanwhile: 1 ci success on pr #3, awaiting the other checks');
+    now += 3600_000;
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    expect(watcher.snapshot().pending['3@abc1234def']?.stalled).toBe(true);
+    await watcher.tick();
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1]).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks)');
+    expect(watcher.snapshot().pending).toEqual({});
+  });
+
+  it('forgets a pending head once its pr moved to a new commit', async () => {
+    const run = (id: number, sha: string, status: string, conclusion: string | null) => ({ id, name: 'build', head_branch: 'feat/3', event: 'push', status, conclusion, head_sha: sha, html_url: `https://x/runs/${id}`, actor: { login: 'me' }, updated_at: '1' });
+    const pull = (sha: string) => page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha }, html_url: 'https://x/pull/3' }]);
+    const gh = fakeGh([
+      page({ login: 'me' }),
+      page([issue(1)]),
+      page([slim(1)]),
+      page({ workflow_runs: [run(10, 'aaa1234', 'in_progress', null)] }),
+      // tick 2: build finished on the first head, an external status still pending
+      notModified,
+      page({ workflow_runs: [run(10, 'aaa1234', 'completed', 'success')] }, '"r2"'),
+      pull('aaa1234'),
+      page({ check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }] }),
+      page({ statuses: [{ context: 'ext', state: 'pending' }] }),
+      // tick 3: past the stall interval, but the pr head moved on
+      notModified,
+      notModified,
+      pull('bbb1234'),
+    ]);
+    const delivered: string[] = [];
+    let now = 1_000_000;
+    const watcher = new Watcher(
+      {
+        gh,
+        store: { get: async () => undefined, set: async () => {} },
+        judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) },
+        pack: BUILTIN_PACKS['triage']!,
+        config: DEFAULT_CONFIG,
+        now: () => now,
+        deliver: async (t) => void delivered.push(t),
+        log: () => {},
+        status: () => {},
+        schedule: () => ({ cancel: () => {} }),
+      },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 3600_000, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'], branchPattern: '^feat/\\d+$' } },
+    );
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(Object.keys(watcher.snapshot().pending)).toEqual(['3@aaa1234']);
+    now += 3600_000;
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    expect(watcher.snapshot().pending).toEqual({});
   });
 
   it('checks a new issue against the issue pack, the filer\'s own included, and delivers its findings', async () => {
@@ -247,7 +362,7 @@ describe('watcher', () => {
         status: () => {},
         schedule: () => ({ cancel: () => {} }),
       },
-      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'] } },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'] } },
     );
     await watcher.start();
     await watcher.tick();

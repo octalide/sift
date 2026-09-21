@@ -149,6 +149,12 @@
       "default": 24,
       "description": "A deferred event older than this is delivered on its own so nothing waits forever."
     },
+    "watchStallHours": {
+      "type": "number",
+      "title": "CI stall interval (h)",
+      "default": 1,
+      "description": "A PR head whose checks have not all finished within this many hours is delivered once as ci stalled, naming the pending checks."
+    },
     "grade": {
       "type": "boolean",
       "title": "Grading tools",

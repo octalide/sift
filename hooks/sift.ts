@@ -37,6 +37,7 @@ type Options = {
   watchCi: 'failures' | 'all' | 'none';
   watchTriage: boolean;
   watchDeferMaxAgeHours: number;
+  watchStallHours: number;
   grade: boolean;
   gateOutbound: boolean;
   classify: boolean;
@@ -65,6 +66,7 @@ const DEFAULTS: Options = {
   watchCi: 'failures',
   watchTriage: true,
   watchDeferMaxAgeHours: 24,
+  watchStallHours: 1,
   grade: true,
   gateOutbound: false,
   classify: false,
@@ -270,6 +272,7 @@ export const register: Register = (on, rawOptions) => {
           minIntervalMs: options.watchMinInterval * 1000,
           maxIntervalMs: options.watchMaxInterval * 1000,
           deferMaxAgeMs: options.watchDeferMaxAgeHours * 3600 * 1000,
+          stallMs: options.watchStallHours * 3600 * 1000,
           seedWindowMs: 90 * 24 * 3600 * 1000,
           rateFloor: 500,
           shadow: options.shadow,
