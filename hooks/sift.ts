@@ -5,7 +5,7 @@ import type { Forge } from '../src/forge/forge.ts';
 import { localGit, type Git } from '../src/forge/git.ts';
 import { GitHubForge } from '../src/forge/github.ts';
 import { CONFIG_PATH, configLayers, defaultTarget, globalConfigPath, resolveConfig, type RepoConfig } from '../src/github/config.ts';
-import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
+import { commitSubject, issueSubject, planSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import { indexTree, treeSubject } from '../src/locate/tree.ts';
 import { digestOf, JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
@@ -207,6 +207,10 @@ export const register: Register = (on, rawOptions) => {
         });
         return treeSubject(text, issue ? `${repo}#${number()}` : truncate(text, 40), index);
       }
+      case 'plan': {
+        if (opts.text === undefined) throw new Error('the plan pack reads the plan from text: grade(pack: "plan", subject: "<issue number>", text: "<plan>")');
+        return planSubject(rt.forge, needRepo(), number(), opts.text);
+      }
       default:
         return textSubject(opts.text ?? ref);
     }
@@ -330,14 +334,14 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs: issue (subject: issue number), pr (PR number), commit (sha or range like main..HEAD), release (subject: "release" or a proposed version like v1.4.0, ref: the branch it is cut from, repo: any repo, no checkout needed), rules (subject: PR number, issue number with text="issue", commit, or free text in text), locate (subject: issue number or free text in text, lists the files of the checkout to read or change for it, top: how many per level). Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs: issue (subject: issue number), pr (PR number), commit (sha or range like main..HEAD), release (subject: "release" or a proposed version like v1.4.0, ref: the branch it is cut from, repo: any repo, no checkout needed), rules (subject: PR number, issue number with text="issue", commit, or free text in text), locate (subject: issue number or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (subject: issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {
             pack: { type: 'string', description: 'pack name' },
             subject: { type: 'string', description: 'issue or PR number, commit or range, "release", or a version' },
             repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from the code host' },
-            text: { type: 'string', description: 'free text subject for the rules and locate packs, or "issue" to grade an issue number against the rules' },
+            text: { type: 'string', description: 'free text subject for the rules and locate packs, the plan for the plan pack, or "issue" to grade an issue number against the rules' },
             ref: { type: 'string', description: 'release pack: the branch or sha the release is cut from. Defaults to HEAD in a checkout, else the configured PR target branch, else the default branch' },
             top: { type: 'number', description: 'locate pack: how many paths to list per level, default 20' },
           },

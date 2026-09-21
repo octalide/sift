@@ -14,7 +14,7 @@ Everything sift does is built on that one call, directly or through `rank`, whic
 | module | hook | what it does | default |
 |---|---|---|---|
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed and leaves a one-line note in their place with the omitted line range and how to get it back (re-read the file by range for Read, rerun the command for Bash). Nothing is kept on disk | on |
-| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, locate, or a repo-defined one), `mcp__sift__judge` answers raw typed questions and `mcp__sift__rank` asks the same questions of many items | on |
+| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, locate, plan, or a repo-defined one), `mcp__sift__judge` answers raw typed questions and `mcp__sift__rank` asks the same questions of many items | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
 | `gateOutbound` | `tool.call` (pre) | checks text about to leave the session (a Discord message, a `gh pr`, `gh issue` or `gh release` create, comment or edit body) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
@@ -62,6 +62,7 @@ grade(pack: "rules", subject: "42")            # a PR against the repo's rule do
 grade(pack: "rules", subject: "x", text: "...") # free text against the rules
 grade(pack: "locate", subject: "17")           # the files to read or change for issue 17, top 20 per level
 grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free text
+grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17: covers it, adds nothing, decides nothing it leaves open
 ```
 
 A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable).
