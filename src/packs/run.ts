@@ -119,7 +119,7 @@ type StepResult = { ranked: RankedStep; kept: Record<string, unknown>[]; backend
 async function runStep(s: Step, items: Record<string, unknown>[], subject: Subject, judgeBackend: Judge, top: number | undefined): Promise<StepResult> {
   const list = s.step.list ?? 'each';
   if (items.length === 0) return { ranked: { step: s.step.from, list, total: 0, kept: 0, items: [] }, kept: [], backend: judgeBackend.name };
-  const result = await rank(items, s.questions, judgeBackend, { mode: s.step.mode ?? 'batched', context: subject.state, by: s.by });
+  const result = await rank(items, s.questions, judgeBackend, { mode: s.step.mode ?? 'batched', context: subject.state, by: s.by, fields: s.step.fields });
   if (!result.ok) return { backend: result.backend, error: `${result.reason}: ${result.message}` };
   const all = result.items.map((r) => {
     const asked = fillQuestion(s.questions[s.by]!, entryOf(r.item, r.index));
@@ -136,10 +136,11 @@ export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge,
   const { questions, meta, steps } = materialize(pack, subject);
   const judged: Judged[] = [];
   const ranked: RankedStep[] = [];
-  let judgeError: string | undefined;
+  let judgeError = subject.judgeError;
   let backend = judgeBackend.name;
   // a pack with many questions goes out in several requests, the state repeated in each
   for (const batch of batchQuestions(questions, estimateTokensOf(subject.state), JEV_LIMITS.requestTokens)) {
+    if (judgeError !== undefined) break;
     const result = await judgeBackend.ask(subject.state, batch);
     backend = result.backend;
     if (!result.ok) {

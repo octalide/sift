@@ -1,5 +1,6 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
+import { pool } from '../pool.ts';
 
 // where the index reads the checkout: tracked paths at the repo root, a file's size in bytes, its text
 export type Tree = {
@@ -125,19 +126,6 @@ export function excerptOf(text: string, lines = INDEX_DEFAULTS.excerptLines, wid
     if (out.length >= lines) break;
   }
   return out.join('\n');
-}
-
-async function pool<I, O>(inputs: I[], limit: number, fn: (input: I) => Promise<O>): Promise<O[]> {
-  const out = new Array<O>(inputs.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < inputs.length) {
-      const i = next++;
-      out[i] = await fn(inputs[i]!);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, inputs.length)) }, worker));
-  return out;
 }
 
 // every tracked file that is not ignored, binary or over the bound, and every directory holding one directly
