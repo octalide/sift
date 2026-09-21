@@ -6,7 +6,7 @@ import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/g
 import { driftOf, lineDiff, splitDiff } from '../src/github/diff.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
-import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, planSubject, prRangeSubject, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf } from '../src/github/subjects.ts';
+import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, planSubject, prRangeSubject, prSubject, releaseSubject, sectionsOf } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
@@ -328,15 +328,15 @@ describe('mechanical checks', () => {
       },
     };
     const rules = Array.from({ length: 900 }, (_, i) => ({ source: 'd', text: `rule ${i} ${'x'.repeat(200)}` }));
-    const subject: Subject = { kind: 'rules', ref: 't', state: { rules }, facts: { rules, has_rules: true, total_rules: 900 }, options: {} };
+    const subject: Subject = { kind: 'rules', ref: 't', state: {}, facts: { rules, has_rules: true, total_rules: 900, docs: ['d'] }, options: {} };
     const report = await runPack(BUILTIN_PACKS['rules']!, subject, judge, resolveConfig({ rules: { maxRules: 900 } }));
     expect(asks.length).toBeGreaterThan(1);
     expect(asks.reduce((a, b) => a + b, 0)).toBe(900);
     expect(report.judged).toEqual([]);
     expect(report.ranked[0]!.items).toHaveLength(900);
-    expect(report.mechanical).toEqual([]);
+    expect(report.mechanical).toEqual([{ check: 'rules.present', severity: 'info', message: '900 rules from d' }]);
     const capped = runChecks(BUILTIN_PACKS['rules']!, { ...subject, facts: { ...subject.facts, total_rules: 900 } }, resolveConfig(undefined));
-    expect(capped[0]!.message).toBe('200 of 900 rules used, raise rules.maxRules to judge the rest');
+    expect(capped.map((f) => f.message)).toEqual(['200 rules from d', '200 of 900 rules used, raise rules.maxRules to judge the rest']);
   });
 
   it('layers config sources in order', () => {
@@ -617,31 +617,5 @@ describe('github helpers', () => {
   it('reads markdown structure', () => {
     expect(Object.keys(sectionsOf('## Summary\nx\n## Steps\n- a'))).toEqual(['Summary', 'Steps']);
     expect(linkedIssues('Closes #4, fixes #9 and #10')).toEqual([4, 9]);
-    const rules = ruleParagraphs('# Style\n\nNo em dashes, no semicolons.\n\n- Conventional commits.\n- Tiny.\n\n```\ncode ignored\n```');
-    expect(rules).toEqual(['Style: No em dashes, no semicolons.', 'Style: Conventional commits.']);
-  });
-
-  it('turns each markdown table row into one rule named by the header', () => {
-    const doc = '## Sorting (#655)\n\n`sort` no longer takes a comparator.\n\n| 5.x | 6.0.0 |\n| --- | --- |\n| `sort.sort[T](data, len, cmp)` | `sort.sort[T](data, len)` |\n| `sort.is_sorted[T](d, n, cmp)` | `sort.is_sorted_by[T](d, n, cmp)` |\nA line after the table.\n';
-    expect(ruleParagraphs(doc)).toEqual([
-      'Sorting (#655): `sort` no longer takes a comparator.',
-      'Sorting (#655): 5.x: `sort.sort[T](data, len, cmp)`; 6.0.0: `sort.sort[T](data, len)`',
-      'Sorting (#655): 5.x: `sort.is_sorted[T](d, n, cmp)`; 6.0.0: `sort.is_sorted_by[T](d, n, cmp)`',
-      'Sorting (#655): A line after the table.',
-    ]);
-  });
-
-  it('reads a rule doc from the checkout or from the forge by repo:path@ref', async () => {
-    const calls: string[] = [];
-    const forge = fakeForge({ file: async (repo, path, ref) => (calls.push(`${repo}:${path}@${ref}`), '# remote') });
-    expect(await ruleDoc('CONTRIBUTING.md', forge, async () => '# local', async (p: string) => p === 'CONTRIBUTING.md')).toBe('# local');
-    expect(await ruleDoc('MISSING.md', forge, async () => '', async () => false)).toBeUndefined();
-    expect(await ruleDoc('briar-systems/mach-std:MIGRATION.md@v6.0.0', forge, async () => '', async () => false)).toBe('# remote');
-    expect(calls).toEqual(['briar-systems/mach-std:MIGRATION.md@v6.0.0']);
-    expect(await ruleDoc('o/r:doc/RULES.md', forge, async () => '', async () => false)).toBe('# remote');
-    expect(calls[1]).toBe('o/r:doc/RULES.md@undefined');
-    expect(await ruleDoc('group/sub/project:RULES.md', forge, async () => '', async () => false)).toBe('# remote');
-    expect(calls[2]).toBe('group/sub/project:RULES.md@undefined');
-    expect(await ruleDoc('o/r:doc/RULES.md', undefined, async () => '', async () => false)).toBeUndefined();
   });
 });

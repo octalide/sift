@@ -217,9 +217,11 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     description: 'Does the subject comply with each rule stated in the repository rule documents?',
     checks: ['rules.present'],
     questions: {},
+    // the rule goes out once, in the question; the state item is its index alone
     rank: [
       {
         from: 'rules',
+        fields: [],
         questions: {
           rules: {
             type: 'noul',

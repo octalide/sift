@@ -9,10 +9,11 @@ import { CONFIG_PATH, configLayers, defaultTarget, globalConfigPath, resolveConf
 import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import { indexTree, treeSubject } from '../src/locate/tree.ts';
+import { checkoutSource, forgeSource, type RuleSource } from '../src/rules/discover.ts';
 import { digestOf, JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
 import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
 import type { Answer, Judge, Questions } from '../src/judge/types.ts';
-import { DecisionLog, type Cost } from '../src/log.ts';
+import { DecisionLog, type Cost, type StoreLike } from '../src/log.ts';
 import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
 import { parseSubject, type ParsedKind } from '../src/packs/subject.ts';
@@ -104,6 +105,7 @@ type Runtime = {
   git: Git;
   // the outbound channel table: the defaults for the forge, then the config's entries over them
   channels: Channel[];
+  store: StoreLike;
   watcher?: Watcher;
   // builds and starts the watcher; returns the reason when it cannot
   startWatch: () => Promise<string | undefined>;
@@ -175,7 +177,6 @@ export const register: Register = (on, rawOptions) => {
       return repo;
     };
     const number = () => Number(ref.replace(/^#/, ''));
-    const fs = { read: (p: string) => rt.git(['show', `HEAD:${p}`]).catch(() => readFile(p)), exists: (p: string) => existsFile(p) };
     // the subject is parsed, and a bad one refused, before any forge request; a url names its own repo
     const parsed = <K extends ParsedKind>(kind: K) => parseSubject(kind, ref, rt.forge, opts.repo);
     switch (pack.subject) {
@@ -204,7 +205,7 @@ export const register: Register = (on, rawOptions) => {
       }
       case 'rules': {
         const kind = /^#?\d+$/.test(ref) ? (opts.text === 'issue' ? 'issue' : 'pr') : /^[0-9a-f]{7,40}$|\.\./.test(ref) ? 'commit' : 'text';
-        return rulesSubject({ forge: rt.forge, git: rt.git, repo, read: fs.read, exists: fs.exists }, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config);
+        return rulesSubject({ forge: rt.forge, git: rt.git, repo, source: ruleSource(rt, opts.repo), judge: rt.judge, store: rt.store }, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config);
       }
       case 'tree': {
         // an issue number with a repo is its title and body, anything else is the text itself
@@ -228,6 +229,15 @@ export const register: Register = (on, rawOptions) => {
       default:
         return textSubject(opts.text ?? ref);
     }
+  }
+
+  // the checkout serves its own repo; any other repo, or no checkout at all, is read from the forge
+  function ruleSource(rt: Runtime, repo: string | undefined): RuleSource {
+    const local = rt.root !== undefined && (repo === undefined || repo === rt.repo);
+    if (local) return checkoutSource(rt.root!, rt.git, { read: readFile, exists: existsFile }, rt.forge, rt.repo);
+    const remote = repo ?? rt.repo;
+    if (!remote) throw new Error(`no repository: pass repo as the ${rt.forge.name} path or run inside a checkout with a ${rt.forge.name} remote`);
+    return forgeSource(rt.forge, remote);
   }
 
   // file access via the engine, bound at session start
@@ -341,7 +351,7 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    runtime = { judge, log, config, packs, repo: checkout?.repo, root, forge, git, channels: channelTable(defaultChannels(forge), config.outbound.channels), startWatch, sessionId };
+    runtime = { judge, log, config, packs, repo: checkout?.repo, root, forge, git, store, channels: channelTable(defaultChannels(forge), config.outbound.channels), startWatch, sessionId };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -388,6 +398,7 @@ export const register: Register = (on, rawOptions) => {
             context: { type: 'object', description: 'state every item is read against, placed beside the items' },
             by: { type: 'string', description: 'the question the sorted view orders by, the first when absent' },
             choice: { type: 'string', description: 'for a choice question in by: the key whose probability orders the view' },
+            fields: { type: 'array', items: { type: 'string' }, description: 'the item fields the state carries beside k, every field when absent; the others only fill the questions' },
           },
           required: ['items', 'questions'],
         },
@@ -435,8 +446,8 @@ export const register: Register = (on, rawOptions) => {
   });
 
   on('tool.call', { tool: 'mcp__sift__rank' }, async ($, e) => {
-    const input = e as unknown as { items: RankItem[]; questions: Questions; mode?: RankOptions['mode']; context?: Record<string, unknown>; by?: string; choice?: string };
-    const result = await rank(input.items, input.questions, ready().judge, { mode: input.mode ?? 'batched', context: input.context, by: input.by, choice: input.choice });
+    const input = e as unknown as { items: RankItem[]; questions: Questions; mode?: RankOptions['mode']; context?: Record<string, unknown>; by?: string; choice?: string; fields?: string[] };
+    const result = await rank(input.items, input.questions, ready().judge, { mode: input.mode ?? 'batched', context: input.context, by: input.by, choice: input.choice, fields: input.fields });
     record('rank-tool', result.ok ? 'ranked' : 'failed', { digest: `${input.items.length} items, ${result.requests} requests` });
     if (!result.ok) return { deny: `rank unavailable: ${result.reason}: ${result.message}` };
     const lines = result.sorted.map((r) => `${r.index}: ${r.value.toFixed(3)} ${Object.entries(r.answers).map(([id, a]) => `${id}=${answerLabel(a)}`).join(' ')} ${digestOf(r.item)}`);
@@ -451,7 +462,7 @@ export const register: Register = (on, rawOptions) => {
     const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, rt.channels) : undefined;
     if (outbound) {
       const rulesPack = rt.packs['rules'];
-      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, git: rt.git, repo: rt.repo, read: readFile, exists: existsFile }, { kind: 'text', ref: outbound.text, about: outbound.kind }, rt.config) : undefined;
+      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, git: rt.git, repo: rt.repo, source: ruleSource(rt, undefined), judge: rt.judge, store: rt.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, rt.config) : undefined;
       if (rulesPack && subject) {
         const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, rt.config);
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });

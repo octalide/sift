@@ -79,6 +79,21 @@ describe('github forge', () => {
     ]);
   });
 
+  it('lists every file at a ref from the recursive tree, the default branch when none is named', async () => {
+    const calls: string[] = [];
+    const forge = github(
+      {
+        'repos/o/r/git/trees/': { body: { tree: [{ path: 'README.md', type: 'blob' }, { path: 'docs', type: 'tree' }, { path: 'docs/a.md', type: 'blob' }] } },
+        'repos/o/r': { body: { default_branch: 'main' } },
+      },
+      calls,
+    );
+    expect(await forge.contents('o/r')).toEqual(['README.md', 'docs/a.md']);
+    expect(calls[1]).toContain('repos/o/r/git/trees/main?recursive=1');
+    await forge.contents('o/r', 'feat/1');
+    expect(calls[2]).toContain('repos/o/r/git/trees/feat%2F1?recursive=1');
+  });
+
   it('reads the closing relation from the pull request', async () => {
     const calls: string[] = [];
     const forge = github({ graphql: { body: { data: { repository: { pullRequest: { closingIssuesReferences: { nodes: [{ number: 4 }, { number: 9 }] } } } } } } }, calls);

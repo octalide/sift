@@ -25,6 +25,8 @@ export type SiftRankOptions = {
   maxStateTokens?: number;
   maxRequestTokens?: number;
   concurrency?: number;
+  // the item fields the state carries beside k, every field when absent; every field still fills the questions
+  fields?: string[];
 };
 
 export type SiftRanked<T> = { index: number; item: T; answers: Record<string, SiftAnswer>; value: number };

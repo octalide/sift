@@ -39,6 +39,8 @@ export type RankStep = {
   list?: 'each' | 'top';
   // how many a top list shows
   top?: number;
+  // the item fields the state carries beside k, every field when absent; the others only fill the questions
+  fields?: string[];
 };
 
 export type Pack = {
@@ -100,4 +102,6 @@ export type Subject = {
   facts: Record<string, unknown>;
   // runtime option sets for choice questions
   options: Record<string, Record<string, string>>;
+  // a judge failure while the subject was built: the run asks nothing more and the report carries it
+  judgeError?: string;
 };

@@ -143,6 +143,8 @@ export interface Forge {
   commits(repo: string, ref: string): Promise<Commit[]>;
   // a file at a ref (the default branch when unset), undefined when absent
   file(repo: string, path: string, ref?: string): Promise<string | undefined>;
+  // every file path at a ref (the default branch when unset), as a checkout's git ls-files would list them
+  contents(repo: string, ref?: string): Promise<string[]>;
 
   // issues and pull requests updated since a stamp (iso 8601), unchanged when nothing moved since the token
   items(repo: string, since: string, token?: string): Promise<Conditional<WatchItem[]>>;

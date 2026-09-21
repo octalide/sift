@@ -87,7 +87,7 @@ The `issue` pack asks whether the body is substantive, which type label fits, wh
 }
 ```
 
-`rank(items, questions, mode)` asks the same questions of every item in a list and returns the items in input order with their answers, plus a view sorted by one question (`by`, the first question when absent, a choice question by its `choice` key's probability). Items are strings or objects. In a question, `{k}` stands for the item's index, `{text}` for a string item and `{field}` for a field of an object item. `context` is state every item is read against.
+`rank(items, questions, mode)` asks the same questions of every item in a list and returns the items in input order with their answers, plus a view sorted by one question (`by`, the first question when absent, a choice question by its `choice` key's probability). Items are strings or objects. In a question, `{k}` stands for the item's index, `{text}` for a string item and `{field}` for a field of an object item. `context` is state every item is read against. `fields` names the item fields the state carries beside `k` (every field when absent); the others still fill the questions, so a text the question already quotes is not sent twice.
 
 ```json
 {
@@ -104,7 +104,7 @@ Other plugins can call the same thing through `$.sift.judge`, `$.sift.rank` and 
 
 ## Repo configuration
 
-Conventions are read from `.sift/config.json` in the repository. The defaults are neutral: no commit format, label, template, version or changelog check runs until it is configured. Out of the box sift reads CONTRIBUTING.md, CLAUDE.md, AGENTS.md and the PR template as rule documents, treats the default branch as protected, and otherwise relies on the judged questions, which hold for any project. Every mechanical check is opt-in, so there is nothing to switch off.
+Conventions are read from `.sift/config.json` in the repository. The defaults are neutral: no commit format, label, template, version or changelog check runs until it is configured. Out of the box sift discovers the rule documents by judgement (see [Rule documents](#rule-documents)), treats the default branch as protected, and otherwise relies on the judged questions, which hold for any project. Every mechanical check is opt-in, so there is nothing to switch off.
 
 Three layers apply in order, each field by field over the last: the defaults, a global file, then the repository's `.sift/config.json`. The global file is `$XDG_CONFIG_HOME/sift/config.json` (`~/.config/sift/config.json` when `XDG_CONFIG_HOME` is unset) and is read when it exists. The `config` option, set to a path relative to the repo root or inline JSON of the same shape, takes the global file's place: when it is set the file is not read. Nothing below assumes a particular format: the presets are examples, and any commit or version convention is a regex. A strict setup for a conventional-commits, semver-tagged, `dev` into `main` workflow looks like this:
 
@@ -114,7 +114,7 @@ Three layers apply in order, each field by field over the last: the defaults, a 
   "branches": { "protected": ["main", "dev"], "pattern": "^(feat|fix|chore|hotfix)/\\d+$" },
   "issues": { "requiredLabelGroups": [["bug", "feat", "docs", "chore"]], "milestone": true, "templateSections": ["Summary", "Acceptance"], "childLabels": ["task"] },
   "prs": { "linkIssue": true, "targets": ["dev"], "templateSections": ["Summary", "Testing"] },
-  "rules": { "docs": ["CONTRIBUTING.md", "CLAUDE.md", "briar-systems/mach-std:MIGRATION.md@v6.0.0"], "maxRules": 200 },
+  "rules": { "docs": ["briar-systems/mach-std:MIGRATION.md@v6.0.0"], "exclude": ["docs/adr/**"], "maxRules": 200 },
   "release": {
     "scheme": "semver",
     "changelog": "CHANGELOG.md",
@@ -193,13 +193,23 @@ A pack is data: a subject kind, a list of mechanical checks, and typed questions
 }
 ```
 
-`rules.docs` entries are paths in the checkout or `owner/repo:path[@ref]` read from GitHub, so a consumer PR can be graded against another repo's migration guide at a tag. Each paragraph or list item is one rule, and each row of a markdown table is one rule with its cells named by the header (`5.x: sort.sort[T](data, len, cmp); 6.0.0: sort.sort[T](data, len)`). Rules past `rules.maxRules` are dropped and `rules.present` says so. A pack with more questions than one request holds goes out in several, the subject repeated in each.
+A pack with more questions than one request holds goes out in several, the subject repeated in each.
+
+### Rule documents
+
+No filename is special. The rules pack and the outbound gate read the repository's rule documents by discovery: every prose file (`.md`, `.mdx`, `.markdown`, `.txt`, `.rst`, `.org`) at the repository root and under `docs/` or `.github/` at any depth, plus the forge's issue and pull request templates, is a candidate. In a checkout the candidates come from `git ls-files` and the working tree; a grade of another repository, or one from a directory that is no checkout, reads the forge's file tree at its default branch. One batched `rank` over the candidates (path and a bounded excerpt) against "this document states rules contributors must follow" keeps the satisfied band. Every kept document is split into paragraphs, list items and table rows (a row's cells named by the header: `5.x: sort.sort[T](data, len, cmp); 6.0.0: sort.sort[T](data, len)`), and a second batched `rank` against "this paragraph is a rule a contribution can break, not narrative or instruction" keeps the satisfied band as the rules.
+
+`rules.docs` adds documents the judge does not have to recognise: paths in the checkout, or `owner/repo:path[@ref]` read from the forge, so a consumer PR can be graded against another repo's migration guide at a tag. Their paragraphs are filtered like any other document's. `rules.exclude` lists paths or globs (`*` within a segment, `**` across) that are never candidates. Rules past `rules.maxRules` are dropped and `rules.present` says so.
+
+Discovery is cached in the plugin store per checkout (or per repository and ref), keyed by a digest of every file it read and of the config, so the judge is asked again only when a document, a listed doc or the config changes. Every rules report names the documents its rules came from in `rules.present` (`14 rules from CONTRIBUTING.md, docs/style.md (cached)`), and a judge failure during discovery makes the verdict unknown rather than passing an empty rule set.
+
+In the rules step each rule goes out once, in its question: the state carries the subject and an item index per rule, nothing else.
 
 A noul's optional `criteria` is Jev's shape, `{ "true": "...", "false": "..." }`, saying what a yes and a no mean. A choice's `criteria` maps keys to descriptions, a score's is an ordered list of legends.
 
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, and `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`).
 
-A pack may also carry `rank`, a list of steps run in order after the questions, each one `rank` over a subject list with the subject state as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by), `list` (`each` prints every item in order, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`) and `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out (a band other than violated), which makes steps hierarchical. The rules pack is one `each` step over the rule paragraphs, the pr pack one over the drifted files; locate is two `top` steps, directories then the files within those not ruled out, so each rank reads only what could matter.
+A pack may also carry `rank`, a list of steps run in order after the questions, each one `rank` over a subject list with the subject state as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by), `list` (`each` prints every item in order, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`), `fields` (the item fields the state carries beside its index, every field unless said; the rest only fill the questions, so a text that is already in the question is not sent twice) and `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out (a band other than violated), which makes steps hierarchical. The rules pack is one `each` step over the rule paragraphs, the pr pack one over the drifted files; locate is two `top` steps, directories then the files within those not ruled out, so each rank reads only what could matter.
 
 The `tree` subject is a text (an issue's title and body, or free text) over an index of the checkout built in code from `git ls-files`: every directory with its file count and a sample of names, every file with its first non-empty lines and the exported or top-level symbol names a per-extension regex finds. `node_modules` and similar trees, lockfiles, binaries by extension, files with nul bytes and files over 200 kB never enter it.
 

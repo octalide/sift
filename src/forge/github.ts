@@ -283,6 +283,13 @@ export class GitHubForge implements Forge {
     return this.gh.text(`repos/${repo}/contents/${path}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`, RAW).catch(() => undefined);
   }
 
+  // the recursive git tree in one call; github truncates it past its own limit and says so
+  async contents(repo: string, ref?: string): Promise<string[]> {
+    const at = ref ?? (await this.defaultBranch(repo));
+    const tree = await this.gh.json<{ tree?: { path: string; type: string }[] }>(`repos/${repo}/git/trees/${encodeURIComponent(at)}?recursive=1`);
+    return (tree.tree ?? []).filter((e) => e.type === 'blob').map((e) => e.path);
+  }
+
   // one conditional probe on the newest item, then the pages since the stamp only when it moved
   async items(repo: string, since: string, token?: string): Promise<Conditional<WatchItem[]>> {
     const probe = await this.gh.api(`repos/${repo}/issues?state=all&sort=updated&direction=desc&per_page=1`, { etag: token });

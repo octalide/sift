@@ -1,5 +1,6 @@
 import type { Answer, Answers, Judge, JudgeFailure, Question, Questions, Usage } from './types.ts';
 import { estimateTokensOf, JEV_LIMITS } from '../tokens.ts';
+import { pool } from '../pool.ts';
 
 // batched fills one state with as many items as fit and asks one question set per item, so items can see each other;
 // isolated sends one request per item, so no item colours another
@@ -19,6 +20,8 @@ export type RankOptions = {
   maxRequestTokens?: number;
   // requests in flight at once
   concurrency?: number;
+  // the item fields the state carries beside k, every field when absent; every field still fills the questions
+  fields?: string[];
 };
 
 export const RANK_DEFAULTS = {
@@ -40,6 +43,14 @@ export function entryOf(item: RankItem, index: number): Entry {
   if (typeof item === 'string') return { k: index, text: item };
   const { k: _k, ...fields } = item;
   return { k: index, ...fields };
+}
+
+// the entry as the state shows it: k and the named fields, or the whole entry
+export function stateEntry(entry: Entry, fields: string[] | undefined): Entry {
+  if (!fields) return entry;
+  const out: Entry = { k: entry.k };
+  for (const f of fields) if (f !== 'k' && entry[f] !== undefined) out[f] = entry[f];
+  return out;
 }
 
 const PLACEHOLDER = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
@@ -85,14 +96,14 @@ export function questionsFor(questions: Questions, entry: Entry, keyed: boolean)
 }
 
 // fills batches with items until the state or the whole request would pass its budget; an item too large for either goes alone
-export function batchEntries(entries: Entry[], questions: Questions, context: Record<string, unknown>, maxStateTokens: number, maxRequestTokens: number): Entry[][] {
+export function batchEntries(entries: Entry[], questions: Questions, context: Record<string, unknown>, maxStateTokens: number, maxRequestTokens: number, fields?: string[]): Entry[][] {
   const base = estimateTokensOf({ ...context, items: [] });
   const groups: Entry[][] = [];
   let current: Entry[] = [];
   let state = base;
   let request = base;
   for (const entry of entries) {
-    const s = estimateTokensOf(entry) + 4;
+    const s = estimateTokensOf(stateEntry(entry, fields)) + 4;
     const q = estimateTokensOf(questionsFor(questions, entry, true)) + 8;
     if (current.length > 0 && (state + s > maxStateTokens || request + s + q > maxRequestTokens)) {
       groups.push(current);
@@ -116,19 +127,6 @@ export function valueOf(answer: Answer | undefined, choice?: string): number {
   return choice === undefined ? answer.confidence : (answer.probabilities[choice] ?? 0);
 }
 
-async function pool<I, O>(inputs: I[], limit: number, fn: (input: I) => Promise<O>): Promise<O[]> {
-  const out = new Array<O>(inputs.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < inputs.length) {
-      const i = next++;
-      out[i] = await fn(inputs[i]!);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, inputs.length)) }, worker));
-  return out;
-}
-
 function sumUsage(usages: (Usage | undefined)[]): Usage | undefined {
   const known = usages.filter((u): u is Usage => u !== undefined);
   if (known.length === 0) return undefined;
@@ -146,14 +144,14 @@ function requestsFor(entries: Entry[], questions: Questions, options: RankOption
   const context = options.context ?? {};
   if (options.mode === 'isolated') {
     return entries.map((entry) => ({
-      state: { ...context, item: entry },
+      state: { ...context, item: stateEntry(entry, options.fields) },
       questions: questionsFor(questions, entry, false),
       owners: (key) => ({ index: entry.k, id: key }),
     }));
   }
-  const groups = batchEntries(entries, questions, context, options.maxStateTokens ?? RANK_DEFAULTS.maxStateTokens, options.maxRequestTokens ?? RANK_DEFAULTS.maxRequestTokens);
+  const groups = batchEntries(entries, questions, context, options.maxStateTokens ?? RANK_DEFAULTS.maxStateTokens, options.maxRequestTokens ?? RANK_DEFAULTS.maxRequestTokens, options.fields);
   return groups.map((group) => ({
-    state: { ...context, items: group },
+    state: { ...context, items: group.map((entry) => stateEntry(entry, options.fields)) },
     questions: Object.assign({}, ...group.map((entry) => questionsFor(questions, entry, true))) as Questions,
     owners: splitKey,
   }));
