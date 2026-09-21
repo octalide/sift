@@ -1,5 +1,6 @@
-import { bumpBetween, bumpVersion, parseCommit, parseSemver, type Bump, type ParsedCommit } from '../github/commits.ts';
-import type { RepoConfig } from '../github/config.ts';
+import { parseCommit, scopeHeader, type Bump, type ParsedCommit } from '../github/commits.ts';
+import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, type Version } from '../github/version.ts';
+import { tagPatternFor, type RepoConfig } from '../github/config.ts';
 import type { Finding, Subject } from './types.ts';
 
 export type Check = (subject: Subject, config: RepoConfig) => Finding[];
@@ -21,18 +22,18 @@ function sectionsFilled(sections: Record<string, string>, required: string[]): {
 
 function commitFindings(check: string, commits: ParsedCommit[], config: RepoConfig): Finding[] {
   const out: Finding[] = [];
-  if (config.commits.convention === 'none') return out;
+  if (!config.commits.format) return out;
+  const scope = config.commits.scopePattern ? new RegExp(config.commits.scopePattern) : undefined;
   for (const c of commits) {
     const id = c.sha.slice(0, 7);
-    if (!c.conventional) {
-      out.push(fail(check, `${id} is not a conventional commit: ${c.subject}`));
+    if (!c.matched) {
+      out.push(fail(check, `${id} does not match the commit format: ${c.subject}`));
       continue;
     }
-    if (!config.commits.types.includes(c.type!)) out.push(fail(check, `${id} uses unknown type ${c.type}`));
-    if (config.commits.scope === 'issue' && c.scope !== undefined && !/^#\d+$/.test(c.scope) && c.type !== 'chore') {
-      out.push(fail(check, `${id} scope must be #<issue>, got (${c.scope})`));
+    if (c.type !== undefined && !config.commits.types.includes(c.type)) out.push(fail(check, `${id} uses unknown type ${c.type}`));
+    if (scope && !scope.test(scopeHeader(c))) {
+      out.push(fail(check, `${id} ${c.scope === undefined ? 'has no scope' : `scope (${c.scope})`}, ${scopeHeader(c)} does not match ${config.commits.scopePattern}`));
     }
-    if (config.commits.scope === 'none' && c.scope !== undefined) out.push(fail(check, `${id} must not carry a scope`));
     for (const t of c.trailers) {
       if (config.commits.forbidTrailers.some((f) => f.toLowerCase() === t.toLowerCase())) {
         out.push(fail(check, `${id} carries forbidden trailer ${t}`));
@@ -40,6 +41,12 @@ function commitFindings(check: string, commits: ParsedCommit[], config: RepoConf
     }
   }
   return out;
+}
+
+// a proposed version as the user names it: a full tag, or the bare version
+function proposedVersion(text: string, release: RepoConfig['release'], versionPattern: string): Version | undefined {
+  const patterns = { tagPattern: release.tagPattern ?? tagPatternFor(release.tagPrefix), versionPattern };
+  return parseTag(text, patterns) ?? parseVersion(text, versionPattern);
 }
 
 export const CHECKS: Record<string, Check> = {
@@ -63,7 +70,13 @@ export const CHECKS: Record<string, Check> = {
     return needs && s.facts['parent'] === undefined ? [fail('issue.parent', 'labeled as a child but has no parent sub-issue link')] : [];
   },
   'pr.linked': (s, c) => (c.prs.linkIssue && ((s.facts['linked'] as number[]) ?? []).length === 0 ? [fail('pr.linked', 'no Closes #n in the body')] : []),
-  'pr.target': (s, c) => (c.prs.target && s.facts['base'] !== c.prs.target ? [fail('pr.target', `targets ${String(s.facts['base'])}, expected ${c.prs.target}`)] : []),
+  'pr.target': (s, c) => {
+    const targets = c.prs.targets;
+    if (targets === undefined) return [];
+    const base = String(s.facts['base'] ?? '');
+    const ok = Array.isArray(targets) ? targets.includes(base) : new RegExp(targets).test(base);
+    return ok ? [] : [fail('pr.target', `targets ${base}, expected ${Array.isArray(targets) ? targets.join(' or ') : `a branch matching ${targets}`}`)];
+  },
   'pr.branch': (s, c) => {
     if (!c.branches.pattern) return [];
     const head = String(s.facts['head'] ?? '');
@@ -84,12 +97,13 @@ export const CHECKS: Record<string, Check> = {
       ...empty.map((m) => warn('pr.template', `empty section: ${m}`)),
     ];
   },
-  'pr.commits': (s, c) => commitFindings('pr.commits', ((s.facts['commits'] as { sha: string; message: string }[]) ?? []).map((x) => parseCommit(x.sha, x.message)), c),
+  'pr.commits': (s, c) => commitFindings('pr.commits', ((s.facts['commits'] as { sha: string; message: string }[]) ?? []).map((x) => parseCommit(x.sha, x.message, c.commits.format)), c),
   'commit.format': (s, c) => commitFindings('commit.format', (s.facts['commits'] as ParsedCommit[]) ?? [], c),
   'release.bump': (s, c) => {
-    if (!c.release.scheme) return [];
+    const pattern = c.release.versionPattern;
+    if (!pattern) return [];
     const bump = s.facts['bump'] as Bump;
-    const version = s.facts['version'] as [number, number, number] | undefined;
+    const version = s.facts['version'] as Version | undefined;
     const manifests = (s.facts['manifests'] as { path: string; key: string; from: string | null; to: string | null }[]) ?? [];
     const commitBump = (s.facts['commitBump'] as Bump | undefined) ?? bump;
     const manifestBump = (s.facts['manifestBump'] as Bump | undefined) ?? 'none';
@@ -100,14 +114,17 @@ export const CHECKS: Record<string, Check> = {
       commitBump !== 'none' ? `commits ${commitBump}` : '',
       ...manifests.map((m) => `${m.path} ${m.key} ${m.from ?? 'unset'} -> ${m.to ?? 'unset'} (${manifestBump})`),
     ].filter(Boolean);
-    if (!version) return [...unparsed, info('release.bump', `required bump: ${bump} (no previous semver tag to compute from), from ${because.join('; ')}`)];
-    const next = bumpVersion(version, bump);
-    const findings = [...unparsed, info('release.bump', `required bump: ${bump}, next version ${c.release.tagPrefix}${next.join('.')}, from ${because.join('; ')}`)];
+    if (!version) return [...unparsed, info('release.bump', `required bump: ${bump} (no previous release tag to compute from), from ${because.join('; ')}`)];
+    // a pattern without major, minor and patch groups (calver) has no next version to compute, only an order to keep
+    const next = bumpVersion(version, bump, pattern);
+    const findings = [...unparsed, info('release.bump', `required bump: ${bump}${next ? `, next version ${c.release.tagPrefix}${next}` : ''}, from ${because.join('; ')}`)];
     const proposed = s.facts['proposed'] as string | undefined;
     if (proposed) {
-      const p = parseSemver(proposed, c.release.tagPrefix);
-      if (!p) findings.push(fail('release.bump', `${proposed} is not semver`));
-      else if (bumpBetween(version, p) !== bump) findings.push(fail('release.bump', `${proposed} is a ${bumpBetween(version, p)} bump, the changes require ${bump}`));
+      const p = proposedVersion(proposed, c.release, pattern);
+      const between = p && bumpBetween(version, p);
+      if (!p) findings.push(fail('release.bump', `${proposed} does not match the version pattern ${pattern}`));
+      else if (between === undefined && compareVersions(p, version) <= 0) findings.push(fail('release.bump', `${proposed} is not newer than ${version.raw}`));
+      else if (between !== undefined && between !== bump) findings.push(fail('release.bump', `${proposed} is a ${between} bump, the changes require ${bump}`));
     }
     return findings;
   },

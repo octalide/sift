@@ -1,7 +1,7 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
 import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
-import { CONFIG_PATH, configLayers, globalConfigPath, resolveConfig, type RepoConfig } from '../src/github/config.ts';
+import { CONFIG_PATH, configLayers, defaultTarget, globalConfigPath, resolveConfig, type RepoConfig } from '../src/github/config.ts';
 import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
@@ -180,7 +180,7 @@ export const register: Register = (on, rawOptions) => {
         const local = rt.repo !== undefined && (opts.repo === undefined || opts.repo === rt.repo);
         const source = local
           ? localSource(rt.gh, opts.ref ?? 'HEAD', readFile, existsFile)
-          : remoteSource(rt.gh, needRepo(), opts.ref ?? rt.config.prs.target ?? (await defaultBranch(rt.gh, needRepo())));
+          : remoteSource(rt.gh, needRepo(), opts.ref ?? defaultTarget(rt.config) ?? (await defaultBranch(rt.gh, needRepo())));
         const s = await releaseSubject(source, rt.config);
         if (ref && ref !== 'release') s.facts['proposed'] = ref;
         return s;
