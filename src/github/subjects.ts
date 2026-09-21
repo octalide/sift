@@ -2,16 +2,17 @@ import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
 import type { Check, Forge } from '../forge/forge.ts';
 import type { Git } from '../forge/git.ts';
-import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, type Bump, type ParsedCommit } from './commits.ts';
+import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, splitLog, type Bump, type ParsedCommit } from './commits.ts';
 import { compareVersions, parseTag, SEMVER_PATTERN, type Version } from './version.ts';
 import { manifestChanges, manifestFormat, type ManifestChange } from './manifest.ts';
-import { lineDiff } from './diff.ts';
+import { driftOf, lineDiff, type Drift } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
 
 const BODY_CAP = 20_000;
 const DIFF_CAP = 60_000;
 const COMMENT_CAP = 6_000;
+const DRIFT_CAP = 12_000;
 
 import type { ReadLike, ExistsLike } from './source.ts';
 export type { ReadLike, ExistsLike } from './source.ts';
@@ -37,18 +38,21 @@ export function linkedIssues(text: string): number[] {
   return [...out];
 }
 
-// the issue a work branch is named after: feat/52, fix/52-short-title, 52-title
-export function branchIssue(branch: string): number | undefined {
+// the issue a work branch is named after: the issue group of the branch pattern when it has one,
+// otherwise the number segment of feat/52, fix/52-short-title, 52-title
+export function branchIssue(branch: string, pattern?: string): number | undefined {
+  const named = pattern ? new RegExp(pattern).exec(branch)?.groups?.['issue'] : undefined;
+  if (named !== undefined) return Number(named);
   const m = /(?:^|\/)(\d+)(?:[-_]|$)/.exec(branch);
   return m ? Number(m[1]) : undefined;
 }
 
 // the forge's own relation first, then closing keywords in the body, then an issue number in the branch name
-export function linkedOf(relation: number[], body: string, branch: string): number[] {
+export function linkedOf(relation: number[], body: string, branch: string, pattern?: string): number[] {
   if (relation.length > 0) return relation;
   const keywords = linkedIssues(body);
   if (keywords.length > 0) return keywords;
-  const fromBranch = branchIssue(branch);
+  const fromBranch = branchIssue(branch, pattern);
   return fromBranch === undefined ? [] : [fromBranch];
 }
 
@@ -93,22 +97,29 @@ export async function issueSubject(forge: Forge, repo: string, n: number, config
   };
 }
 
+// the drift a subject carries: what the base changed in the files the pr also touches, each patch capped alone
+function driftState(prDiff: string, baseDiff: string): Drift[] {
+  return driftOf(prDiff, baseDiff).map((d) => ({ path: d.path, pr: truncate(d.pr, DRIFT_CAP, '\n[patch truncated]'), base: truncate(d.base, DRIFT_CAP, '\n[patch truncated]') }));
+}
+
 export async function prSubject(forge: Forge, repo: string, n: number, config: RepoConfig): Promise<Subject> {
   const pr = await forge.pull(repo, n);
   const body = pr.body;
-  const [diff, recent, checks, log, relation] = await Promise.all([
+  const [diff, recent, checks, log, relation, baseDiff] = await Promise.all([
     forge.diff(repo, n).catch(() => ''),
     forge.comments(repo, 'pr', n, 5),
     forge.checks(repo, pr.head.sha).catch(() => [] as Check[]),
     forge.pullCommits(repo, n).catch(() => []),
     forge.closingIssues(repo, n).catch(() => [] as number[]),
+    forge.compareDiff(repo, pr.head.sha, pr.base).catch(() => ''),
   ]);
-  const linked = linkedOf(relation, body, pr.head.branch);
+  const linked = linkedOf(relation, body, pr.head.branch, config.branches.pattern);
   const issue = linked[0] ? await forge.issue(repo, linked[0]).catch(() => undefined) : undefined;
   // merge commits (a branch updated from its base) are history, not work the convention judges
   const commits = log.filter((c) => !c.merge).map((c) => ({ sha: c.sha, message: c.message }));
   const failed = checks.filter((c) => c.done && !c.ok);
   const pending = checks.filter((c) => !c.done);
+  const drift = driftState(diff, baseDiff);
   return {
     kind: 'pr',
     ref: `${repo}#${n}`,
@@ -127,6 +138,7 @@ export async function prSubject(forge: Forge, repo: string, n: number, config: R
       checks: { failed: failed.map((c) => c.name), pending: pending.map((c) => c.name), total: checks.length },
       recent_comments: recent.map((c) => ({ by: c.author.login, text: truncate(c.body, COMMENT_CAP) })),
       diff: truncate(diff, DIFF_CAP, '\n[diff truncated]'),
+      drift: drift.map((d) => d.path),
     },
     facts: {
       linked,
@@ -136,8 +148,55 @@ export async function prSubject(forge: Forge, repo: string, n: number, config: R
       checks_failed: failed.map((c) => c.name),
       checks_pending: pending.map((c) => c.name),
       commits,
+      drift,
       has_issue: issue !== undefined,
       has_diff: diff.length > 0,
+      has_drift: drift.length > 0,
+    },
+    options: {},
+  };
+}
+
+// where a range subject reads its issue from, when the checkout has a forge behind it
+export type IssueSource = { forge: Forge; repo: string };
+
+// a pull request that does not exist yet: base..head in the checkout, graded as the pr it would open.
+// the forge facts a pr carries (its relation, target, checks, template body) are left out, so the checks
+// that read them skip; the issue comes from the head branch name
+export async function prRangeSubject(git: Git, range: string, config: RepoConfig, issues?: IssueSource): Promise<Subject> {
+  const sep = range.indexOf('..');
+  const base = range.slice(0, sep);
+  const head = range.slice(sep + 2) || 'HEAD';
+  if (!base) throw new Error(`pr range ${range}: no base, expected base..head`);
+  const [diff, baseDiff, raw, branch] = await Promise.all([
+    git(['diff', `${base}...${head}`]),
+    git(['diff', `${head}...${base}`]),
+    git(['log', LOG_FORMAT, '--no-merges', `${base}..${head}`]),
+    git(['rev-parse', '--abbrev-ref', head]).then((s) => s.trim()),
+  ]);
+  const commits = splitLog(raw);
+  const number = branchIssue(branch, config.branches.pattern);
+  const issue = number !== undefined && issues ? await issues.forge.issue(issues.repo, number).catch(() => undefined) : undefined;
+  const drift = driftState(diff, baseDiff);
+  return {
+    kind: 'pr',
+    ref: range,
+    state: {
+      range,
+      base,
+      head: branch,
+      linked_issue: issue ? { number: issue.number, title: issue.title, body: truncate(issue.body, BODY_CAP) } : null,
+      commits: commits.map((c) => c.message.split('\n')[0]),
+      diff: truncate(diff, DIFF_CAP, '\n[diff truncated]'),
+      drift: drift.map((d) => d.path),
+    },
+    facts: {
+      head: branch,
+      commits,
+      drift,
+      has_issue: issue !== undefined,
+      has_diff: diff.length > 0,
+      has_drift: drift.length > 0,
     },
     options: {},
   };

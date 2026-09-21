@@ -271,6 +271,10 @@ export class GitHubForge implements Forge {
     return cmp.commits.map(commit).reverse();
   }
 
+  compareDiff(repo: string, base: string, head: string): Promise<string> {
+    return this.gh.text(`repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, 'application/vnd.github.diff');
+  }
+
   async commits(repo: string, ref: string): Promise<Commit[]> {
     return (await this.gh.pages<GhCommit>(`repos/${repo}/commits?sha=${encodeURIComponent(ref)}`, COMMIT_JQ)).map(commit);
   }

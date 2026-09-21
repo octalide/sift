@@ -51,3 +51,24 @@ function lcsOps(a: string[], b: string[]): Op[] {
   while (j < m) ops.push({ op: '+', line: b[j++]! });
   return ops;
 }
+
+export type FilePatch = { path: string; patch: string };
+
+// a unified diff split per file, each named by its path after the change (the new name of a rename)
+export function splitDiff(diff: string): FilePatch[] {
+  const out: FilePatch[] = [];
+  for (const chunk of diff.split(/^(?=diff --git )/m)) {
+    const header = /^diff --git a\/(.+?) b\/(.+)$/m.exec(chunk);
+    if (!header) continue;
+    out.push({ path: header[2]!, patch: chunk.trimEnd() });
+  }
+  return out;
+}
+
+export type Drift = { path: string; pr: string; base: string };
+
+// the files both diffs touch, each with its patch from either side, in the order the pr diff lists them
+export function driftOf(prDiff: string, baseDiff: string): Drift[] {
+  const base = new Map(splitDiff(baseDiff).map((f) => [f.path, f.patch]));
+  return splitDiff(prDiff).flatMap((f) => (base.has(f.path) ? [{ path: f.path, pr: f.patch, base: base.get(f.path)! }] : []));
+}
