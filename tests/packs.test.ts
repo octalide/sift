@@ -147,8 +147,9 @@ describe('pack materialization', () => {
     expect(questions['type']).toBeUndefined();
     const rules: Subject = { kind: 'rules', ref: 'x', state: {}, facts: { rules: [{ text: 'no em dashes' }, { text: 'tests pass' }] }, options: {} };
     const expanded = materialize(BUILTIN_PACKS['rules']!, rules);
-    expect(Object.keys(expanded.questions)).toEqual(['rules_1', 'rules_2']);
-    expect(expanded.questions['rules_1']!.instructions).toContain('no em dashes');
+    expect(expanded.questions).toEqual({});
+    expect(expanded.expansion!.items).toHaveLength(2);
+    expect(expanded.expansion!.questions['rules']!.instructions).toBe('The subject complies with this rule: {text}');
   });
 
   it('inverts bad-outcome nouls and grades the verdict', async () => {
