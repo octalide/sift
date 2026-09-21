@@ -5,7 +5,7 @@ import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
-import { armedNotice, armingAgent, Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
+import { armedNotice, armingAgent, armRef, Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
 
 const rules: WatchRules = { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: true, login: 'me', protectedBranches: ['main', 'dev'], branchPattern: '^(feat|fix)/\\d+$' };
@@ -425,6 +425,21 @@ describe('watcher', () => {
     expect(out.lines[0]).toBe('[sift watch o/r for issue-4]');
     expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
     expect(out.lines).toContain('for issue-4: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+
+    // a leading # on a pr number is stripped when the ref is stored, so #3 names pr 3
+    out = await armed([['issue-3', '#3']]);
+    expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(armRef('#3')).toBe('3');
+    expect(armRef('3')).toBe('3');
+    expect(armRef('feat/3')).toBe('feat/3');
+    expect(armRef('#feat/3')).toBe('#feat/3');
+
+    // one ref names one agent: a later arm for the same pr replaces the entry, the newest wins
+    out = await armed([['issue-3', '3'], ['issue-3b', '#3']]);
+    expect(out.state.armedFor).toEqual([{ agent: 'issue-3b', ref: '3' }]);
+    expect(out.lines).toContain('for issue-3b: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).not.toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
 
     // a start without a ref keeps the set and replaces the name; a main-loop start clears both
     out = await armed([['issue-3', '3'], ['issue-5', undefined]]);

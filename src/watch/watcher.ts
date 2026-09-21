@@ -104,12 +104,15 @@ export class Watcher {
   }
 
   // records who armed the watch: a subagent's name, or nothing when the main loop did, which also forgets the
-  // per-pr set. a subagent naming its pr (number or head branch) joins the set, so the verdict on that pr names it.
-  // deliveries always reach the main loop, the names on them tell it whom to relay to
+  // per-pr set. a subagent naming its pr (number or head branch) takes that ref in the set, one agent per ref, the
+  // newest arm winning as armedBy does. deliveries always reach the main loop, the names on them tell it whom to relay to
   async arm(by: string | undefined, ref?: string): Promise<void> {
     this.state.armedBy = by;
     if (!by) delete this.state.armedFor;
-    else if (ref && !(this.state.armedFor ?? []).some((a) => a.agent === by && a.ref === ref)) this.state.armedFor = [...(this.state.armedFor ?? []), { agent: by, ref }];
+    else if (ref) {
+      const key = armRef(ref);
+      this.state.armedFor = [...(this.state.armedFor ?? []).filter((a) => a.ref !== key), { agent: by, ref: key }];
+    }
     await this.save();
   }
 
@@ -463,6 +466,11 @@ export class Watcher {
     }
     return detail;
   }
+}
+
+// the ref as the set keys it: a pr number with or without its leading #, or a head branch as given
+export function armRef(ref: string): string {
+  return ref.replace(/^#(?=\d+$)/, '');
 }
 
 // the name SendMessage reaches a tool.call's agent by: its listed name, else its id, nothing on the main loop
