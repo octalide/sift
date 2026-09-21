@@ -1,7 +1,8 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
 import { LOG_FORMAT, maxBump, parseLog, parseSemver, requiredBump, type Bump, type ParsedCommit } from './commits.ts';
-import { manifestChanges, type ManifestChange } from './manifest.ts';
+import { manifestChanges, manifestFormat, type ManifestChange } from './manifest.ts';
+import { lineDiff } from './diff.ts';
 import type { GitSource } from './source.ts';
 import type { RepoConfig } from './config.ts';
 import type { Gh } from './gh.ts';
@@ -213,14 +214,18 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
   const version = lastTag ? parseSemver(lastTag, config.release.tagPrefix) : undefined;
   const commitBump = requiredBump(commits, version, config.release.zeroVerBreaking);
   const manifests: ManifestChange[] = [];
+  const unparsed: string[] = [];
   for (const rule of config.release.manifests) {
+    if ((rule.keys ?? []).length > 0 && !manifestFormat(rule.path)) unparsed.push(rule.path);
     manifests.push(...manifestChanges(rule, lastTag ? await source.show(lastTag, rule.path) : undefined, await source.show(source.head, rule.path)));
   }
   const manifestBump = manifests.reduce<Bump>((acc, m) => maxBump(acc, m.bump), 'none');
   const bump = maxBump(commitBump, manifestBump);
   const changelog = config.release.changelog ? await source.show(source.head, config.release.changelog) : undefined;
   const changelogPath = changelog !== undefined ? config.release.changelog : undefined;
-  const unreleased = topSection(changelog ?? '');
+  const changelogBefore = changelogPath && lastTag ? await source.show(lastTag, changelogPath) : undefined;
+  const diff = lineDiff(changelogBefore ?? '', changelog ?? '');
+  const changelogAdded = diff.added.join('\n');
   return {
     kind: 'release',
     ref: range,
@@ -229,9 +234,22 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
       commits: commits.map((c) => ({ sha: c.sha.slice(0, 7), subject: c.subject, breaking: c.breaking, body: truncate(c.body, 1500) })),
       required_bump: bump,
       manifest_changes: manifests.map((m) => ({ path: m.path, key: m.key, from: m.from, to: m.to })),
-      changelog_top: truncate(unreleased, 8000),
+      changelog_diff: truncate(diff.text, 8000),
     },
-    facts: { lastTag, version, commits, bump, commitBump, manifestBump, manifests, changelogPath, unreleased, has_commits: commits.length > 0 || manifests.length > 0 },
+    facts: {
+      lastTag,
+      version,
+      commits,
+      bump,
+      commitBump,
+      manifestBump,
+      manifests,
+      manifestsUnparsed: unparsed,
+      changelogPath,
+      changelogAdded,
+      changelog_changed: diff.text.length > 0,
+      has_commits: commits.length > 0 || manifests.length > 0,
+    },
     options: {},
   };
 }
@@ -304,15 +322,6 @@ export function textSubject(text: string, context?: string): Subject {
     facts: {},
     options: {},
   };
-}
-
-// the newest changelog section: everything under the first second-level heading
-export function topSection(changelog: string): string {
-  const lines = changelog.split('\n');
-  const start = lines.findIndex((l) => /^##\s/.test(l));
-  if (start < 0) return '';
-  const end = lines.findIndex((l, i) => i > start && /^##\s/.test(l));
-  return lines.slice(start, end < 0 ? undefined : end).join('\n').trim();
 }
 
 // bullets and short paragraphs that read as rules, headings kept as context prefix
