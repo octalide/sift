@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { templateKind } from '../src/forge/github.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { rulesSubject } from '../src/github/subjects.ts';
 import type { Judge } from '../src/judge/types.ts';
@@ -140,21 +141,29 @@ describe('rule discovery', () => {
   });
 
   it('reads a checkout from git ls-files and the working tree, a repository from the forge tree', async () => {
-    const git = async (args: string[]) => (args[0] === 'ls-files' ? 'README.md\0src/a.ts\0' : '');
-    const tree: Record<string, string> = { '/r/README.md': '# r' };
-    const forge = fakeForge({ templates: async () => [{ kind: 'pr', name: 'docs/pull_request_template.md', body: '## Summary' }], file: async (repo, path, ref) => (repo === 'o/r' && path === 'RULES.md' ? `# rules@${ref ?? 'default'}` : undefined), contents: async () => ['RULES.md', 'src/a.ts'] });
-    const local = checkoutSource('/r', git, { read: async (p) => tree[p]!, exists: async (p) => p in tree }, forge, 'o/r');
+    const git = async (args: string[]) => (args[0] === 'ls-files' ? 'README.md\0src/a.ts\0docs/pull_request_template.md\0.github/ISSUE_TEMPLATE/bug.yml\0.github/ISSUE_TEMPLATE/config.yml\0.github/ISSUE_TEMPLATE/gone.md\0' : '');
+    const tree: Record<string, string> = { '/r/README.md': '# r', '/r/docs/pull_request_template.md': '## Summary', '/r/.github/ISSUE_TEMPLATE/bug.yml': 'name: Bug', '/r/.github/ISSUE_TEMPLATE/config.yml': 'blank_issues_enabled: false' };
+    const templates = vi.fn(async () => [{ kind: 'pr' as const, name: 'docs/pull_request_template.md', body: '## Summary' }]);
+    const forge = fakeForge({ template: templateKind, templates, file: async (repo, path, ref) => (repo === 'o/r' && path === 'RULES.md' ? `# rules@${ref ?? 'default'}` : undefined), contents: async () => ['RULES.md', 'src/a.ts'] });
+    const local = checkoutSource('/r', git, { read: async (p) => tree[p]!, exists: async (p) => p in tree }, forge);
     expect(local.scope).toBe('/r');
-    expect(await local.list()).toEqual(['README.md', 'src/a.ts']);
+    expect(await local.list()).toEqual(['README.md', 'src/a.ts', 'docs/pull_request_template.md', '.github/ISSUE_TEMPLATE/bug.yml', '.github/ISSUE_TEMPLATE/config.yml', '.github/ISSUE_TEMPLATE/gone.md']);
     expect(await local.read('README.md')).toBe('# r');
     expect(await local.read('gone.md')).toBeUndefined();
-    expect(await local.templates()).toEqual([{ path: 'docs/pull_request_template.md', text: '## Summary' }]);
+    // templates are the tracked paths at the forge's documented locations, read from the tree, never from the forge
+    expect(await local.templates()).toEqual([
+      { path: 'docs/pull_request_template.md', text: '## Summary' },
+      { path: '.github/ISSUE_TEMPLATE/bug.yml', text: 'name: Bug' },
+    ]);
+    expect(templates).not.toHaveBeenCalled();
+    expect(await checkoutSource('/r', git, { read: async (p) => tree[p]!, exists: async (p) => p in tree }).templates()).toEqual([]);
     expect(await local.remote('o/r', 'RULES.md', 'v1')).toBe('# rules@v1');
     const remote = forgeSource(forge, 'o/r', 'dev');
     expect(remote.scope).toBe('o/r@dev');
     expect(await remote.list()).toEqual(['RULES.md', 'src/a.ts']);
     expect(await remote.read('RULES.md')).toBe('# rules@dev');
     expect(await remote.templates()).toEqual([{ path: 'docs/pull_request_template.md', text: '## Summary' }]);
+    expect(templates).toHaveBeenCalledTimes(1);
   });
 });
 
