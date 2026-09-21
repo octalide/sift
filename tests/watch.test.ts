@@ -106,9 +106,11 @@ describe('watcher', () => {
       page([issue(1)]),
       page([slim(1), slim(2)]),
       page({ workflow_runs: [] }),
+      notModified,
       // tick 2: issue 2 got a comment (judged), issue 1 got a label (deferred)
       page([issue(2)], '"f"'),
       page([slim(1, { l: 'p1' }), slim(2, { c: 1, up: '2026-01-03T00:00:00Z' })]),
+      notModified,
       notModified,
       // detail fetches for the judged event
       page(issue(2, { comments: 1 })),
@@ -164,14 +166,15 @@ describe('watcher', () => {
 
   it('delivers one settled verdict per pr head when the last check completes', async () => {
     const run = (id: number, name: string, status: string, conclusion: string | null) => ({ id, name, head_branch: 'feat/3', event: 'push', status, conclusion, head_sha: 'abc1234def', html_url: `https://x/runs/${id}`, actor: { login: 'me' }, updated_at: '1' });
-    const pulls = page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha: 'abc1234def' }, html_url: 'https://x/pull/3' }]);
+    const pulls = page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha: 'abc1234def' }, html_url: 'https://x/pull/3', user: { login: 'alice' } }]);
     const gh = fakeGh([
       // the login lookup for ignoreSelf
       page({ login: 'me' }),
-      // tick 1: seed with both workflows running
+      // tick 1: seed with both workflows running, the pr not yet open
       page([issue(1)]),
       page([slim(1)]),
       page({ workflow_runs: [run(10, 'build', 'in_progress', null), run(11, 'test', 'in_progress', null)] }),
+      notModified,
       // tick 2: build finished, test still running
       notModified,
       page({ workflow_runs: [run(10, 'build', 'completed', 'success'), run(11, 'test', 'in_progress', null)] }, '"r2"'),
@@ -218,14 +221,15 @@ describe('watcher', () => {
 
   it('delivers a pr head whose checks stay unfinished past the stall interval as stalled, once, then its verdict when it settles', async () => {
     const run = (id: number, name: string, status: string, conclusion: string | null) => ({ id, name, head_branch: 'feat/3', event: 'push', status, conclusion, head_sha: 'abc1234def', html_url: `https://x/runs/${id}`, actor: { login: 'me' }, updated_at: '1' });
-    const pulls = page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha: 'abc1234def' }, html_url: 'https://x/pull/3' }]);
+    const pulls = page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha: 'abc1234def' }, html_url: 'https://x/pull/3', user: { login: 'alice' } }]);
     const checks = (test: string) => [page({ check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }, { name: 'test', status: test, conclusion: test === 'completed' ? 'success' : null }] }), page({ statuses: [] })];
     const gh = fakeGh([
       page({ login: 'me' }),
-      // tick 1: seed with both workflows running
+      // tick 1: seed with both workflows running, the pr not yet open
       page([issue(1)]),
       page([slim(1)]),
       page({ workflow_runs: [run(10, 'build', 'in_progress', null), run(11, 'test', 'in_progress', null)] }),
+      notModified,
       // tick 2: build finished, test still running: the head is pending
       notModified,
       page({ workflow_runs: [run(10, 'build', 'completed', 'success'), run(11, 'test', 'in_progress', null)] }, '"r2"'),
@@ -237,6 +241,7 @@ describe('watcher', () => {
       pulls,
       ...checks('in_progress'),
       // tick 4: nothing changed, no calls beyond the probes
+      notModified,
       notModified,
       notModified,
       // tick 5: test finished
@@ -285,22 +290,25 @@ describe('watcher', () => {
 
   it('forgets a pending head once its pr moved to a new commit', async () => {
     const run = (id: number, sha: string, status: string, conclusion: string | null) => ({ id, name: 'build', head_branch: 'feat/3', event: 'push', status, conclusion, head_sha: sha, html_url: `https://x/runs/${id}`, actor: { login: 'me' }, updated_at: '1' });
-    const pull = (sha: string) => page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha }, html_url: 'https://x/pull/3' }]);
+    const pull = (sha: string) => page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha }, html_url: 'https://x/pull/3', user: { login: 'alice' } }]);
     const gh = fakeGh([
       page({ login: 'me' }),
       page([issue(1)]),
       page([slim(1)]),
       page({ workflow_runs: [run(10, 'aaa1234', 'in_progress', null)] }),
+      notModified,
       // tick 2: build finished on the first head, an external status still pending
       notModified,
       page({ workflow_runs: [run(10, 'aaa1234', 'completed', 'success')] }, '"r2"'),
       pull('aaa1234'),
       page({ check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }] }),
       page({ statuses: [{ context: 'ext', state: 'pending' }] }),
-      // tick 3: past the stall interval, but the pr head moved on
+      // tick 3: past the stall interval, but the pr head moved on: the new head starts over
       notModified,
       notModified,
       pull('bbb1234'),
+      page({ check_runs: [] }),
+      page({ statuses: [{ context: 'ext', state: 'pending' }] }),
     ]);
     const delivered: string[] = [];
     let now = 1_000_000;
@@ -326,7 +334,59 @@ describe('watcher', () => {
     now += 3600_000;
     await watcher.tick();
     expect(delivered).toHaveLength(0);
-    expect(watcher.snapshot().pending).toEqual({});
+    expect(watcher.snapshot().pending).toEqual({ '3@bbb1234': { number: 3, title: 'Feat 3', branch: 'feat/3', sha: 'bbb1234', url: 'https://x/pull/3', user: 'alice', since: now, stalled: false } });
+  });
+
+  it('delivers a pr head with no runs at all as stalled after the stall interval', async () => {
+    const pull = page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha: 'abc1234def' }, html_url: 'https://x/pull/3', user: { login: 'alice' } }]);
+    const gh = fakeGh([
+      page({ login: 'me' }),
+      // tick 1: seed with the pr open, its only check queued and no run reported
+      page([issue(1)]),
+      page([slim(1)]),
+      page({ workflow_runs: [] }),
+      pull,
+      page({ check_runs: [{ name: 'build', status: 'queued', conclusion: null }] }),
+      page({ statuses: [] }),
+      // tick 2: nothing changed, no calls beyond the probes
+      notModified,
+      notModified,
+      notModified,
+      // tick 3: past the stall interval, the check still queued
+      notModified,
+      notModified,
+      pull,
+      page({ check_runs: [{ name: 'build', status: 'queued', conclusion: null }] }),
+      page({ statuses: [] }),
+    ]);
+    const delivered: string[] = [];
+    let now = 1_000_000;
+    const watcher = new Watcher(
+      {
+        gh,
+        store: { get: async () => undefined, set: async () => {} },
+        judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) },
+        pack: BUILTIN_PACKS['triage']!,
+        config: DEFAULT_CONFIG,
+        now: () => now,
+        deliver: async (t) => void delivered.push(t),
+        log: () => {},
+        status: () => {},
+        schedule: () => ({ cancel: () => {} }),
+      },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 3600_000, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'], branchPattern: '^feat/\\d+$' } },
+    );
+    await watcher.start();
+    await watcher.tick();
+    expect(watcher.snapshot().pending).toEqual({ '3@abc1234def': { number: 3, title: 'Feat 3', branch: 'feat/3', sha: 'abc1234def', url: 'https://x/pull/3', user: 'alice', since: 1_000_000, stalled: false } });
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    now += 3600_000;
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('ci stalled: pr #3 feat/3 @abc1234: Feat 3 (1 of 1 checks pending: build)');
+    expect(delivered[0]).toContain('by alice · https://x/pull/3 · ci stalled on pr');
+    expect(watcher.snapshot().pending['3@abc1234def']?.stalled).toBe(true);
   });
 
   it('checks a new issue against the issue pack, the filer\'s own included, and delivers its findings', async () => {
@@ -336,9 +396,11 @@ describe('watcher', () => {
       page([issue(1)]),
       page([slim(1)]),
       page({ workflow_runs: [] }),
+      notModified,
       // tick 2: me filed issue 2 with no labels and a task label but no parent
       page([issue(2)], '"f"'),
       page([slim(2, { u: 'me', l: 'task', cr: '2026-06-01T00:00:00Z', up: '2026-06-01T00:00:00Z' })]),
+      notModified,
       notModified,
       // the issue subject: item, comments, open issues, parent
       page(issue(2, { user: { login: 'me' }, labels: [{ name: 'task' }], body: '## Summary\nthe summary' })),

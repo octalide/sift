@@ -50,7 +50,7 @@ export type WatchEvent = {
 };
 
 // bump when the stored shape changes; a store from an older version is reseeded
-export const STATE_VERSION = 4;
+export const STATE_VERSION = 5;
 
 export type WatchState = {
   version: number;
@@ -63,7 +63,9 @@ export type WatchState = {
   settled: Record<string, string>;
   // pr@sha -> the open pr head whose checks have not all finished, one stalled delivery per head
   pending: Record<string, PendingHead>;
-  etags: { issues?: string; runs?: string };
+  // pr@sha -> the open pr head with no check or status on it yet, looked up once; neither settled nor pending
+  unchecked: Record<string, true>;
+  etags: { issues?: string; runs?: string; pulls?: string };
   deferred: Deferred[];
   paused: boolean;
   login?: string;
@@ -86,7 +88,7 @@ export type PendingHead = {
   sha: string;
   url: string;
   user: string;
-  // when the head was first seen with a finished check beside unfinished ones
+  // when the head was first seen open with unfinished checks
   since: number;
   stalled: boolean;
 };
@@ -100,6 +102,7 @@ export function initialState(): WatchState {
     runs: {},
     settled: {},
     pending: {},
+    unchecked: {},
     etags: {},
     deferred: [],
     paused: false,
