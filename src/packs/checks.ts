@@ -93,15 +93,16 @@ export const CHECKS: Record<string, Check> = {
     const manifests = (s.facts['manifests'] as { path: string; key: string; from: string | null; to: string | null }[]) ?? [];
     const commitBump = (s.facts['commitBump'] as Bump | undefined) ?? bump;
     const manifestBump = (s.facts['manifestBump'] as Bump | undefined) ?? 'none';
-    if (!s.facts['has_commits']) return [info('release.bump', 'no commits since the last tag')];
-    if (bump === 'none') return [warn('release.bump', 'nothing since the last tag calls for a release (no feat, fix, breaking change or manifest change)')];
+    const unparsed = ((s.facts['manifestsUnparsed'] as string[] | undefined) ?? []).map((p) => warn('release.bump', `${p} is not toml, json or yaml, its keys match nothing (use pattern)`));
+    if (!s.facts['has_commits']) return [...unparsed, info('release.bump', 'no commits since the last tag')];
+    if (bump === 'none') return [...unparsed, warn('release.bump', 'nothing since the last tag calls for a release (no feat, fix, breaking change or manifest change)')];
     const because = [
       commitBump !== 'none' ? `commits ${commitBump}` : '',
       ...manifests.map((m) => `${m.path} ${m.key} ${m.from ?? 'unset'} -> ${m.to ?? 'unset'} (${manifestBump})`),
     ].filter(Boolean);
-    if (!version) return [info('release.bump', `required bump: ${bump} (no previous semver tag to compute from), from ${because.join('; ')}`)];
+    if (!version) return [...unparsed, info('release.bump', `required bump: ${bump} (no previous semver tag to compute from), from ${because.join('; ')}`)];
     const next = bumpVersion(version, bump);
-    const findings = [info('release.bump', `required bump: ${bump}, next version ${c.release.tagPrefix}${next.join('.')}, from ${because.join('; ')}`)];
+    const findings = [...unparsed, info('release.bump', `required bump: ${bump}, next version ${c.release.tagPrefix}${next.join('.')}, from ${because.join('; ')}`)];
     const proposed = s.facts['proposed'] as string | undefined;
     if (proposed) {
       const p = parseSemver(proposed, c.release.tagPrefix);
@@ -113,8 +114,8 @@ export const CHECKS: Record<string, Check> = {
   'release.changelog': (s, c) => {
     if (!c.release.changelog) return [];
     if (!s.facts['changelogPath']) return [warn('release.changelog', `${c.release.changelog} not found`)];
-    const top = String(s.facts['unreleased'] ?? '');
-    return top.length === 0 ? [warn('release.changelog', 'changelog has no section to promote')] : [];
+    const since = s.facts['lastTag'] ? `since ${String(s.facts['lastTag'])}` : 'and is empty';
+    return s.facts['changelog_changed'] ? [] : [warn('release.changelog', `${c.release.changelog} is unchanged ${since}`)];
   },
   'release.commits': (s, c) => commitFindings('release.commits', (s.facts['commits'] as ParsedCommit[]) ?? [], c),
   'rules.present': (s, c) => {

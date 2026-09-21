@@ -160,8 +160,8 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       },
       changelog_complete: {
         type: 'noul',
-        instructions: 'The top changelog section mentions every user-visible change among the commits.',
-        when: 'changelogPath',
+        instructions: 'The text added to the changelog since the last tag describes every user-visible change among the commits.',
+        when: 'changelog_changed',
         severity: 'warn',
       },
     },

@@ -38,8 +38,9 @@ export type RepoConfig = {
     tagPrefix: string;
     // what a breaking change requires below 1.0.0
     zeroVerBreaking: 'major' | 'minor';
-    // manifests whose changed keys (regexes over dotted toml keys) require a bump on their own
-    manifests: { path: string; keys: string[]; bump: 'major' | 'minor' | 'patch' }[];
+    // manifests whose changes require a bump on their own: keys are regexes over dotted paths in a toml, json or yaml
+    // file (arrays indexed numerically), pattern a regex over the text of any file whose matched text must not change
+    manifests: { path: string; keys?: string[]; pattern?: string; bump: 'major' | 'minor' | 'patch' }[];
   };
 };
 

@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Gh } from '../src/github/gh.ts';
 import { bumpVersion, parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
-import { flattenToml, manifestChanges } from '../src/github/manifest.ts';
+import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/github/manifest.ts';
+import { lineDiff } from '../src/github/diff.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
-import { lastReleaseTag, linkedIssues, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf, topSection } from '../src/github/subjects.ts';
+import { lastReleaseTag, linkedIssues, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
@@ -75,7 +76,7 @@ describe('mechanical checks', () => {
   it('reads dependency floors out of a manifest and names the changed keys', () => {
     const before = '[project]\nid = "hedge"\nversion = "0.7.0"\nmach = "^5.3"\n\n[dep.std]\ngit = "https://x/std"\nref = "tag/v5.7.0"\n';
     const after = '[project]\nid = "hedge"\nversion = "0.7.1"\nmach = "^5.9" # floor\n\n[dep.std]\ngit = "https://x/std"\nref = "tag/v6.0.0"\n\n[dep.tls]\ngit = "https://x/tls"\nref = "tag/v0.8.1"\n';
-    expect(flattenToml(after)['project.mach']).toBe('"^5.9"');
+    expect(flattenManifest(parseToml(after))['project.mach']).toBe('"^5.9"');
     const rule = { path: 'mach.toml', keys: ['^project\\.mach$', '^dep\\.[^.]+\\.(git|ref)$'], bump: 'minor' as const };
     const changes = manifestChanges(rule, before, after);
     expect(changes.map((c) => `${c.key} ${c.from} -> ${c.to}`)).toEqual(['project.mach "^5.3" -> "^5.9"', 'dep.std.ref "tag/v5.7.0" -> "tag/v6.0.0"', 'dep.tls.git null -> "https://x/tls"', 'dep.tls.ref null -> "tag/v0.8.1"']);
@@ -89,6 +90,128 @@ describe('mechanical checks', () => {
     };
     const findings = runChecks(BUILTIN_PACKS['release']!, release, resolveConfig({ release: { scheme: 'semver' } }));
     expect(findings.map((f) => f.message)).toEqual(['required bump: minor, next version v0.8.0, from mach.toml project.mach "^5.3" -> "^5.9" (minor)']);
+  });
+
+  it('parses the toml a manifest needs: arrays of tables, inline values, multi-line arrays, quoted keys', () => {
+    const toml = [
+      'title = "x" # c',
+      'nums = [1, 2,',
+      '  3] # trailing',
+      'inline = { a = "b", c.d = true }',
+      '"dotted.key" = \'lit # not a comment\'',
+      'when = 1979-05-27T07:32:00Z',
+      '[[dep]]',
+      'name = "std"',
+      '[dep.opts]',
+      'strict = false',
+      '[[dep]]',
+      'name = "tls"',
+    ].join('\n');
+    expect(flattenManifest(parseToml(toml))).toEqual({
+      title: '"x"',
+      'nums.0': '1',
+      'nums.1': '2',
+      'nums.2': '3',
+      'inline.a': '"b"',
+      'inline.c.d': 'true',
+      'dotted.key': '"lit # not a comment"',
+      when: '"1979-05-27T07:32:00Z"',
+      'dep.0.name': '"std"',
+      'dep.0.opts.strict': 'false',
+      'dep.1.name': '"tls"',
+    });
+  });
+
+  it('parses the yaml a manifest needs: nested maps, sequences of maps, flow values, block scalars', () => {
+    const yaml = [
+      '# pubspec',
+      'name: hedge',
+      'version: "1.2.0"',
+      'environment:',
+      '  sdk: ">=3.0.0 <4.0.0"',
+      'dependencies:',
+      '  http: ^1.1.0',
+      '  path:',
+      '    git:',
+      '      url: https://x/path # comment',
+      '      ref: v1',
+      'tags: [a, "b, c"]',
+      'authors:',
+      '  - name: one',
+      '    email: one@x',
+      '  - two',
+      'notes: |',
+      '  first',
+      '  second',
+      'empty: {}',
+    ].join('\n');
+    expect(flattenManifest(parseYaml(yaml))).toEqual({
+      name: '"hedge"',
+      version: '"1.2.0"',
+      'environment.sdk': '">=3.0.0 <4.0.0"',
+      'dependencies.http': '"^1.1.0"',
+      'dependencies.path.git.url': '"https://x/path"',
+      'dependencies.path.git.ref': '"v1"',
+      'tags.0': '"a"',
+      'tags.1': '"b, c"',
+      'authors.0.name': '"one"',
+      'authors.0.email': '"one@x"',
+      'authors.1': '"two"',
+      notes: '"first\\nsecond\\n"',
+      empty: '{}',
+    });
+  });
+
+  it('diffs manifest keys in json and yaml the same way as toml, arrays by index', () => {
+    const rule = { path: 'package.json', keys: ['^dependencies\\.', '^files\\.\\d+$'], bump: 'patch' as const };
+    const before = JSON.stringify({ name: 'x', version: '1.0.0', dependencies: { a: '^1' }, files: ['lib'] });
+    const after = JSON.stringify({ name: 'x', version: '1.0.1', dependencies: { a: '^2', b: '^1' }, files: ['lib', 'bin'] });
+    expect(manifestChanges(rule, before, after).map((c) => `${c.key} ${c.from} -> ${c.to}`)).toEqual(['dependencies.a "^1" -> "^2"', 'dependencies.b null -> "^1"', 'files.1 null -> "bin"']);
+    const yamlRule = { path: 'pubspec.yaml', keys: ['^environment\\.sdk$'], bump: 'minor' as const };
+    expect(manifestChanges(yamlRule, 'environment:\n  sdk: ">=3.0.0"\n', 'environment:\n  sdk: ">=3.2.0"\n').map((c) => c.key)).toEqual(['environment.sdk']);
+    expect(manifestChanges(yamlRule, 'environment:\n  sdk: ">=3.0.0"\n', 'environment:\n  sdk: ">=3.0.0"\nname: y\n')).toEqual([]);
+  });
+
+  it('matches a pattern over the text of any manifest and reports the matched text', () => {
+    const rule = { path: 'Makefile', pattern: '^ABI_VERSION\\s*=\\s*\\S+', bump: 'major' as const };
+    const before = 'CC = gcc\nABI_VERSION = 3\n';
+    const after = 'CC = clang\nABI_VERSION = 4\n';
+    expect(manifestChanges(rule, before, after)).toEqual([{ path: 'Makefile', key: '/^ABI_VERSION\\s*=\\s*\\S+/', from: 'ABI_VERSION = 3', to: 'ABI_VERSION = 4', bump: 'major' }]);
+    expect(manifestChanges(rule, before, before.replace('gcc', 'clang'))).toEqual([]);
+    expect(manifestChanges(rule, undefined, after).map((c) => c.from)).toEqual([null]);
+    const both = { path: 'mach.toml', keys: ['^project\\.mach$'], pattern: '^# abi \\d+', bump: 'minor' as const };
+    expect(manifestChanges(both, '# abi 1\n[project]\nmach = "^5"\n', '# abi 2\n[project]\nmach = "^6"\n').map((c) => c.key)).toEqual(['project.mach', '/^# abi \\d+/']);
+  });
+
+  it('warns when keys are given for a manifest in no parsed format', () => {
+    const release: Subject = {
+      kind: 'release',
+      ref: 'HEAD',
+      state: {},
+      facts: { has_commits: true, bump: 'minor', commitBump: 'minor', manifests: [], manifestsUnparsed: ['Makefile'], version: [1, 0, 0] },
+      options: {},
+    };
+    const findings = runChecks(BUILTIN_PACKS['release']!, release, resolveConfig({ release: { scheme: 'semver' } }));
+    expect(findings.map((f) => `${f.severity} ${f.message}`)).toEqual(['warn Makefile is not toml, json or yaml, its keys match nothing (use pattern)', 'info required bump: minor, next version v1.1.0, from commits minor']);
+  });
+
+  it('diffs lines, skipping the common ends', () => {
+    expect(lineDiff('a\nb\nc', 'a\nx\nb\nc')).toEqual({ added: ['x'], removed: [], text: '+x' });
+    expect(lineDiff('a\nb', 'a\nc')).toEqual({ added: ['c'], removed: ['b'], text: '-b\n+c' });
+    expect(lineDiff('', 'a')).toEqual({ added: ['a'], removed: [], text: '+a' });
+    expect(lineDiff('same', 'same')).toEqual({ added: [], removed: [], text: '' });
+  });
+
+  it('flags an unchanged changelog and asks about the added text only when there is some', () => {
+    const config = resolveConfig({ release: { scheme: 'semver', changelog: 'CHANGELOG.md' } });
+    const facts = { has_commits: true, bump: 'minor', commitBump: 'minor', manifests: [], version: [1, 0, 0], lastTag: 'v1.0.0' };
+    const same: Subject = { kind: 'release', ref: 'HEAD', state: {}, facts: { ...facts, changelogPath: 'CHANGELOG.md', changelog_changed: false }, options: {} };
+    expect(runChecks(BUILTIN_PACKS['release']!, same, config).filter((f) => f.check === 'release.changelog').map((f) => f.message)).toEqual(['CHANGELOG.md is unchanged since v1.0.0']);
+    const missing: Subject = { ...same, facts: { ...facts } };
+    expect(runChecks(BUILTIN_PACKS['release']!, missing, config).filter((f) => f.check === 'release.changelog').map((f) => f.message)).toEqual(['CHANGELOG.md not found']);
+    const grown: Subject = { ...same, facts: { ...facts, changelogPath: 'CHANGELOG.md', changelog_changed: true } };
+    expect(runChecks(BUILTIN_PACKS['release']!, grown, config).filter((f) => f.check === 'release.changelog')).toEqual([]);
+    expect(BUILTIN_PACKS['release']!.questions['changelog_complete']!.when).toBe('changelog_changed');
   });
 
   it('asks a large pack in several requests and keeps every answer', async () => {
@@ -253,6 +376,7 @@ describe('github helpers', () => {
     expect(s.facts['bump']).toBe('minor');
     expect(s.facts['manifests']).toHaveLength(1);
     expect(s.facts['changelogPath']).toBeUndefined();
+    expect(s.facts['changelog_changed']).toBe(false);
     expect(calls).toContain('repos/o/r/compare/v0.4.0...dev');
     expect(calls).toContain('repos/o/r/contents/mach.toml?ref=dev');
   });
@@ -262,21 +386,22 @@ describe('github helpers', () => {
       git: async (argv: string[]) => {
         if (argv[0] === 'tag') return 'v1.0.0\n';
         if (argv[0] === 'log') return `\u001e${'d'.repeat(40)}\nfeat(#4): four\n`;
-        if (argv[0] === 'show') return argv[1] === 'v1.0.0:CHANGELOG.md' ? '## 1.0.0\n- old' : '';
+        if (argv[0] === 'show') return argv[1] === 'v1.0.0:CHANGELOG.md' ? '# Changelog\n\n## 1.0.0\n- old' : '';
         return '';
       },
     } as unknown as Gh;
     const config = resolveConfig({ release: { scheme: 'semver', changelog: 'CHANGELOG.md' } });
-    const s = await releaseSubject(localSource(gh, 'HEAD', async () => '## Unreleased\n- four\n\n## 1.0.0\n- old', async () => true), config);
+    const s = await releaseSubject(localSource(gh, 'HEAD', async () => '# Changelog\n\n## Unreleased\n- four\n\n## 1.0.0\n- old', async () => true), config);
     expect(s.ref).toBe('v1.0.0..HEAD');
-    expect(s.facts['unreleased']).toBe('## Unreleased\n- four');
+    expect(s.facts['changelogAdded']).toBe('## Unreleased\n- four\n');
+    expect(s.facts['changelog_changed']).toBe(true);
+    expect((s.state as { changelog_diff: string }).changelog_diff).toBe('+## Unreleased\n+- four\n+');
     expect(s.facts['bump']).toBe('minor');
   });
 
   it('reads markdown structure', () => {
     expect(Object.keys(sectionsOf('## Summary\nx\n## Steps\n- a'))).toEqual(['Summary', 'Steps']);
     expect(linkedIssues('Closes #4, fixes #9 and #10')).toEqual([4, 9]);
-    expect(topSection('# Changelog\n\n## Unreleased\n- a\n\n## 1.0.0\n- b')).toBe('## Unreleased\n- a');
     const rules = ruleParagraphs('# Style\n\nNo em dashes, no semicolons.\n\n- Conventional commits.\n- Tiny.\n\n```\ncode ignored\n```');
     expect(rules).toEqual(['Style: No em dashes, no semicolons.', 'Style: Conventional commits.']);
   });
