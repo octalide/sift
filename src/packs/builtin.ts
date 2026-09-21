@@ -141,12 +141,12 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
   commit: {
     name: 'commit',
     subject: 'commit',
-    description: 'Do these commit messages follow the convention and describe their diffs honestly?',
+    description: 'Do these commit messages follow the repository\'s commit format and describe their diffs honestly?',
     checks: ['commit.format'],
     questions: {
       type_matches: {
         type: 'choice',
-        instructions: 'Which conventional commit type does the diff actually warrant?',
+        instructions: 'Which type from the repository\'s commit format does the diff actually warrant?',
         options: 'commit_types',
         when: 'has_diff',
         severity: 'info',
