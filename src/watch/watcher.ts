@@ -44,12 +44,6 @@ type Pull = PullHead;
 
 const headKey = (p: Pull): string => `${p.number}@${p.sha}`;
 
-// one fetch shared by the steps of a poll that need it
-function once<T>(fn: () => Promise<T>): () => Promise<T> {
-  let p: Promise<T> | undefined;
-  return () => (p ??= fn());
-}
-
 export class Watcher {
   private timer?: Timer;
   private inflight?: Promise<void>;
@@ -143,10 +137,10 @@ export class Watcher {
       this.state.failures = 0;
       if (!this.state.seeded) {
         this.state.seeded = true;
-        if (c.pulls) await this.seedHeads(c.pulls, now);
+        if (c.changed) await this.seedHeads(now);
         this.host.log(`sift watch seeded for ${this.options.repo}, streaming changes from now`);
       } else {
-        await this.handle([...a.events, ...b.events], c.pulls);
+        await this.handle([...a.events, ...b.events], c.changed);
       }
     } catch (error) {
       this.state.failures += 1;
@@ -200,23 +194,24 @@ export class Watcher {
     return Math.max(wait, this.options.maxIntervalMs);
   }
 
-  // the open pr heads, fetched conditionally so an unchanged list costs nothing. a 200 carries every head to seed as pending
-  private async pollPulls(now: number): Promise<{ pulls?: Pull[]; rateWait: number }> {
-    if (this.options.rules.ci === 'none') return { rateWait: 0 };
+  // the open pr heads, fetched conditionally so an unchanged list costs nothing. a 200 replaces the list in state and
+  // every head on it is seeded; the steps of the poll read the list from state either way
+  private async pollPulls(now: number): Promise<{ changed: boolean; rateWait: number }> {
+    if (this.options.rules.ci === 'none') return { changed: false, rateWait: 0 };
     const read = await this.host.forge.pulls(this.options.repo, this.state.etags.pulls);
     const rateWait = this.rateWait(read.rate, now);
-    if (!read.changed) return { rateWait };
+    if (!read.changed) return { changed: false, rateWait };
+    this.state.pulls = read.value;
     this.state.etags.pulls = read.token;
-    return { pulls: read.value, rateWait };
+    return { changed: true, rateWait };
   }
 
-  private async handle(events: WatchEvent[], fresh?: Pull[]): Promise<void> {
+  private async handle(events: WatchEvent[], fresh: boolean): Promise<void> {
     const rules: WatchRules = { ...this.options.rules, login: this.state.login };
     const deliver: { event: WatchEvent; label: string }[] = [];
-    const pulls = once(() => (fresh ? Promise.resolve(fresh) : this.openPulls()));
-    const settled = await this.settleRuns(events, pulls);
-    const seeded = fresh ? await this.seedHeads(fresh, this.host.now()) : [];
-    for (const e of [...settled, ...seeded, ...(await this.stallHeads(pulls))]) {
+    const settled = await this.settleRuns(events);
+    const seeded = fresh ? await this.seedHeads(this.host.now()) : [];
+    for (const e of [...settled, ...seeded, ...(await this.stallHeads())]) {
       const filing = e.kind === 'issue' && e.isNew && !(rules.ignoreBots && e.bot) ? await this.fileCheck(e) : [];
       if (filing.length > 0) e.findings = filing.map((f) => `${f.check}: ${f.message}`);
       const route = filing.length > 0 ? { action: 'deliver' as const, reason: `filed with ${filing.length} finding${filing.length === 1 ? '' : 's'}` } : routeByRules(e, rules);
@@ -251,16 +246,12 @@ export class Watcher {
 
   // a completed run on the head of an open pr is reported as the pr's verdict, once, when the last check finishes.
   // until then the run event is held with the pr named and the head is tracked as pending. under ci: all the run events pass through as well
-  private async settleRuns(events: WatchEvent[], openPulls: () => Promise<Pull[]>): Promise<WatchEvent[]> {
+  private async settleRuns(events: WatchEvent[]): Promise<WatchEvent[]> {
     const runs = events.filter((e) => e.kind === 'ci' && !e.settled);
     if (runs.length === 0 || this.options.rules.ci === 'none') return events;
     const out: WatchEvent[] = events.filter((e) => e.kind !== 'ci');
-    const pulls = await openPulls().catch((error: unknown) => {
-      this.host.log(`sift watch ${this.options.repo}: could not list open prs (${error instanceof Error ? error.message : String(error)}), routing runs alone`);
-      return undefined;
-    });
-    if (!pulls) return events;
-    this.prunePending(pulls);
+    const pulls = this.state.pulls;
+    this.prunePending();
     const sha = (e: WatchEvent) => this.state.runs[e.id.replace(/^ci#/, '')]?.sha ?? '';
     for (const e of runs) {
       const pr = pulls.find((p) => p.sha === sha(e));
@@ -288,16 +279,11 @@ export class Watcher {
 
   // a pending head older than the stall interval is checked once more: settled by now it delivers the verdict,
   // still unfinished it delivers as stalled, once. a head that moved or closed is forgotten, so a new commit starts over
-  private async stallHeads(openPulls: () => Promise<Pull[]>): Promise<WatchEvent[]> {
+  private async stallHeads(): Promise<WatchEvent[]> {
     const now = this.host.now();
     const due = Object.entries(this.state.pending).filter(([, h]) => !h.stalled && now - h.since >= this.options.stallMs);
     if (due.length === 0 || this.options.rules.ci === 'none') return [];
-    const pulls = await openPulls().catch((error: unknown) => {
-      this.host.log(`sift watch ${this.options.repo}: could not list open prs (${error instanceof Error ? error.message : String(error)}), stall check skipped`);
-      return undefined;
-    });
-    if (!pulls) return [];
-    this.prunePending(pulls);
+    this.prunePending();
     const out: WatchEvent[] = [];
     for (const [key, h] of due) {
       if (!this.state.pending[key]) continue;
@@ -353,10 +339,10 @@ export class Watcher {
   // every open head not yet tracked is looked up once: unfinished checks make it pending from now, so a head whose
   // checks never start still stalls; a head already finished is settled (delivered when no run reported it, silently on
   // the seed poll); a head with nothing on it is neither, so a repo without ci sees no verdicts
-  private async seedHeads(pulls: Pull[], now: number): Promise<WatchEvent[]> {
-    this.prunePending(pulls);
+  private async seedHeads(now: number): Promise<WatchEvent[]> {
+    this.prunePending();
     const out: WatchEvent[] = [];
-    for (const pr of pulls) {
+    for (const pr of this.state.pulls) {
       const key = headKey(pr);
       if (this.state.pending[key] || this.state.settled[key] || this.state.unchecked[key]) continue;
       const head = await this.settle(pr.sha).catch(() => undefined);
@@ -369,15 +355,10 @@ export class Watcher {
   }
 
   // a pending or unchecked head is only worth remembering while it is still the head of an open pr
-  private prunePending(pulls: Pull[]): void {
-    const live = new Set(pulls.map(headKey));
+  private prunePending(): void {
+    const live = new Set(this.state.pulls.map(headKey));
     for (const key of Object.keys(this.state.pending)) if (!live.has(key)) delete this.state.pending[key];
     for (const key of Object.keys(this.state.unchecked)) if (!live.has(key)) delete this.state.unchecked[key];
-  }
-
-  private async openPulls(): Promise<Pull[]> {
-    const read = await this.host.forge.pulls(this.options.repo);
-    return read.changed ? read.value : [];
   }
 
   private async settle(sha: string): Promise<{ verdict: ReturnType<typeof settleChecks>; pending: string[]; total: number }> {

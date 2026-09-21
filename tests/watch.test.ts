@@ -174,12 +174,12 @@ describe('watcher', () => {
     const forge = fakeForge({
       login: async () => 'me',
       items: script(changed([slim(1)])),
-      // tick 1: both running, the pr not yet open. tick 2: build finished, test still running. tick 3: test finished too
+      // tick 1: both running, the pr not yet open. tick 2: build finished, test still running, the pr opened. tick 3: test finished too, the head list unchanged
       runs: script(changed([run(10, 'build', false, null), run(11, 'test', false, null)]), changed([run(10, 'build', true, 'success'), run(11, 'test', false, null)], 'r2'), () => {
         test = true;
         return changed([run(10, 'build', true, 'success'), run(11, 'test', true, 'success')], 'r3');
       }),
-      pulls: script(same(), changed([pull()]), changed([pull()])),
+      pulls: script(same(), changed([pull()]), same()),
       checks: async () => [check('build', true), check('test', test)],
     });
     const delivered: string[] = [];
@@ -211,9 +211,12 @@ describe('watcher', () => {
         test = true;
         return changed([run(10, 'build', true, 'success'), run(11, 'test', true, 'success')], 'r3');
       }),
-      pulls: script(same(), changed([pull()]), changed([pull()]), same(), changed([pull()])),
+      pulls: script(same(), changed([pull()]), same(), same(), same()),
       checks: async () => [check('build', true), check('test', test)],
     });
+    let pullReads = 0;
+    const probe = forge.pulls.bind(forge);
+    forge.pulls = (...args) => (pullReads += 1, probe(...args));
     const delivered: string[] = [];
     let now = 1_000_000;
     const watcher = new Watcher(
@@ -225,8 +228,11 @@ describe('watcher', () => {
     await watcher.tick();
     expect(delivered).toHaveLength(0);
     expect(watcher.snapshot().pending).toEqual({ '3@abc1234def': { number: 3, title: 'Feat 3', branch: 'feat/3', sha: 'abc1234def', url: 'https://x/pull/3', user: 'me', since: 1_000_000, stalled: false } });
+    expect(watcher.snapshot().pulls).toEqual([pull()]);
     now += 3600_000;
     await watcher.tick();
+    // the stall check read the head list from state: one probe per tick, no refetch behind the 304
+    expect(pullReads).toBe(3);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toContain('ci stalled: pr #3 feat/3 @abc1234: Feat 3 (1 of 2 checks pending: test)');
     expect(delivered[0]).toContain('by me · https://x/pull/3 · ci stalled on pr');
@@ -276,7 +282,7 @@ describe('watcher', () => {
       items: script(changed([slim(1)])),
       // tick 1: seed with the pr open, its only check queued and no run reported. tick 2: nothing changed. tick 3: past the stall interval, the check still queued
       runs: script(changed([])),
-      pulls: script(changed([pull()]), same(), changed([pull()])),
+      pulls: script(changed([pull()]), same(), same()),
       checks: async () => [check('build', false)],
     });
     const delivered: string[] = [];
