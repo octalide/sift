@@ -1,6 +1,6 @@
-import { parseCommit, scopeHeader, type Bump, type ParsedCommit } from '../github/commits.ts';
-import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, type Version } from '../github/version.ts';
-import { tagPatternFor, type RepoConfig } from '../github/config.ts';
+import { parseCommit, scopeHeader, type Bump, type ParsedCommit } from '../repo/commits.ts';
+import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, type Version } from '../repo/version.ts';
+import { tagPatternFor, type RepoConfig } from '../repo/config.ts';
 import type { Finding, Subject } from './types.ts';
 
 export type Check = (subject: Subject, config: RepoConfig) => Finding[];

@@ -1,6 +1,6 @@
 import type { Forge } from '../forge/forge.ts';
 import type { Git } from '../forge/git.ts';
-import type { RepoConfig } from '../github/config.ts';
+import type { RepoConfig } from '../repo/config.ts';
 import { digest } from '../hash.ts';
 import { bandOf } from '../judge/bands.ts';
 import { rank } from '../judge/rank.ts';

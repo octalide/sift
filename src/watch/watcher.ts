@@ -1,9 +1,9 @@
-import type { RepoConfig } from '../github/config.ts';
+import type { RepoConfig } from '../repo/config.ts';
 import type { Forge, PullHead, Rate } from '../forge/forge.ts';
 import type { Judge } from '../judge/types.ts';
 import type { Finding, Pack } from '../packs/types.ts';
 import { formatReport, runChecks, runPack } from '../packs/run.ts';
-import { issueSubject } from '../github/subjects.ts';
+import { issueSubject } from '../repo/subjects.ts';
 import { ciSubject } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
 import { diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';

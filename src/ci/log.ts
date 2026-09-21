@@ -1,5 +1,5 @@
 import type { Forge, JobLog, LogStep, PullHead } from '../forge/forge.ts';
-import { diffFiles, type DiffFile } from '../github/diff.ts';
+import { diffFiles, type DiffFile } from '../repo/diff.ts';
 import type { Subject } from '../packs/types.ts';
 import { truncate } from '../tokens.ts';
 

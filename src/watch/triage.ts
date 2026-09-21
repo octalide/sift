@@ -1,7 +1,7 @@
 import type { Judge } from '../judge/types.ts';
 import { runPack } from '../packs/run.ts';
 import type { Pack, Subject } from '../packs/types.ts';
-import type { RepoConfig } from '../github/config.ts';
+import type { RepoConfig } from '../repo/config.ts';
 import { truncate } from '../tokens.ts';
 import type { WatchEvent } from './poll.ts';
 

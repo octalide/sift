@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Check, Conditional, Run, WatchItem } from '../src/forge/forge.ts';
-import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
+import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
