@@ -217,7 +217,8 @@ export const register: Register = (on, rawOptions) => {
       }
       case 'plan': {
         if (opts.text === undefined) throw new Error('the plan pack reads the plan from text: grade(pack: "plan", subject: "<issue number>", text: "<plan>")');
-        return planSubject(rt.forge, needRepo(), number(), opts.text);
+        const p = parsed('issue');
+        return planSubject(rt.forge, p.repo ?? needRepo(), p.number, opts.text);
       }
       default:
         return textSubject(opts.text ?? ref);
