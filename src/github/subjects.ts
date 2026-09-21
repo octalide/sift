@@ -1,10 +1,11 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
-import { LOG_FORMAT, maxBump, parseLog, parseSemver, requiredBump, type Bump, type ParsedCommit } from './commits.ts';
+import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, type Bump, type ParsedCommit } from './commits.ts';
+import { compareVersions, parseTag, SEMVER_PATTERN, type Version } from './version.ts';
 import { manifestChanges, manifestFormat, type ManifestChange } from './manifest.ts';
 import { lineDiff } from './diff.ts';
 import type { GitSource } from './source.ts';
-import type { RepoConfig } from './config.ts';
+import { tagPatternFor, type RepoConfig } from './config.ts';
 import type { Gh } from './gh.ts';
 
 const BODY_CAP = 20_000;
@@ -173,7 +174,7 @@ export async function prSubject(gh: Gh, repo: string, n: number, config: RepoCon
 
 export async function commitSubject(gh: Gh, range: string, config: RepoConfig): Promise<Subject> {
   const raw = await gh.git(range.includes('..') ? ['log', LOG_FORMAT, '--no-merges', range] : ['log', LOG_FORMAT, '-1', range]);
-  const commits = parseLog(raw);
+  const commits = parseLog(raw, config.commits.format);
   const single = commits.length === 1 ? commits[0]! : undefined;
   const diff = single ? truncate(await gh.git(['show', '--format=', '--stat', '-p', single.sha]).catch(() => ''), DIFF_CAP, '\n[diff truncated]') : undefined;
   return {
@@ -192,26 +193,25 @@ export async function commitSubject(gh: Gh, range: string, config: RepoConfig): 
   };
 }
 
-// the highest semver tag with the prefix, not the nearest ancestor: release tags sit on main and are unreachable from dev
-export function lastReleaseTag(tags: string[], prefix: string): string | undefined {
-  let best: { tag: string; v: [number, number, number] } | undefined;
+// the highest release tag, not the nearest ancestor: release tags sit on main and are unreachable from dev
+// without a version pattern the tags are still ordered as semver, so the release has a last tag to read commits from
+export function lastReleaseTag(tags: string[], release: RepoConfig['release']): { tag: string; version: Version } | undefined {
+  const patterns = { tagPattern: release.tagPattern ?? tagPatternFor(release.tagPrefix), versionPattern: release.versionPattern ?? SEMVER_PATTERN };
+  let best: { tag: string; version: Version } | undefined;
   for (const tag of tags) {
-    const v = parseSemver(tag, prefix);
-    if (!v) continue;
-    if (!best || compareSemver(v, best.v) > 0) best = { tag, v };
+    const version = parseTag(tag, patterns);
+    if (!version) continue;
+    if (!best || compareVersions(version, best.version) > 0) best = { tag, version };
   }
-  return best?.tag;
-}
-
-function compareSemver(a: [number, number, number], b: [number, number, number]): number {
-  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+  return best;
 }
 
 export async function releaseSubject(source: GitSource, config: RepoConfig): Promise<Subject> {
-  const lastTag = lastReleaseTag(await source.tags(), config.release.tagPrefix);
+  const last = lastReleaseTag(await source.tags(), config.release);
+  const lastTag = last?.tag;
   const range = lastTag ? `${lastTag}..${source.head}` : source.head;
-  const commits = await source.log(lastTag);
-  const version = lastTag ? parseSemver(lastTag, config.release.tagPrefix) : undefined;
+  const commits = (await source.log(lastTag)).map((c) => parseCommit(c.sha, c.message, config.commits.format));
+  const version = config.release.versionPattern ? last?.version : undefined;
   const commitBump = requiredBump(commits, version, config.release.zeroVerBreaking);
   const manifests: ManifestChange[] = [];
   const unparsed: string[] = [];

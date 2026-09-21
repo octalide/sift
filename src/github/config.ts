@@ -1,9 +1,23 @@
+import { CONVENTIONAL_FORMAT } from './commits.ts';
+import { CALVER_PATTERN, SEMVER_PATTERN } from './version.ts';
+
+// presets expand to a regex at resolve time; an explicit pattern beside one wins
+export const COMMIT_FORMATS = { conventional: CONVENTIONAL_FORMAT } as const;
+// matched against type(scope), or the bare type without a scope
+export const SCOPE_PATTERNS = { issue: String.raw`^(chore\(.*\)|[^(]+(\(#\d+\))?)$`, none: String.raw`^[^(]*$` } as const;
+export const VERSION_PATTERNS = { semver: SEMVER_PATTERN, calver: CALVER_PATTERN } as const;
+
 export type RepoConfig = {
   commits: {
-    convention: 'conventional' | 'none';
+    // preset for format: conventional is the conventional commits header, none runs no format check
+    convention: keyof typeof COMMIT_FORMATS | 'none';
+    // regex over the subject line with the named groups type, scope, breaking and description
+    format?: string;
     types: string[];
-    // issue: scope must be #<n>; any: free scope; none: no scope allowed
-    scope: 'issue' | 'any' | 'none';
+    // preset for scopePattern: issue requires #<n> (chore excepted), any accepts anything, none forbids a scope
+    scope: keyof typeof SCOPE_PATTERNS | 'any';
+    // regex over the header's type(scope), or the bare type when there is no scope
+    scopePattern?: string;
     forbidTrailers: string[];
   };
   branches: {
@@ -21,7 +35,8 @@ export type RepoConfig = {
   };
   prs: {
     linkIssue: boolean;
-    target?: string;
+    // branches a PR may target, as a list of names or a regex; target: "dev" from older configs reads as targets: ["dev"]
+    targets?: string[] | string;
     templateSections: string[];
   };
   rules: {
@@ -31,8 +46,12 @@ export type RepoConfig = {
     maxRules: number;
   };
   release: {
-    // unset: no version is computed or checked
-    scheme?: 'semver';
+    // preset for versionPattern; with neither set no version is computed or checked
+    scheme?: keyof typeof VERSION_PATTERNS;
+    // regex over a version: its numeric named groups order it, major, minor and patch (when named) bump it
+    versionPattern?: string;
+    // regex over a tag with a version group; by default tagPrefix followed by the version
+    tagPattern?: string;
     // unset: no changelog is read or checked
     changelog?: string;
     tagPrefix: string;
@@ -75,7 +94,7 @@ function merge<T extends Record<string, unknown>>(base: T, over: Partial<T> | un
   return out as T;
 }
 
-// layers apply in order, each field by field over the last
+// layers apply in order, each field by field over the last; presets expand once the layers are merged
 export function resolveConfig(layers: unknown | unknown[], defaultBranch?: string): RepoConfig {
   let config = DEFAULT_CONFIG;
   for (const raw of Array.isArray(layers) ? layers : [layers]) {
@@ -84,7 +103,45 @@ export function resolveConfig(layers: unknown | unknown[], defaultBranch?: strin
   if (config.branches.protected.length === 0 && defaultBranch) {
     config.branches = { ...config.branches, protected: [defaultBranch] };
   }
-  return config;
+  return expandPresets(config);
+}
+
+function expandPresets(config: RepoConfig): RepoConfig {
+  const commits = { ...config.commits };
+  if (commits.format === undefined && commits.convention !== 'none') commits.format = COMMIT_FORMATS[commits.convention];
+  if (commits.scopePattern === undefined && commits.scope !== 'any') commits.scopePattern = SCOPE_PATTERNS[commits.scope];
+  const { target, ...prs } = config.prs as RepoConfig['prs'] & { target?: string };
+  if (prs.targets === undefined && target !== undefined) prs.targets = [target];
+  const release = { ...config.release };
+  if (release.versionPattern === undefined && release.scheme !== undefined) release.versionPattern = VERSION_PATTERNS[release.scheme];
+  if (release.tagPattern === undefined) release.tagPattern = tagPatternFor(release.tagPrefix);
+  const resolved = { ...config, commits, prs, release };
+  for (const [field, pattern] of [
+    ['commits.format', commits.format],
+    ['commits.scopePattern', commits.scopePattern],
+    ['branches.pattern', resolved.branches.pattern],
+    ['prs.targets', typeof prs.targets === 'string' ? prs.targets : undefined],
+    ['release.versionPattern', release.versionPattern],
+    ['release.tagPattern', release.tagPattern],
+  ] as const) {
+    if (pattern === undefined) continue;
+    try {
+      new RegExp(pattern);
+    } catch (e) {
+      throw new Error(`sift config: ${field} is not a valid regex: ${(e as Error).message}`);
+    }
+  }
+  return resolved;
+}
+
+// the tag pattern a prefix stands for: the prefix, then the version
+export function tagPatternFor(prefix: string): string {
+  return `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?<version>.+)$`;
+}
+
+// the branch a release is cut from when none is named: the first listed target, none when targets is a regex
+export function defaultTarget(config: RepoConfig): string | undefined {
+  return Array.isArray(config.prs.targets) ? config.prs.targets[0] : undefined;
 }
 
 // the global file: $XDG_CONFIG_HOME/sift/config.json, else ~/.config/sift/config.json

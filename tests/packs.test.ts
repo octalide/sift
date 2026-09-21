@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Gh } from '../src/github/gh.ts';
-import { bumpVersion, parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
+import { parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
+import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, SEMVER_PATTERN, CALVER_PATTERN } from '../src/github/version.ts';
 import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/github/manifest.ts';
 import { lineDiff } from '../src/github/diff.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
@@ -21,8 +22,8 @@ const answering = (answers: Answers): Judge => ({
 describe('conventional commits', () => {
   it('parses type, scope, breaking marker and trailers', () => {
     const c = parseCommit('abc', 'feat(#12)!: add thing\n\nbody\n\nCo-Authored-By: x');
-    expect(c).toMatchObject({ type: 'feat', scope: '#12', breaking: true, conventional: true, trailers: ['Co-Authored-By'] });
-    expect(parseCommit('d', 'random message').conventional).toBe(false);
+    expect(c).toMatchObject({ type: 'feat', scope: '#12', description: 'add thing', breaking: true, matched: true, trailers: ['Co-Authored-By'] });
+    expect(parseCommit('d', 'random message').matched).toBe(false);
     expect(parseCommit('e', 'fix: x\n\nBREAKING CHANGE: y').breaking).toBe(true);
   });
 
@@ -31,11 +32,42 @@ describe('conventional commits', () => {
     expect(requiredBump(log)).toBe('minor');
     expect(requiredBump([parseCommit('x', 'refactor!: y')])).toBe('major');
     expect(requiredBump([parseCommit('x', 'docs: y')])).toBe('none');
-    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], [0, 17, 2])).toBe('minor');
-    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], [0, 17, 2], 'major')).toBe('major');
-    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], [1, 0, 0])).toBe('major');
-    expect(bumpVersion([0, 3, 1], 'minor')).toEqual([0, 4, 0]);
-    expect(bumpVersion([1, 3, 1], 'major')).toEqual([2, 0, 0]);
+    const v = (raw: string) => parseVersion(raw, SEMVER_PATTERN)!;
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], v('0.17.2'))).toBe('minor');
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], v('0.17.2'), 'major')).toBe('major');
+    expect(requiredBump([parseCommit('x', 'feat(#222)!: y')], v('1.0.0'))).toBe('major');
+    expect(bumpVersion(v('0.3.1'), 'minor', SEMVER_PATTERN)).toBe('0.4.0');
+    expect(bumpVersion(v('1.3.1'), 'major', SEMVER_PATTERN)).toBe('2.0.0');
+    expect(bumpVersion(v('1.9.9-rc.1'), 'patch', SEMVER_PATTERN)).toBe('1.9.10');
+    expect(bumpBetween(v('1.2.3'), v('1.3.0'))).toBe('minor');
+  });
+
+  it('parses commits against a custom format', () => {
+    const format = String.raw`^\[(?<type>[A-Z]+)\](?<breaking>!)? (?<description>.+)$`;
+    const c = parseCommit('a', '[FIX]! crash on start', format);
+    expect(c).toMatchObject({ type: 'FIX', breaking: true, matched: true, description: 'crash on start' });
+    expect(c.scope).toBeUndefined();
+    expect(parseCommit('b', 'fix: x', format).matched).toBe(false);
+    expect(parseLog('\u001eaaa\n[FEAT] a\n', format)[0]!.type).toBe('FEAT');
+  });
+});
+
+describe('versions', () => {
+  it('orders versions by their numeric groups and finds the version inside a tag', () => {
+    const semver = { tagPattern: '^v(?<version>.+)$', versionPattern: SEMVER_PATTERN };
+    expect(parseTag('v1.2.3', semver)).toMatchObject({ raw: '1.2.3', groups: { major: '1', minor: '2', patch: '3' }, numbers: [1, 2, 3] });
+    expect(parseTag('nightly', semver)).toBeUndefined();
+    expect(parseTag('v1.2', semver)).toBeUndefined();
+    expect(compareVersions(parseVersion('0.10.0', SEMVER_PATTERN)!, parseVersion('0.9.1', SEMVER_PATTERN)!)).toBeGreaterThan(0);
+    const cal = parseVersion('2026.9.1', CALVER_PATTERN)!;
+    expect(cal.numbers).toEqual([2026, 9, 1]);
+    expect(compareVersions(parseVersion('2026.10', CALVER_PATTERN)!, cal)).toBeGreaterThan(0);
+    expect(bumpVersion(cal, 'minor', CALVER_PATTERN)).toBeUndefined();
+    expect(bumpBetween(cal, cal)).toBeUndefined();
+    const release = { tagPattern: '^release-(?<version>.+)$', versionPattern: String.raw`^(?<major>\d+)\.(?<minor>\d+)$` };
+    expect(parseTag('release-3.4', release)!.numbers).toEqual([3, 4]);
+    expect(bumpVersion(parseTag('release-3.4', release)!, 'minor', release.versionPattern)).toBe('3.5');
+    expect(bumpVersion(parseTag('release-3.4', release)!, 'patch', release.versionPattern)).toBeUndefined();
   });
 });
 
@@ -51,7 +83,7 @@ describe('mechanical checks', () => {
     };
     const findings = runChecks(BUILTIN_PACKS['commit']!, subject, config);
     expect(findings.map((f) => f.message)).toEqual([
-      '1234567 scope must be #<issue>, got (auth)',
+      '1234567 scope (auth), feat(auth) does not match ^(chore\\(.*\\)|[^(]+(\\(#\\d+\\))?)$',
       '1234567 carries forbidden trailer Co-Authored-By',
       '89abcde uses unknown type wat',
     ]);
@@ -67,10 +99,63 @@ describe('mechanical checks', () => {
       options: {},
     };
     expect(runChecks(BUILTIN_PACKS['commit']!, subject, resolveConfig(undefined))).toEqual([]);
-    const release: Subject = { kind: 'release', ref: 'HEAD', state: {}, facts: { has_commits: true, bump: 'minor', version: [1, 2, 3], proposed: 'v1.2.4' }, options: {} };
+    const version = parseVersion('1.2.3', SEMVER_PATTERN);
+    const release: Subject = { kind: 'release', ref: 'HEAD', state: {}, facts: { has_commits: true, bump: 'minor', version, proposed: 'v1.2.4' }, options: {} };
     expect(runChecks(BUILTIN_PACKS['release']!, release, resolveConfig(undefined))).toEqual([]);
     const semver = runChecks(BUILTIN_PACKS['release']!, release, resolveConfig({ release: { scheme: 'semver' } }));
     expect(semver.map((f) => f.message)).toEqual(['required bump: minor, next version v1.3.0, from commits minor', 'v1.2.4 is a patch bump, the changes require minor']);
+  });
+
+  it('checks a calver release for order, not for a bump', () => {
+    const config = resolveConfig({ release: { scheme: 'calver' } });
+    const version = parseVersion('2026.8.2', CALVER_PATTERN);
+    const at = (proposed: string): Subject => ({ kind: 'release', ref: 'HEAD', state: {}, facts: { has_commits: true, bump: 'minor', version, proposed }, options: {} });
+    expect(runChecks(BUILTIN_PACKS['release']!, at('v2026.9'), config).map((f) => f.message)).toEqual(['required bump: minor, from commits minor']);
+    expect(runChecks(BUILTIN_PACKS['release']!, at('v2026.8.1'), config).map((f) => f.message)).toEqual(['required bump: minor, from commits minor', 'v2026.8.1 is not newer than 2026.8.2']);
+    expect(runChecks(BUILTIN_PACKS['release']!, at('v1.2.3'), config).map((f) => f.message)[1]).toBe(`v1.2.3 does not match the version pattern ${CALVER_PATTERN}`);
+  });
+
+  it('reads the resolved regexes, whichever way they were configured', () => {
+    const commit = (config: unknown, message: string) => runChecks(BUILTIN_PACKS['commit']!, { kind: 'commit', ref: 'r', state: {}, facts: { commits: [parseCommit('1234567', message, resolveConfig(config).commits.format)] }, options: {} }, resolveConfig(config)).map((f) => f.message);
+    const format = String.raw`^(?<type>[A-Z]+)-(?<scope>\d+): (?<description>.+)$`;
+    expect(commit({ commits: { format, types: ['FIX'], scopePattern: String.raw`^FIX\(\d+\)$` } }, 'FIX-12: crash')).toEqual([]);
+    expect(commit({ commits: { format, types: ['FIX'], scopePattern: String.raw`^FIX\(\d+\)$` } }, 'fix(#12): crash')).toEqual(['1234567 does not match the commit format: fix(#12): crash']);
+    expect(commit({ commits: { convention: 'conventional', scope: 'none' } }, 'fix(#12): crash')).toEqual(['1234567 scope (#12), fix(#12) does not match ^[^(]*$']);
+    expect(commit({ commits: { convention: 'conventional', scope: 'issue' } }, 'chore(release): 0.9.1')).toEqual([]);
+    expect(commit({ commits: { convention: 'conventional', scope: 'issue' } }, 'chore: tidy')).toEqual([]);
+    expect(commit({ commits: { convention: 'none', format: String.raw`^(?<type>\w+): ` } }, 'wat: y')).toEqual(['1234567 uses unknown type wat']);
+    const pr = (targets: unknown, base: string) => runChecks(BUILTIN_PACKS['pr']!, { kind: 'pr', ref: 'r', state: {}, facts: { base, linked: [1] }, options: {} }, resolveConfig({ prs: targets })).map((f) => f.message);
+    expect(pr({ target: 'dev' }, 'dev')).toEqual([]);
+    expect(pr({ target: 'dev' }, 'main')).toEqual(['targets main, expected dev']);
+    expect(pr({ targets: ['dev', 'main'] }, 'main')).toEqual([]);
+    expect(pr({ targets: '^release/' }, 'release/1.0')).toEqual([]);
+    expect(pr({ targets: '^release/' }, 'dev')).toEqual(['targets dev, expected a branch matching ^release/']);
+  });
+
+  it('expands presets and lets an explicit pattern override them', () => {
+    const preset = resolveConfig({ commits: { convention: 'conventional', scope: 'issue' }, release: { scheme: 'semver', tagPrefix: 'rel.' } });
+    expect(preset.commits.format).toBe(String.raw`^(?<type>\w+)(?:\((?<scope>[^)]*)\))?(?<breaking>!)?:\s+(?<description>.+)$`);
+    expect(preset.commits.scopePattern).toBe(String.raw`^(chore\(.*\)|[^(]+(\(#\d+\))?)$`);
+    expect(preset.release.versionPattern).toBe(SEMVER_PATTERN);
+    expect(preset.release.tagPattern).toBe(String.raw`^rel\.(?<version>.+)$`);
+    const explicit = resolveConfig({ commits: { convention: 'conventional', format: '^x$', scope: 'issue', scopePattern: '^y$' }, release: { scheme: 'calver', versionPattern: '^z$', tagPattern: '^w$' } });
+    expect(explicit.commits).toMatchObject({ format: '^x$', scopePattern: '^y$' });
+    expect(explicit.release).toMatchObject({ versionPattern: '^z$', tagPattern: '^w$' });
+    const off = resolveConfig(undefined);
+    expect(off.commits.format).toBeUndefined();
+    expect(off.commits.scopePattern).toBeUndefined();
+    expect(off.release.versionPattern).toBeUndefined();
+    expect(off.release.tagPattern).toBe('^v(?<version>.+)$');
+    expect(() => resolveConfig({ branches: { pattern: '(' } })).toThrow('branches.pattern is not a valid regex');
+    // this repo's own .sift/config.json, which must keep resolving to the presets it names
+    const own = resolveConfig({
+      commits: { convention: 'conventional', scope: 'issue', forbidTrailers: ['Co-Authored-By'] },
+      branches: { protected: ['main', 'dev'], pattern: '^(feat|fix|chore|hotfix)/\\d+$' },
+      prs: { linkIssue: false, target: 'dev' },
+    });
+    expect(own.commits).toMatchObject({ format: preset.commits.format, scopePattern: preset.commits.scopePattern, forbidTrailers: ['Co-Authored-By'] });
+    expect(own.prs.targets).toEqual(['dev']);
+    expect(own.branches.pattern).toBe('^(feat|fix|chore|hotfix)/\\d+$');
   });
 
   it('reads dependency floors out of a manifest and names the changed keys', () => {
@@ -85,7 +170,7 @@ describe('mechanical checks', () => {
       kind: 'release',
       ref: 'HEAD',
       state: {},
-      facts: { has_commits: true, bump: 'minor', commitBump: 'none', manifestBump: 'minor', manifests: changes.slice(0, 1), version: [0, 7, 0] },
+      facts: { has_commits: true, bump: 'minor', commitBump: 'none', manifestBump: 'minor', manifests: changes.slice(0, 1), version: parseVersion('0.7.0', SEMVER_PATTERN) },
       options: {},
     };
     const findings = runChecks(BUILTIN_PACKS['release']!, release, resolveConfig({ release: { scheme: 'semver' } }));
@@ -188,7 +273,7 @@ describe('mechanical checks', () => {
       kind: 'release',
       ref: 'HEAD',
       state: {},
-      facts: { has_commits: true, bump: 'minor', commitBump: 'minor', manifests: [], manifestsUnparsed: ['Makefile'], version: [1, 0, 0] },
+      facts: { has_commits: true, bump: 'minor', commitBump: 'minor', manifests: [], manifestsUnparsed: ['Makefile'], version: parseVersion('1.0.0', SEMVER_PATTERN) },
       options: {},
     };
     const findings = runChecks(BUILTIN_PACKS['release']!, release, resolveConfig({ release: { scheme: 'semver' } }));
@@ -237,7 +322,8 @@ describe('mechanical checks', () => {
   it('layers config sources in order', () => {
     const config = resolveConfig([{ commits: { convention: 'conventional', scope: 'issue' }, prs: { target: 'dev' } }, { commits: { scope: 'any' } }], 'main');
     expect(config.commits).toMatchObject({ convention: 'conventional', scope: 'any' });
-    expect(config.prs.target).toBe('dev');
+    expect(config.commits.scopePattern).toBeUndefined();
+    expect(config.prs.targets).toEqual(['dev']);
     expect(config.branches.protected).toEqual(['main']);
   });
 
@@ -318,8 +404,11 @@ describe('github helpers', () => {
   });
 
   it('picks the highest semver tag, not the nearest ancestor', () => {
-    expect(lastReleaseTag(['v0.3.4', 'v0.10.0', 'v0.9.1', 'nightly'], 'v')).toBe('v0.10.0');
-    expect(lastReleaseTag([], 'v')).toBeUndefined();
+    const release = resolveConfig(undefined).release;
+    expect(lastReleaseTag(['v0.3.4', 'v0.10.0', 'v0.9.1', 'nightly'], release)?.tag).toBe('v0.10.0');
+    expect(lastReleaseTag([], release)).toBeUndefined();
+    const cal = resolveConfig({ release: { scheme: 'calver', tagPattern: '^(?<version>\\d{4}\\..+)$' } }).release;
+    expect(lastReleaseTag(['2026.9', '2025.12.3', 'v1.0.0'], cal)?.tag).toBe('2026.9');
   });
 
   it('drops merge commits from a pull request before the convention judges them', async () => {

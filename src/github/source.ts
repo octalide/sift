@@ -1,4 +1,4 @@
-import { LOG_FORMAT, parseCommit, parseLog, type ParsedCommit } from './commits.ts';
+import { LOG_FORMAT, splitLog, type RawCommit } from './commits.ts';
 import type { Gh } from './gh.ts';
 
 // where a release reads its history from: the checkout when the session has one, GitHub otherwise
@@ -6,8 +6,8 @@ export type GitSource = {
   // the ref the release is cut from, as the caller names it
   head: string;
   tags: () => Promise<string[]>;
-  // non-merge commits reachable from head and not from base; base undefined means all of history
-  log: (base: string | undefined) => Promise<ParsedCommit[]>;
+  // non-merge commits reachable from head and not from base, unparsed; base undefined means all of history
+  log: (base: string | undefined) => Promise<RawCommit[]>;
   // a file at a ref, undefined when absent
   show: (ref: string, path: string) => Promise<string | undefined>;
 };
@@ -20,7 +20,7 @@ export function localSource(gh: Gh, head: string, read: ReadLike, exists: Exists
   return {
     head,
     tags: async () => (await gh.git(['tag', '--list']).catch(() => '')).split('\n').map((t) => t.trim()).filter(Boolean),
-    log: async (base) => parseLog(await gh.git(['log', LOG_FORMAT, '--no-merges', base ? `${base}..${head}` : head])),
+    log: async (base) => splitLog(await gh.git(['log', LOG_FORMAT, '--no-merges', base ? `${base}..${head}` : head])),
     show: async (ref, path) => {
       if (ref === 'HEAD' && (await exists(path))) return read(path);
       return gh.git(['show', `${ref}:${path}`]).catch(() => undefined);
@@ -31,7 +31,7 @@ export function localSource(gh: Gh, head: string, read: ReadLike, exists: Exists
 type Compare = { commits: { sha: string; parents: { sha: string }[]; commit: { message: string } }[] };
 
 export function remoteSource(gh: Gh, repo: string, head: string): GitSource {
-  const commit = (c: Compare['commits'][number]) => parseCommit(c.sha, c.commit.message);
+  const commit = (c: Compare['commits'][number]): RawCommit => ({ sha: c.sha, message: c.commit.message });
   return {
     head,
     tags: async () => (await gh.pages<string>(`repos/${repo}/tags`, '[.[].name]')).flat(),
