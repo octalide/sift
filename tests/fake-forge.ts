@@ -28,6 +28,7 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     compareDiff: async () => '',
     commits: async () => [],
     file: async () => undefined,
+    contents: async () => [],
     items: async () => ({ changed: false, rate: {} }),
     runs: async () => ({ changed: false, rate: {} }),
     pulls: async () => ({ changed: true, rate: {}, value: [] }),
