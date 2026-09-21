@@ -1,3 +1,7 @@
+import type { Check, PullHead, Run, WatchItem } from '../forge/forge.ts';
+
+export type { Run } from '../forge/forge.ts';
+
 export type Item = {
   kind: 'issue' | 'pr';
   title: string;
@@ -14,18 +18,6 @@ export type Item = {
   url: string;
 };
 
-export type Run = {
-  name: string;
-  branch: string;
-  event: string;
-  status: string;
-  conclusion: string | null;
-  sha: string;
-  url: string;
-  actor: string;
-  updated: string;
-};
-
 export type WatchEvent = {
   id: string;
   kind: 'issue' | 'pr' | 'ci';
@@ -36,11 +28,18 @@ export type WatchEvent = {
   url: string;
   changes: string[];
   at: number;
-  // ci only
+  // ci only: the forge's word for the outcome and whether it passes
   conclusion?: string | null;
+  ok?: boolean;
   branch?: string;
   // every check on the head of an open pr completed; number is the pr
   settled?: boolean;
+  // checks on the head of an open pr did not all finish within the stall interval; number is the pr
+  stalled?: boolean;
+  // settled only: the checks that failed, with the job id of each whose log the forge keeps
+  failed?: FailedCheck[];
+  // settled failure only: the ci pack's report on each failed check with a log, attached at delivery
+  reports?: string[];
   // mechanical findings of the issue pack on a new issue
   findings?: string[];
   // set when the event is new
@@ -48,7 +47,7 @@ export type WatchEvent = {
 };
 
 // bump when the stored shape changes; a store from an older version is reseeded
-export const STATE_VERSION = 3;
+export const STATE_VERSION = 7;
 
 export type WatchState = {
   version: number;
@@ -59,7 +58,13 @@ export type WatchState = {
   runs: Record<string, Run>;
   // pr@sha -> conclusion, one settled delivery per head
   settled: Record<string, string>;
-  etags: { issues?: string; runs?: string };
+  // pr@sha -> the open pr head whose checks have not all finished, one stalled delivery per head
+  pending: Record<string, PendingHead>;
+  // pr@sha -> the open pr head with no check or status on it yet, looked up once; neither settled nor pending
+  unchecked: Record<string, true>;
+  // the open pr heads as of the last 200 on the pulls probe; a 304 leaves it in place
+  pulls: PullHead[];
+  etags: { issues?: string; runs?: string; pulls?: string };
   deferred: Deferred[];
   paused: boolean;
   login?: string;
@@ -75,6 +80,18 @@ export type Deferred = {
   label?: string;
 };
 
+export type PendingHead = {
+  number: number;
+  title: string;
+  branch: string;
+  sha: string;
+  url: string;
+  user: string;
+  // when the head was first seen open with unfinished checks
+  since: number;
+  stalled: boolean;
+};
+
 export function initialState(): WatchState {
   return {
     version: STATE_VERSION,
@@ -83,6 +100,9 @@ export function initialState(): WatchState {
     items: {},
     runs: {},
     settled: {},
+    pending: {},
+    unchecked: {},
+    pulls: [],
     etags: {},
     deferred: [],
     paused: false,
@@ -101,40 +121,20 @@ export function hashOf(text: string): string {
   return (h >>> 0).toString(16);
 }
 
-// the slim record ITEM_JQ produces server side, so a page of 100 stays small
-export const ITEM_JQ = '[.[] | {n: .number, t: .title, s: .state, u: .user.login, ut: .user.type, bl: ((.body // "") | length), bp: ((.body // "")[0:400]), c: .comments, l: ([.labels[].name] | sort | join(",")), up: .updated_at, cr: .created_at, url: .html_url, pr: (.pull_request != null), m: (.pull_request.merged_at != null)}]';
-
-export type RawItem = {
-  n: number;
-  t: string;
-  s: string;
-  u: string;
-  ut?: string;
-  bl: number;
-  bp: string;
-  c: number;
-  l: string;
-  up: string;
-  cr: string;
-  url: string;
-  pr: boolean;
-  m: boolean;
-};
-
-export function toItem(raw: RawItem): Item {
+export function toItem(item: WatchItem): Item {
   return {
-    kind: raw.pr ? 'pr' : 'issue',
-    title: raw.t,
-    state: raw.s,
-    user: raw.u,
-    bot: raw.ut === 'Bot' || raw.u.endsWith('[bot]'),
-    bodySig: `${raw.bl}:${hashOf(raw.bp)}`,
-    created: raw.cr,
-    comments: raw.c,
-    labels: raw.l,
-    updated: raw.up,
-    merged: raw.m,
-    url: raw.url,
+    kind: item.kind,
+    title: item.title,
+    state: item.state,
+    user: item.author.login,
+    bot: item.author.bot,
+    bodySig: `${item.body.length}:${hashOf(item.body.head)}`,
+    created: item.createdAt,
+    comments: item.comments,
+    labels: [...item.labels].sort().join(','),
+    updated: item.updatedAt,
+    merged: item.merged,
+    url: item.url,
   };
 }
 
@@ -162,43 +162,15 @@ export function diffItems(old: Record<string, Item>, fresh: Record<string, Item>
   return events;
 }
 
-type RawRun = {
-  id: number;
-  name: string;
-  head_branch: string;
-  event: string;
-  status: string;
-  conclusion: string | null;
-  head_sha: string;
-  html_url: string;
-  actor?: { login: string };
-  updated_at: string;
-};
-
-export function toRuns(raw: RawRun[]): Record<string, Run> {
-  return Object.fromEntries(
-    raw.map((r) => [
-      String(r.id),
-      {
-        name: r.name,
-        branch: r.head_branch,
-        event: r.event,
-        status: r.status,
-        conclusion: r.conclusion,
-        sha: r.head_sha,
-        url: r.html_url,
-        actor: r.actor?.login ?? '',
-        updated: r.updated_at,
-      },
-    ]),
-  );
+export function toRuns(runs: Run[]): Record<string, Run> {
+  return Object.fromEntries(runs.map((r) => [r.id, r]));
 }
 
 export function diffRuns(old: Record<string, Run>, fresh: Record<string, Run>, now: number): WatchEvent[] {
   const events: WatchEvent[] = [];
   for (const [id, v] of Object.entries(fresh)) {
     const o = old[id];
-    if (v.status !== 'completed' || (o && o.status === 'completed')) continue;
+    if (!v.done || o?.done) continue;
     events.push({
       id: `ci#${id}`,
       kind: 'ci',
@@ -209,6 +181,7 @@ export function diffRuns(old: Record<string, Run>, fresh: Record<string, Run>, n
       changes: [`ci ${v.conclusion ?? 'unknown'}`],
       at: now,
       conclusion: v.conclusion,
+      ok: v.ok,
       branch: v.branch,
       isNew: true,
     });
@@ -231,20 +204,23 @@ export function trimSettled(settled: Record<string, string>, keep = 200): Record
   return Object.fromEntries(keys.map((k) => [k, settled[k]!]));
 }
 
-export type CheckRun = { name: string; status: string; conclusion: string | null };
-export type CommitStatus = { context: string; state: string };
+export type FailedCheck = Pick<Check, 'name' | 'id'>;
 
-const failed = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'error']);
+// the verdict on a head once every check has finished, undefined while any is pending
+export function settleChecks(checks: Check[]): { conclusion: 'success' | 'failure'; total: number; failed: FailedCheck[] } | undefined {
+  if (checks.some((c) => !c.done)) return undefined;
+  const bad = checks.filter((c) => !c.ok).map((c) => ({ name: c.name, ...(c.id === undefined ? {} : { id: c.id }) }));
+  return { conclusion: bad.length > 0 ? 'failure' : 'success', total: checks.length, failed: bad };
+}
 
-// the verdict on a head once every check run and commit status has finished, undefined while any is pending
-export function settleChecks(checks: CheckRun[], statuses: CommitStatus[]): { conclusion: 'success' | 'failure'; total: number; failed: string[] } | undefined {
-  if (checks.some((c) => c.status !== 'completed') || statuses.some((s) => s.state === 'pending')) return undefined;
-  const bad = [...checks.filter((c) => failed.has(c.conclusion ?? '')).map((c) => c.name), ...statuses.filter((s) => failed.has(s.state)).map((s) => s.context)];
-  return { conclusion: bad.length > 0 ? 'failure' : 'success', total: checks.length + statuses.length, failed: bad };
+// the checks on a head that have not finished, named as the settled verdict names failures
+export function pendingChecks(checks: Check[]): { pending: string[]; total: number } {
+  return { pending: checks.filter((c) => !c.done).map((c) => c.name), total: checks.length };
 }
 
 export function formatEvent(e: WatchEvent): string {
   if (e.kind === 'ci' && e.settled) return `ci settled ${e.conclusion ?? 'unknown'}: pr #${e.number} ${e.title}`;
+  if (e.kind === 'ci' && e.stalled) return `ci stalled: pr #${e.number} ${e.title}`;
   const head = e.kind === 'ci' ? `ci ${e.conclusion ?? 'unknown'}: ${e.title}` : `${e.kind} #${e.number} ${e.changes.join(', ')}: ${e.title}`;
   return head;
 }

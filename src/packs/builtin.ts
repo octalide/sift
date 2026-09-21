@@ -17,6 +17,24 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
         },
         severity: 'warn',
       },
+      implementable: {
+        type: 'noul',
+        instructions: 'A competent engineer could implement this from the body without making a decision the body does not make.',
+        criteria: {
+          true: 'Every choice the work turns on is settled in the body: one design, named interfaces, stated behaviour on the edges it raises.',
+          false: 'The body leaves a decision open: two valid designs it does not choose between, an interface it needs but does not name, or an edge case whose behaviour it does not state.',
+        },
+        severity: 'fail',
+      },
+      scope_clear: {
+        type: 'noul',
+        instructions: 'The body states what is in and out of scope, so a reviewer could reject an unrelated change to the PR that implements it.',
+        criteria: {
+          true: 'The body bounds the change: what it touches, what it leaves alone, or what done looks like, clearly enough that a change outside it is recognisable.',
+          false: 'The body names a goal with no bounds, so any change in its area could be argued to belong.',
+        },
+        severity: 'warn',
+      },
       type: {
         type: 'choice',
         instructions: 'Which kind of issue is this, judged from the title and body alone?',
@@ -45,6 +63,13 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
         severity: 'warn',
         hi: 0.7,
       },
+      blocked_by: {
+        type: 'choice',
+        instructions: 'Which open issue, if any, must be resolved before work on this one can start? Only when the title or body says it depends on that issue, or the same code must change there first. Otherwise none.',
+        options: 'open_issues',
+        when: 'has_others',
+        severity: 'info',
+      },
       readiness: {
         type: 'score',
         instructions: 'How ready is this issue to be worked on?',
@@ -61,7 +86,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     name: 'pr',
     subject: 'pr',
     description: 'Does this PR do what its issue asks, nothing more, without workarounds, and is it safe to merge?',
-    checks: ['pr.linked', 'pr.target', 'pr.branch', 'pr.ci', 'pr.template', 'pr.commits'],
+    checks: ['pr.linked', 'pr.target', 'pr.branch', 'pr.ci', 'pr.template', 'pr.commits', 'pr.drift'],
     questions: {
       addresses_issue: {
         type: 'noul',
@@ -112,16 +137,81 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
         severity: 'info',
       },
     },
+    // each file the base also changed since the branch point, the two patches side by side
+    rank: [
+      {
+        from: 'drift',
+        label: 'path',
+        list: 'each',
+        questions: {
+          drift_collides: {
+            type: 'noul',
+            instructions: 'The pull request\'s patch to {path} and the base branch\'s patch to it conflict in meaning: merging both would leave the file wrong even where the lines do not overlap.',
+            criteria: {
+              true: 'One side changes what the other relies on: a renamed or removed symbol the other still uses, the same behaviour changed two ways, a contract one side extends and the other rewrites.',
+              false: 'The two patches touch independent parts of the file, or make the same change, and both stand after a merge.',
+            },
+            inverted: true,
+            severity: 'warn',
+          },
+        },
+      },
+    ],
+  },
+  hunks: {
+    name: 'hunks',
+    subject: 'pr',
+    description: 'Which hunk of this PR is wrong: unrelated to its stated purpose, a workaround, or a behaviour change no test covers?',
+    checks: [],
+    questions: {},
+    // one request per hunk, so no hunk colours another: the hunk is read against the stated purpose and the map of the whole change
+    rank: [
+      {
+        from: 'hunks',
+        mode: 'isolated',
+        list: 'violated',
+        label: '{file} {header}',
+        context: ['title', 'body', 'linked_issue', 'commits', 'changes'],
+        questions: {
+          unrelated: {
+            type: 'noul',
+            instructions: 'The hunk {header} of {file} does not serve the stated purpose of the pull request.',
+            criteria: {
+              true: 'The hunk is an unrelated refactor, a formatting sweep, or a drive-by fix in another subsystem that the title, body, linked issue and commits do not call for.',
+              false: 'The hunk does part of what the pull request says it does, or is the small change needed to make that compile, build or read right.',
+            },
+            inverted: true,
+            severity: 'warn',
+          },
+          workaround: {
+            type: 'noul',
+            instructions: 'The hunk {header} of {file} patches a symptom rather than its cause: a defensive fallback, a swallowed error, a special case added where a general fix was needed, or a TODO left in place of the fix.',
+            inverted: true,
+            severity: 'warn',
+          },
+          untested: {
+            type: 'noul',
+            instructions: 'The hunk {header} of {file} changes behaviour and no hunk of the diff adds or changes a test for it.',
+            criteria: {
+              true: 'The hunk changes what the code does and none of the hunks listed under changes, judged by their file and header, touches a test of that behaviour.',
+              false: 'The hunk changes no behaviour (a comment, a type, a rename, documentation, a test itself), or a hunk under changes visibly tests what it changes.',
+            },
+            inverted: true,
+            severity: 'warn',
+          },
+        },
+      },
+    ],
   },
   commit: {
     name: 'commit',
     subject: 'commit',
-    description: 'Do these commit messages follow the convention and describe their diffs honestly?',
+    description: 'Do these commit messages follow the repository\'s commit format and describe their diffs honestly?',
     checks: ['commit.format'],
     questions: {
       type_matches: {
         type: 'choice',
-        instructions: 'Which conventional commit type does the diff actually warrant?',
+        instructions: 'Which type from the repository\'s commit format does the diff actually warrant?',
         options: 'commit_types',
         when: 'has_diff',
         severity: 'info',
@@ -160,8 +250,8 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       },
       changelog_complete: {
         type: 'noul',
-        instructions: 'The top changelog section mentions every user-visible change among the commits.',
-        when: 'changelogPath',
+        instructions: 'The text added to the changelog since the last tag describes every user-visible change among the commits.',
+        when: 'changelog_changed',
         severity: 'warn',
       },
     },
@@ -172,18 +262,164 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     description: 'Does the subject comply with each rule stated in the repository rule documents?',
     checks: ['rules.present'],
     questions: {},
-    expand: {
-      from: 'rules',
-      template: {
-        type: 'noul',
-        instructions: '{subject} complies with this rule: {text}',
-        criteria: {
-          true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply.',
-          false: 'The subject does something the rule forbids or omits something it requires.',
+    // the rule goes out once, in the question; the state item is its index alone
+    rank: [
+      {
+        from: 'rules',
+        fields: [],
+        questions: {
+          rules: {
+            type: 'noul',
+            instructions: '{subject} complies with this rule: {text}',
+            criteria: {
+              true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply.',
+              false: 'The subject does something the rule forbids or omits something it requires.',
+            },
+            severity: 'warn',
+            lo: 0.3,
+            hi: 0.6,
+          },
         },
+      },
+    ],
+  },
+  locate: {
+    name: 'locate',
+    subject: 'tree',
+    description: 'Which files must be read or changed to implement this?',
+    checks: ['tree.indexed'],
+    questions: {},
+    // directories first, then the files of the directories not ruled out, so each rank reads only what could matter
+    rank: [
+      {
+        from: 'dirs',
+        label: 'path',
+        list: 'top',
+        questions: {
+          holds: {
+            type: 'noul',
+            instructions: 'Files needed to implement this are in the directory {path}.',
+            criteria: {
+              true: 'Implementing the text means reading or changing at least one file that lives directly in this directory, judged from its name and the files it holds.',
+              false: 'Nothing in this directory bears on the text: unrelated code, assets, generated output, or tooling the change does not touch.',
+            },
+            severity: 'info',
+            lo: 0.25,
+            hi: 0.6,
+          },
+        },
+      },
+      {
+        from: 'files',
+        within: { field: 'dir', of: 'path' },
+        label: 'path',
+        list: 'top',
+        questions: {
+          needed: {
+            type: 'noul',
+            instructions: 'The file {path} must be read or changed to implement this.',
+            criteria: {
+              true: 'The change lands in this file, or the file defines what the change builds on and must be read first.',
+              false: 'The file is unrelated to the text, or a general dependency anyone would already know.',
+            },
+            severity: 'info',
+          },
+        },
+      },
+    ],
+  },
+  plan: {
+    name: 'plan',
+    subject: 'plan',
+    description: 'Does this plan cover what its issue asks for, nothing more, without deciding anything the issue leaves open?',
+    checks: [],
+    questions: {
+      covers: {
+        type: 'noul',
+        instructions: 'The plan addresses every point the issue asks for.',
+        criteria: {
+          true: 'Each thing the issue asks for is met by a step of the plan, or the plan says why it is left out.',
+          false: 'The issue asks for something no step of the plan meets and the plan does not say why.',
+        },
+        severity: 'fail',
+      },
+      adds_nothing: {
+        type: 'noul',
+        instructions: 'The plan includes work the issue does not ask for.',
+        criteria: {
+          true: 'A step of the plan changes something the issue does not mention and the change is not needed to do what it asks: a refactor, a rename, a drive-by fix, a feature the issue leaves for later.',
+          false: 'Every step serves a point of the issue, or is the small change needed to make one land.',
+        },
+        inverted: true,
         severity: 'warn',
-        lo: 0.3,
-        hi: 0.6,
+      },
+      decides_unasked: {
+        type: 'noul',
+        instructions: 'The plan rests on a decision the issue does not make.',
+        criteria: {
+          true: 'A step picks between options the issue leaves open and the outcome differs by the pick: a public interface, a name or format others depend on, which of several approaches, what to do with a case the issue does not cover, whether something the issue leaves out is in scope.',
+          false: 'Every choice the plan makes is one the issue states, or a routine one any implementer would make the same way.',
+        },
+        inverted: true,
+        severity: 'fail',
+      },
+    },
+  },
+  ci: {
+    name: 'ci',
+    subject: 'log',
+    description: 'Why did this job fail, was it the change under test, the environment, and is the fix in this repository?',
+    checks: ['log.trimmed'],
+    // the lines that explain the failure are found first and fed to the questions as lines, beside the pull request's files
+    rank: [
+      {
+        from: 'lines',
+        label: '{n}: {text}',
+        list: 'top',
+        top: 40,
+        order: 'input',
+        feed: 'lines',
+        questions: {
+          explains: {
+            type: 'noul',
+            instructions: 'Line {n} helps explain why the job failed: {text}',
+            criteria: {
+              true: 'The line names an error, a failing test or assertion, a failing command, a missing file or dependency, a refused connection, or the exit status.',
+              false: 'Setup, download, progress, or cleanup output that would read the same in a passing run.',
+            },
+            severity: 'info',
+          },
+        },
+      },
+    ],
+    questions: {
+      own_fault: {
+        type: 'noul',
+        instructions: 'The failure is caused by the change under test: judged from the kept lines beside the files the pull request touches.',
+        criteria: {
+          true: 'The failing test, file, module or command is one the pull request changes or directly depends on.',
+          false: 'The failure sits in code, tooling or infrastructure the pull request does not touch.',
+        },
+        when: 'has_pull',
+        severity: 'info',
+      },
+      environment: {
+        type: 'noul',
+        instructions: 'The failure is a flake, a network or runner problem, or an external service, not the code under test.',
+        criteria: {
+          true: 'A timeout, a reset or refused connection, a rate limit, a registry or download error, a runner out of disk or memory, or a test that fails by timing alone.',
+          false: 'A compile error, a failing test or assertion, a lint or format finding, or a deterministic exit status from the project\'s own commands.',
+        },
+        severity: 'info',
+      },
+      fixable_here: {
+        type: 'noul',
+        instructions: 'The fix is inside this repository.',
+        criteria: {
+          true: 'A change to this repository\'s code, tests, configuration or workflow files would make the job pass.',
+          false: 'The fix needs another repository, a hosted service, a release of an external dependency, or only a retry.',
+        },
+        severity: 'info',
       },
     },
   },
@@ -222,120 +458,6 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
         type: 'score',
         instructions: 'How soon does this need attention?',
         criteria: ['later: can wait for the next scheduled look', 'soon: should be handled this session', 'now: blocks someone or something is broken'],
-        severity: 'info',
-      },
-    },
-  },
-  message: {
-    name: 'message',
-    subject: 'message',
-    description: 'Does this message from another session need the receiver to act, and where it claims results, does the linked work carry them?',
-    checks: [],
-    questions: {
-      actionable: {
-        type: 'noul',
-        instructions: 'This message needs the receiving session to do something now: decide, answer, verify, dispatch, or act on a result.',
-        criteria: {
-          true: 'The sender waits on a decision or answer, reports something that needs verifying or relaying, or asks for work.',
-          false: 'An acknowledgement, a status echo with nothing new, a sweep reply that found nothing, or a duplicate of something already handled.',
-        },
-        severity: 'fail',
-        lo: 0.3,
-        hi: 0.6,
-      },
-      kind: {
-        type: 'choice',
-        instructions: 'What kind of message is this?',
-        criteria: {
-          question: 'the sender asks for a decision or fact and waits',
-          task: 'the sender assigns or requests work',
-          result: 'the sender reports finished work with something to verify',
-          blocked: 'the sender cannot proceed and says what unblocks it',
-          status: 'the sender reports state with nothing to decide or verify',
-          noise: 'an acknowledgement or contentless reply',
-        },
-        severity: 'info',
-      },
-      urgency: {
-        type: 'score',
-        instructions: 'How soon does this need attention?',
-        criteria: ['later: can wait for the next scheduled look', 'soon: should be handled this session', 'now: the sender or something else is blocked on it'],
-        severity: 'info',
-      },
-      measured: {
-        type: 'noul',
-        instructions: 'The claims in the message about the referenced work are backed by something that was run or observed, not inferred from reading.',
-        criteria: {
-          true: 'The message cites a run, a test result, a check, a command output, or a specific observation for each claim.',
-          false: 'The message asserts outcomes without saying what produced them, or reasons from the code alone.',
-        },
-        when: 'has_refs',
-        severity: 'warn',
-      },
-      evidenced: {
-        type: 'noul',
-        instructions: 'The referenced pull request or issue itself carries the evidence for what the message claims about it.',
-        criteria: {
-          true: 'The linked item shows the claimed change, tests or checks; a reader can confirm the claim there without trusting the message.',
-          false: 'The linked item lacks what the message claims, or shows something different.',
-        },
-        when: 'has_refs',
-        severity: 'warn',
-      },
-    },
-  },
-  gate: {
-    name: 'gate',
-    subject: 'command',
-    description: 'Is this tool call safe to run without asking?',
-    checks: [],
-    questions: {
-      irreversible: {
-        type: 'noul',
-        instructions: 'The command destroys or overwrites data that could not be recovered: deleting files outside a scratch area, force-pushing, resetting history, dropping tables, or rewriting a file without a backup.',
-        inverted: true,
-        severity: 'fail',
-        lo: 0.2,
-        hi: 0.5,
-      },
-      secret_egress: {
-        type: 'noul',
-        instructions: 'The command reads credentials, keys, or tokens and sends them somewhere outside this machine.',
-        inverted: true,
-        severity: 'fail',
-        lo: 0.1,
-        hi: 0.4,
-      },
-      outside_scope: {
-        type: 'noul',
-        instructions: 'The command modifies files or state outside the current repository and its scratch directories.',
-        inverted: true,
-        severity: 'warn',
-      },
-      runs_fetched: {
-        type: 'noul',
-        instructions: 'The command downloads content and executes it without inspection.',
-        inverted: true,
-        severity: 'fail',
-        lo: 0.2,
-        hi: 0.5,
-      },
-    },
-  },
-  route: {
-    name: 'route',
-    subject: 'text',
-    description: 'How much reasoning effort does this prompt call for?',
-    checks: [],
-    questions: {
-      effort: {
-        type: 'score',
-        instructions: 'How much reasoning does answering this prompt well require?',
-        criteria: [
-          'low: a lookup, a status reply, a one-line acknowledgement, or a mechanical edit',
-          'medium: ordinary implementation or explanation with a clear path',
-          'high: design, debugging without a known cause, cross-cutting change, or anything ambiguous',
-        ],
         severity: 'info',
       },
     },

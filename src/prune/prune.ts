@@ -1,3 +1,4 @@
+import { rank } from '../judge/rank.ts';
 import type { Judge, Questions } from '../judge/types.ts';
 import { estimateTokens, JEV_LIMITS, truncate } from '../tokens.ts';
 
@@ -17,14 +18,14 @@ export const PRUNE_DEFAULTS: PruneOptions = {
   maxChunks: 160,
 };
 
-export type Chunk = { k: number; from: number; to: number; text: string; protected: boolean };
+// from and to are source line numbers, continues marks a chunk that starts partway through a split line
+export type Chunk = { k: number; from: number; to: number; text: string; protected: boolean; continues: boolean };
 
 export type PruneContext = {
   tool: string;
   input: Record<string, unknown>;
   // the newest user text, what the model is working on
   task: string;
-  archivePath?: string;
 };
 
 export type PruneResult = {
@@ -41,15 +42,28 @@ export type PruneResult = {
 const DIAGNOSTIC = /\b(error|errors|warning|warn|fail|failed|failure|exception|traceback|panic|fatal|denied|not found|cannot|unexpected|assert)\b|✗|✘|FAIL|Error:/i;
 const MAX_LINE = 2000;
 
+// a line over MAX_LINE is split into pieces so no single line can swamp a judge request, each piece keeps its source line
+type Piece = { line: number; text: string; first: boolean };
+
+function pieces(text: string): Piece[] {
+  const out: Piece[] = [];
+  text.split('\n').forEach((l, i) => {
+    const parts = l.length > MAX_LINE ? (l.match(new RegExp(`.{1,${MAX_LINE}}`, 'g')) ?? [l]) : [l];
+    parts.forEach((p, j) => out.push({ line: i + 1, text: p, first: j === 0 }));
+  });
+  return out;
+}
+
 export function chunkText(text: string, chunkLines: number, maxChunks: number): Chunk[] {
-  const lines = text.split('\n').flatMap((l) => (l.length > MAX_LINE ? l.match(new RegExp(`.{1,${MAX_LINE}}`, 'g')) ?? [l] : [l]));
+  const all = pieces(text);
   let per = chunkLines;
-  if (Math.ceil(lines.length / per) > maxChunks) per = Math.ceil(lines.length / maxChunks);
+  if (Math.ceil(all.length / per) > maxChunks) per = Math.ceil(all.length / maxChunks);
   const chunks: Chunk[] = [];
-  for (let i = 0; i < lines.length; i += per) {
-    const slice = lines.slice(i, i + per);
-    const body = slice.join('\n');
-    chunks.push({ k: chunks.length, from: i + 1, to: i + slice.length, text: body, protected: DIAGNOSTIC.test(body) });
+  for (let i = 0; i < all.length; i += per) {
+    const slice = all.slice(i, i + per);
+    // pieces of one source line rejoin with no separator, a new source line starts on a new line
+    const body = slice.map((p, j) => (j > 0 && p.first ? '\n' : '') + p.text).join('');
+    chunks.push({ k: chunks.length, from: slice[0]!.line, to: slice[slice.length - 1]!.line, text: body, protected: DIAGNOSTIC.test(body), continues: !slice[0]!.first });
   }
   if (chunks.length > 0) {
     chunks[0]!.protected = true;
@@ -58,57 +72,49 @@ export function chunkText(text: string, chunkLines: number, maxChunks: number): 
   return chunks;
 }
 
-function questionsFor(chunks: Chunk[]): Questions {
-  const q: Questions = {};
-  for (const c of chunks) {
-    if (c.protected) continue;
-    q[`c${c.k}`] = {
-      type: 'noul',
-      instructions: `At least one line in chunk ${c.k} (lines ${c.from}-${c.to}) is needed to carry out the task or answer the user.`,
-      criteria: {
-        true: 'The chunk holds a result, diagnostic, or value the task asks about.',
-        false: 'The chunk is progress output, repeated boilerplate, or a listing the task does not refer to.',
-      },
-    };
+// one question per chunk, the chunk named by its index and line range in the state
+const NEEDED: Questions = {
+  needed: {
+    type: 'noul',
+    instructions: 'At least one line in chunk {k} (lines {lines}) is needed to carry out the task or answer the user.',
+    criteria: {
+      true: 'The chunk holds a result, diagnostic, or value the task asks about.',
+      false: 'The chunk is progress output, repeated boilerplate, or a listing the task does not refer to.',
+    },
+  },
+};
+
+// the one-line stub left where a run of chunks was dropped: the range and the call that gets it back
+export type OmissionNote = (from: number, to: number) => string;
+
+export function omissionNote(context: PruneContext): OmissionNote {
+  const stub = (from: number, to: number, recover: string) => `[sift: lines ${from}-${to} (${to - from + 1} lines) omitted as not needed for the current task, ${recover}]`;
+  if (context.tool === 'Read') {
+    // output lines map to file lines through the call's offset, so the note is in file lines
+    const base = Math.max(1, Number(context.input['offset']) || 1);
+    const path = String(context.input['file_path'] ?? 'the file');
+    return (from, to) => stub(base + from - 1, base + to - 1, `re-read ${path} with offset ${base + from - 1} limit ${to - from + 1}`);
   }
-  return q;
+  if (context.tool === 'Bash') return (from, to) => stub(from, to, 'rerun the command for the full output');
+  return (from, to) => stub(from, to, 'rerun the tool call for the full output');
 }
 
-// splits the chunks into requests whose state stays under the budget
-function batches(chunks: Chunk[], context: PruneContext, maxRequestTokens: number): Chunk[][] {
-  const overhead = estimateTokens(JSON.stringify({ tool: context.tool, input: context.input, task: truncate(context.task, 2000) })) + 200;
-  const out: Chunk[][] = [];
-  let current: Chunk[] = [];
-  let tokens = overhead;
-  for (const c of chunks) {
-    const cost = estimateTokens(c.text) + 60;
-    if (tokens + cost > maxRequestTokens && current.length > 0) {
-      out.push(current);
-      current = [];
-      tokens = overhead;
-    }
-    current.push(c);
-    tokens += cost;
-  }
-  if (current.length > 0) out.push(current);
-  return out;
-}
-
-export function assemble(chunks: Chunk[], keep: (c: Chunk) => boolean, archivePath?: string): string {
+export function assemble(chunks: Chunk[], keep: (c: Chunk) => boolean, note: OmissionNote): string {
   const parts: string[] = [];
   let omitted: Chunk[] = [];
   const flush = () => {
     if (omitted.length === 0) return;
-    const from = omitted[0]!.from;
-    const to = omitted[omitted.length - 1]!.to;
-    const where = archivePath ? `, full output at ${archivePath}` : '';
-    parts.push(`[sift: lines ${from}-${to} (${to - from + 1} lines) omitted as not needed for the current task${where}]`);
+    parts.push(note(omitted[0]!.from, omitted[omitted.length - 1]!.to));
     omitted = [];
   };
   for (const c of chunks) {
     if (keep(c)) {
-      flush();
-      parts.push(c.text);
+      // a chunk that continues a split line rejoins its kept predecessor without a newline
+      if (c.continues && omitted.length === 0 && parts.length > 0) parts[parts.length - 1] += c.text;
+      else {
+        flush();
+        parts.push(c.text);
+      }
     } else {
       omitted.push(c);
     }
@@ -123,34 +129,24 @@ export async function prune(text: string, context: PruneContext, judge: Judge, o
   const chunks = chunkText(text, options.chunkLines, options.maxChunks);
   const judged = chunks.filter((c) => !c.protected);
   if (judged.length === 0) return none('every chunk protected');
-  const scores: Record<number, number> = {};
-  const groups = batches(chunks, context, options.maxRequestTokens);
-  const results = await Promise.all(
-    groups.map((group) =>
-      judge.ask(
-        {
-          tool: context.tool,
-          input: context.input,
-          task: truncate(context.task, 2000),
-          note: groups.length > 1 ? `part of a larger output, chunks ${group[0]!.k}-${group[group.length - 1]!.k}` : undefined,
-          chunks: group.map((c) => ({ k: c.k, lines: `${c.from}-${c.to}`, text: c.text })),
-        },
-        questionsFor(group),
-      ),
-    ),
+  // every chunk rides in the state so the judge reads the whole output, protected ones are asked about and ignored
+  const ranked = await rank(
+    chunks.map((c) => ({ lines: `${c.from}-${c.to}`, text: c.text })),
+    NEEDED,
+    judge,
+    { mode: 'batched', context: { tool: context.tool, input: context.input, task: truncate(context.task, 2000) }, maxRequestTokens: options.maxRequestTokens },
   );
-  for (const r of results) {
-    if (!r.ok) return { ...none('judge failed'), skipped: undefined, error: `${r.reason}: ${r.message}` };
-    for (const [id, a] of Object.entries(r.answers)) if (a.type === 'noul') scores[Number(id.slice(1))] = a.p;
-  }
+  if (!ranked.ok) return { ...none('judge failed'), skipped: undefined, error: `${ranked.reason}: ${ranked.message}` };
+  const scores: Record<number, number> = {};
+  for (const r of ranked.items) if (!chunks[r.index]!.protected) scores[r.index] = r.value;
   const keep = (c: Chunk) => c.protected || (scores[c.k] ?? 1) >= options.keepThreshold;
   const kept = chunks.filter(keep).length;
   return {
-    text: assemble(chunks, keep, context.archivePath),
+    text: assemble(chunks, keep, omissionNote(context)),
     chunks: chunks.length,
     kept,
     dropped: chunks.length - kept,
     scores,
-    requests: groups.length,
+    requests: ranked.requests,
   };
 }

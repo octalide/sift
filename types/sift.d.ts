@@ -13,21 +13,54 @@ export type SiftJudgement =
   | { ok: true; answers: Record<string, SiftAnswer>; backend: string; latencyMs: number }
   | { ok: false; reason: 'disabled' | 'unavailable' | 'rejected' | 'malformed'; message: string; backend: string };
 
+export type SiftRankMode = 'batched' | 'isolated';
+
+export type SiftRankOptions = {
+  mode: SiftRankMode;
+  // state every item is read against, placed beside the items
+  context?: Record<string, unknown>;
+  // the question the sorted view orders by, the first when absent; for a choice question, the key whose probability orders it
+  by?: string;
+  choice?: string;
+  maxStateTokens?: number;
+  maxRequestTokens?: number;
+  concurrency?: number;
+  // the item fields the state carries beside k, every field when absent; every field still fills the questions
+  fields?: string[];
+};
+
+export type SiftRanked<T> = { index: number; item: T; answers: Record<string, SiftAnswer>; value: number };
+
+export type SiftRankResult<T> =
+  | { ok: true; items: SiftRanked<T>[]; sorted: SiftRanked<T>[]; requests: number; backend: string }
+  | { ok: false; reason: 'disabled' | 'unavailable' | 'rejected' | 'malformed'; message: string; backend: string; requests: number };
+
+// answer is absent when the judge left the question unanswered, the band is then unclear
+export type SiftJudged = { id: string; answer?: SiftAnswer; band: 'satisfied' | 'violated' | 'unclear'; severity: 'fail' | 'warn' | 'info'; instructions: string };
+
 export type SiftReport = {
   pack: string;
   subject: string;
   mechanical: { check: string; severity: 'fail' | 'warn' | 'info'; message: string }[];
-  judged: { id: string; answer: SiftAnswer; band: 'satisfied' | 'violated' | 'unclear'; severity: 'fail' | 'warn' | 'info'; instructions: string }[];
+  judged: SiftJudged[];
+  // one entry per rank step of the pack, its items in order (each), the best by value (top), or those ruled out (violated);
+  // an item is judged on the step's ordering question, asked holds every question of the step judged for it
+  ranked: { step: string; list: 'each' | 'top' | 'violated'; total: number; kept: number; items: (SiftJudged & { index: number; label: string; answers: Record<string, SiftAnswer>; asked: SiftJudged[] })[] }[];
   verdict: 'pass' | 'warn' | 'fail' | 'unknown';
   backend: string;
   judgeError?: string;
+  // answers under an id no question asked for, and answers the judge left out of a ranked item, dropped without touching the verdict
+  dropped?: number;
 };
 
 export type Sift = {
   // typed questions over any state, answered by the configured backend
   judge: (state: unknown, questions: Record<string, SiftQuestion>) => Promise<SiftJudgement>;
-  // run a pack over a subject: an issue or PR number, a commit range, "release", or text
-  grade: (pack: string, subject: string, options?: { repo?: string; text?: string; ref?: string }) => Promise<SiftReport>;
+  // the same questions over many items: batched fills each request with items, isolated sends one request per item.
+  // {k} in a question is the item index, {field} a field of an object item, {text} a string item
+  rank: <T extends string | Record<string, unknown>>(items: T[], questions: Record<string, SiftQuestion>, options: SiftRankOptions) => Promise<SiftRankResult<T>>;
+  // run a pack over a subject: an issue or PR number, a commit range, "release", a job or run id, or text; top cuts a ranked list
+  grade: (pack: string, subject: string, options?: { repo?: string; text?: string; ref?: string; top?: number }) => Promise<SiftReport>;
   // the backend name in use
   backend: () => string;
 };

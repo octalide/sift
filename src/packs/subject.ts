@@ -1,0 +1,101 @@
+import type { Forge } from '../forge/forge.ts';
+
+// what a grade call's subject string names, parsed before any forge request is made.
+// an issue or pull request url carries its own repo, which may differ from the session's
+export type ParsedSubject =
+  | { kind: 'issue'; number: number; repo?: string }
+  | { kind: 'pr'; number: number; repo?: string }
+  // base..head in the checkout, the pull request it would open
+  | { kind: 'pr'; range: string }
+  | { kind: 'commit'; ref: string }
+  | { kind: 'release'; proposed?: string }
+  | { kind: 'mixed'; subject: MixedSubject };
+
+// what a subject that may be a reference or free text turned out to name
+export type MixedSubject =
+  | { kind: 'issue' | 'pr'; number: number; repo?: string }
+  | { kind: 'commit'; ref: string }
+  | { kind: 'text'; text: string };
+
+export type ParsedKind = ParsedSubject['kind'];
+
+const NUMBER = /^#?(\d+)$/;
+const COMMIT = /^[0-9a-f]{7,40}$|\.\./;
+const URL = /^[a-z][a-z0-9+.-]*:\/\//i;
+const RANGE = /^[^\s#-][^\s]*\.\.[^\s]*$/;
+const A_NOUN: Record<'issue' | 'pr', string> = { issue: 'an issue', pr: 'a pull request' };
+
+// the forms each kind accepts, as the refusal names them
+export function expectedSubject(kind: ParsedKind, forge: Pick<Forge, 'name'>): string {
+  switch (kind) {
+    case 'issue':
+      return `an issue number (N or #N) or a ${forge.name} issue URL`;
+    case 'pr':
+      return `a pull request number (N or #N), a ${forge.name} pull request URL, or a range (dev..HEAD)`;
+    case 'commit':
+      return 'a commit ref (a sha, branch or tag) or range (main..HEAD)';
+    case 'release':
+      return 'a tag or version (v1.4.0), or "release" for the required bump alone';
+    case 'mixed':
+      return `an issue or pull request number (N or #N), a ${forge.name} issue or pull request URL, a commit ref or range, or free text`;
+  }
+}
+
+const shown = (ref: string): string => (ref.length > 60 ? `${ref.slice(0, 57)}...` : ref);
+
+// parses the subject of a grade call for a pack of the given kind, refusing with the expected forms named.
+// repo is the explicit repo of the call, when given; a url naming a different repo is refused.
+// bare is what a bare number names for the mixed kind, an issue unless said
+export function parseSubject<K extends ParsedKind>(kind: K, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string, bare?: 'issue' | 'pr'): Extract<ParsedSubject, { kind: K }>;
+export function parseSubject(kind: ParsedKind, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string, bare: 'issue' | 'pr' = 'issue'): ParsedSubject {
+  const raw = (ref ?? '').trim();
+  const expected = expectedSubject(kind, forge);
+  if (!raw) throw new Error(`${kind} pack: no subject; expected ${expected}`);
+  const refuse = (why: string): never => {
+    throw new Error(`${kind} pack: ${why} (${JSON.stringify(shown(raw))}); expected ${expected}`);
+  };
+  const link = forge.parseUrl(raw);
+  // an issue or pull request by number or url; the two kinds share the forms, only the kind differs
+  const numbered = (kind: 'issue' | 'pr'): { number: number; repo?: string } => {
+    const n = NUMBER.exec(raw);
+    if (n) return { number: Number(n[1]) };
+    if (link) {
+      if (link.kind !== kind) return refuse(`subject is ${A_NOUN[link.kind]} URL, not ${A_NOUN[kind]}`);
+      if (repo !== undefined && repo !== link.repo) return refuse(`subject URL names ${link.repo} but repo is ${repo}`);
+      return { number: link.number, repo: link.repo };
+    }
+    if (URL.test(raw)) return refuse(`subject is a URL ${forge.name} does not serve as ${A_NOUN[kind]}`);
+    return refuse(/\s/.test(raw) ? 'subject reads as text, not a reference' : 'subject is not a number');
+  };
+  switch (kind) {
+    case 'issue':
+      return { kind, ...numbered(kind) };
+    case 'pr':
+      return RANGE.test(raw) ? { kind, range: raw } : { kind, ...numbered(kind) };
+    case 'commit': {
+      if (link || URL.test(raw)) return refuse('subject is a URL');
+      if (raw.startsWith('#')) return refuse('subject is an issue number, not a ref');
+      if (/\s/.test(raw)) return refuse('subject reads as text, not a reference');
+      if (raw.startsWith('-')) return refuse('subject starts with a dash');
+      return { kind, ref: raw };
+    }
+    case 'release': {
+      if (raw === 'release') return { kind };
+      if (link || URL.test(raw)) return refuse('subject is a URL');
+      if (raw.startsWith('#')) return refuse('subject is an issue number, not a version');
+      if (/\s/.test(raw)) return refuse('subject reads as text, not a tag');
+      return { kind, proposed: raw };
+    }
+    case 'mixed': {
+      const n = NUMBER.exec(raw);
+      if (n) return { kind, subject: { kind: bare, number: Number(n[1]) } };
+      if (link) {
+        if (repo !== undefined && repo !== link.repo) return refuse(`subject URL names ${link.repo} but repo is ${repo}`);
+        return { kind, subject: { kind: link.kind, number: link.number, repo: link.repo } };
+      }
+      if (URL.test(raw)) return refuse(`subject is a URL ${forge.name} does not serve as an issue or a pull request`);
+      if (COMMIT.test(raw)) return { kind, subject: { kind: 'commit', ref: raw } };
+      return { kind, subject: { kind: 'text', text: raw } };
+    }
+  }
+}

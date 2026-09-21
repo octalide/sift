@@ -1,7 +1,4 @@
-export type RunLike = (
-  argv: readonly string[],
-  init?: { cwd?: string; env?: Record<string, string>; stdin?: string; timeoutMs?: number },
-) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
+import type { CwdLike, RunLike } from '../process.ts';
 
 export type ApiResponse = {
   status: number;
@@ -20,9 +17,6 @@ export class GhError extends Error {
   }
 }
 
-// where a spawn runs, resolved per call so a directory removed after session start is never reused
-export type CwdLike = () => Promise<string | undefined>;
-
 // gh api over a process runner; conditional requests answer 304 with an empty body
 export class Gh {
   constructor(
@@ -30,9 +24,11 @@ export class Gh {
     private readonly cwd: CwdLike = async () => undefined,
   ) {}
 
-  async api(path: string, opts: { etag?: string; accept?: string; paginate?: boolean; method?: string; fields?: Record<string, string> } = {}): Promise<ApiResponse> {
+  async api(path: string, opts: { etag?: string; accept?: string; paginate?: boolean; method?: string; fields?: Record<string, string>; raw?: boolean } = {}): Promise<ApiResponse> {
     const argv = ['gh', 'api', '-i'];
     if (opts.method) argv.push('-X', opts.method);
+    // gh refuses a body with terminal escapes (a job log) unless told to pass it through
+    if (opts.raw) argv.push('--allow-escape-sequences');
     if (opts.paginate) argv.push('--paginate');
     if (opts.etag) argv.push('-H', `If-None-Match: ${opts.etag}`);
     if (opts.accept) argv.push('-H', `Accept: ${opts.accept}`);
@@ -69,14 +65,8 @@ export class Gh {
     return out;
   }
 
-  async text(path: string, accept: string): Promise<string> {
-    return (await this.api(path, { accept })).body;
-  }
-
-  async git(args: string[]): Promise<string> {
-    const result = await this.run(['git', ...args], { cwd: await this.cwd(), timeoutMs: 60_000 });
-    if (result.exitCode !== 0) throw new GhError(`git ${args.join(' ')}: ${result.stderr.trim()}`, result.exitCode);
-    return result.stdout;
+  async text(path: string, accept: string, opts: { raw?: boolean } = {}): Promise<string> {
+    return (await this.api(path, { accept, ...opts })).body;
   }
 
   async login(): Promise<string | undefined> {

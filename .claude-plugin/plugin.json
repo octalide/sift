@@ -1,7 +1,7 @@
 {
   "name": "sift",
-  "version": "0.9.1",
-  "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
+  "version": "0.10.0",
+  "description": "Typed judgement calls for Claude Code: two primitives, judge and rank, under packs that grade issues, pull requests, plans, commits, CI logs, releases and rules, a repository watch, tool output pruning and an outbound text gate, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
   },
@@ -23,7 +23,7 @@
     "apiKey": {
       "type": "string",
       "title": "TypeSafe API key",
-      "description": "Jev key. Leave unset to read TYPESAFE_API_KEY from the environment.",
+      "description": "Jev key. Leave unset to read TYPESAFE_API_KEY from the environment or the settings env block.",
       "sensitive": true
     },
     "jevModel": {
@@ -50,52 +50,10 @@
       "description": "Every module logs what it would have done and does nothing. Use it to calibrate thresholds before trusting them.",
       "default": false
     },
-    "compact": {
-      "type": "boolean",
-      "title": "Context compaction",
-      "description": "Replace the compaction summary with the transcript minus the tool calls and results the judge marks stale. Text is never touched.",
-      "default": true
-    },
-    "compactKeepThreshold": {
-      "type": "number",
-      "title": "Compaction keep threshold",
-      "default": 0.5,
-      "description": "Minimum probability that a tool call or its result is still needed. Below it the call is dropped or the result truncated."
-    },
-    "compactPinRecent": {
-      "type": "number",
-      "title": "Compaction pinned recent messages",
-      "default": 6,
-      "description": "Newest messages never touched by compaction."
-    },
-    "compactMinReduction": {
-      "type": "number",
-      "title": "Compaction minimum reduction ratio",
-      "default": 0.25,
-      "description": "Compaction falls back to the built-in summary when the estimated reduction is below this ratio."
-    },
-    "compactTruncateHead": {
-      "type": "number",
-      "title": "Compaction truncated result head chars",
-      "default": 300,
-      "description": "Characters of a truncated tool result kept before the omission note."
-    },
-    "compactAtPercent": {
-      "type": "number",
-      "title": "Compact at context percent",
-      "description": "Request compaction after a turn once the context passes this fill. 0 leaves compaction to the engine's own trigger.",
-      "default": 0
-    },
-    "ledgerPath": {
-      "type": "string",
-      "title": "Ledger file",
-      "description": "A file holding the session's durable state. While it exists, compaction keeps the ledger's live contents, the last prompt, the pinned turns and the judged working set, and drops every prior summary. Empty means ~/.local/state/fleet/<owner>_<name>/ledger.md for the session's repository.",
-      "default": ""
-    },
     "prune": {
       "type": "boolean",
       "title": "Tool output pruning",
-      "description": "Score long tool outputs before the model reads them and drop chunks the judge marks unneeded. Full output is archived for recovery.",
+      "description": "Score long tool outputs before the model reads them and drop chunks the judge marks unneeded. Each dropped run is replaced by a note with its line range and the call that gets it back; nothing is kept on disk.",
       "default": true
     },
     "pruneFloorTokens": {
@@ -125,7 +83,7 @@
     "watch": {
       "type": "boolean",
       "title": "Repo watch",
-      "description": "Poll a GitHub repo for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts.",
+      "description": "Poll a repository for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts.",
       "default": false
     },
     "watchRepo": {
@@ -191,76 +149,35 @@
       "default": 24,
       "description": "A deferred event older than this is delivered on its own so nothing waits forever."
     },
+    "watchStallHours": {
+      "type": "number",
+      "title": "CI stall interval (h)",
+      "default": 1,
+      "description": "A PR head whose checks have not all finished within this many hours is delivered once as ci stalled, naming the pending checks."
+    },
     "grade": {
       "type": "boolean",
       "title": "Grading tools",
-      "description": "Register sift_grade (packs: issue, pr, commit, release, rules) and sift_judge (raw typed questions) as tools.",
+      "description": "Register the grade (packs: issue, pr, hunks, plan, commit, ci, rules, release, locate, and any under .sift/packs), judge (typed questions over one state) and rank (the same questions over many items) tools.",
       "default": true
-    },
-    "message": {
-      "type": "boolean",
-      "title": "Peer message triage",
-      "description": "Judge every message from another session with the message pack before it is queued. Not actionable: held into a digest line that rides with the next delivery or prompt. Otherwise delivered with its scores (actionable, kind, urgency, and for messages that reference a PR or issue, whether the claims are measured and the item carries the evidence) on the first line.",
-      "default": false
-    },
-    "gate": {
-      "type": "boolean",
-      "title": "Command gate",
-      "description": "Judge Bash, Write and Edit calls against safety propositions before they run. Denies on a violated band.",
-      "default": false
     },
     "config": {
       "type": "string",
       "title": "Conventions",
-      "description": "Repository conventions in the shape of .sift/config.json, as inline JSON or a path relative to the repo root. Applied over the defaults and under each repo's own .sift/config.json. Empty uses the neutral defaults: no commit format, version or changelog checks.",
+      "description": "Conventions in the shape of .sift/config.json, as inline JSON or a path relative to the repo root. Three layers apply in order, field by field: the neutral defaults, then this option or, when it is empty, $XDG_CONFIG_HOME/sift/config.json (~/.config/sift/config.json) if it exists, then each repo's own .sift/config.json. Empty with no global file uses the defaults: no commit format, version or changelog checks.",
       "default": ""
     },
     "gateOutbound": {
       "type": "boolean",
       "title": "Outbound text gate",
-      "description": "Before a Discord message or a gh pr/issue/release create, comment or edit body goes out, check the channel's length limit (2000 for Discord) and judge the text against the repository rule documents. A broken rule denies the call, an unclear one logs.",
+      "description": "Before text leaves the session through a channel (Discord messages and gh pr, issue and release bodies by default, more under outbound.channels in the config), check the channel's length limit and judge the text against the repository rule documents. A broken rule denies the call, an unclear one logs.",
       "default": false
-    },
-    "gateFailClosed": {
-      "type": "boolean",
-      "title": "Gate denies on unclear",
-      "default": true,
-      "description": "Deny a call when a fail-severity proposition lands in the unclear band. Off allows it."
     },
     "classify": {
       "type": "boolean",
       "title": "Answer engine classifications",
       "description": "Serve the engine's own model.classify calls from the judge backend.",
       "default": false
-    },
-    "route": {
-      "type": "boolean",
-      "title": "Effort routing",
-      "description": "Score each prompt and lower the request effort for routine turns. Experimental.",
-      "default": false
-    },
-    "routeMinEffort": {
-      "type": "string",
-      "title": "Route floor",
-      "options": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default": "low",
-      "description": "Lowest effort the router may choose."
-    },
-    "routeMaxEffort": {
-      "type": "string",
-      "title": "Route ceiling",
-      "options": [
-        "medium",
-        "high",
-        "xhigh",
-        "max"
-      ],
-      "default": "high",
-      "description": "Highest effort the router may choose."
     }
   }
 }

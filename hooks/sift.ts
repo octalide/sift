@@ -1,23 +1,26 @@
-import type { EngineInterface, PluginOptions, Register, SessionMessage } from 'claude-code';
+import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
-import { compact, COMPACT_DEFAULTS, reduction, type Message } from '../src/compact/compact.ts';
-import { compactWithLedger } from '../src/compact/ledger.ts';
-import { gate as runGate, mentionsSecret } from '../src/gate/gate.ts';
+import { channelTable, defaultChannels, type Channel } from '../src/gate/channels.ts';
 import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
-import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/config.ts';
-import { Gh } from '../src/github/gh.ts';
-import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
-import { localSource, remoteSource } from '../src/github/source.ts';
-import { heldDigest, judgeMessage, messageRefs, messageSubject, refDetail, type Held } from '../src/message/message.ts';
-import { JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
-import type { Judge, Questions } from '../src/judge/types.ts';
-import { DecisionLog, type Cost } from '../src/log.ts';
+import type { Forge } from '../src/forge/forge.ts';
+import { localGit, type Git } from '../src/forge/git.ts';
+import { GitHubForge } from '../src/forge/github.ts';
+import { CONFIG_PATH, configLayers, defaultTarget, globalConfigPath, resolveConfig, type RepoConfig } from '../src/repo/config.ts';
+import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/repo/subjects.ts';
+import { localSource, remoteSource } from '../src/repo/source.ts';
+import { ciSubject } from '../src/ci/log.ts';
+import { indexTree, treeSubject } from '../src/locate/tree.ts';
+import { checkoutSource, forgeSource, type RuleSource } from '../src/rules/discover.ts';
+import { digestOf, JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
+import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
+import type { Answer, Judge, Questions } from '../src/judge/types.ts';
+import { DecisionLog, type Cost, type StoreLike } from '../src/log.ts';
 import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
+import { parseSubject, type ParsedKind } from '../src/packs/subject.ts';
 import type { Pack, Report, Subject } from '../src/packs/types.ts';
 import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
-import { routeEffort, type Effort } from '../src/route/route.ts';
-import { estimateTokens, estimateTokensOf } from '../src/tokens.ts';
+import { estimateTokens, truncate } from '../src/tokens.ts';
 import { Watcher } from '../src/watch/watcher.ts';
 
 type Options = {
@@ -27,14 +30,6 @@ type Options = {
   jevBaseUrl: string;
   fallbackModel: string;
   shadow: boolean;
-  compact: boolean;
-  compactKeepThreshold: number;
-  compactPinRecent: number;
-  compactMinReduction: number;
-  compactTruncateHead: number;
-  compactAtPercent: number;
-  // the session's ledger file; empty means the fleet default for the session repo
-  ledgerPath: string;
   prune: boolean;
   pruneFloorTokens: number;
   pruneChunkLines: number;
@@ -50,16 +45,11 @@ type Options = {
   watchCi: 'failures' | 'all' | 'none';
   watchTriage: boolean;
   watchDeferMaxAgeHours: number;
+  watchStallHours: number;
   grade: boolean;
-  gate: boolean;
-  message: boolean;
-  gateFailClosed: boolean;
   gateOutbound: boolean;
   classify: boolean;
-  route: boolean;
-  routeMinEffort: Effort;
-  routeMaxEffort: Effort;
-  // conventions applied under every repo's .sift/config.json: a path or inline json
+  // conventions under every repo's .sift/config.json: a path or inline json, replacing the global file
   config: string;
 };
 
@@ -69,13 +59,6 @@ const DEFAULTS: Options = {
   jevBaseUrl: JUDGE_DEFAULTS.jevBaseUrl,
   fallbackModel: JUDGE_DEFAULTS.fallbackModel,
   shadow: false,
-  compact: true,
-  compactKeepThreshold: COMPACT_DEFAULTS.keepThreshold,
-  compactPinRecent: COMPACT_DEFAULTS.pinRecent,
-  compactMinReduction: 0.25,
-  compactTruncateHead: COMPACT_DEFAULTS.truncateHead,
-  compactAtPercent: 0,
-  ledgerPath: '',
   prune: true,
   pruneFloorTokens: PRUNE_DEFAULTS.floorTokens,
   pruneChunkLines: PRUNE_DEFAULTS.chunkLines,
@@ -91,15 +74,10 @@ const DEFAULTS: Options = {
   watchCi: 'failures',
   watchTriage: true,
   watchDeferMaxAgeHours: 24,
+  watchStallHours: 1,
   grade: true,
-  gate: false,
-  message: false,
-  gateFailClosed: true,
   gateOutbound: false,
   classify: false,
-  route: false,
-  routeMinEffort: 'low',
-  routeMaxEffort: 'high',
   config: '',
 };
 
@@ -124,16 +102,15 @@ type Runtime = {
   packs: Record<string, Pack>;
   repo?: string;
   root?: string;
-  gh: Gh;
+  forge: Forge;
+  git: Git;
+  // the outbound channel table: the defaults for the forge, then the config's entries over them
+  channels: Channel[];
+  store: StoreLike;
   watcher?: Watcher;
   // builds and starts the watcher; returns the reason when it cannot
   startWatch: () => Promise<string | undefined>;
   sessionId: string;
-  archiveDir: string;
-  // where the session's ledger would be; it counts only while the file exists
-  ledgerPath?: string;
-  // peer messages consumed since the last delivery, reported as one digest line
-  held: Held[];
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -143,6 +120,12 @@ async function optionConfig($: EngineInterface, value: string, root: string): Pr
   if (v.startsWith('{')) return JSON.parse(v);
   const path = v.startsWith('/') ? v : `${root}/${v}`;
   if (!(await $.fs.exists(path))) throw new Error(`sift config ${path} not found`);
+  return JSON.parse(await $.fs.read(path));
+}
+
+// parsed contents of a json file, undefined when there is no such file
+async function readJson($: EngineInterface, path: string | undefined): Promise<unknown> {
+  if (!path || !(await $.fs.exists(path))) return undefined;
   return JSON.parse(await $.fs.read(path));
 }
 
@@ -167,7 +150,6 @@ async function lastUserText($: EngineInterface): Promise<string> {
 export const register: Register = (on, rawOptions) => {
   const options = resolveOptions(rawOptions);
   let runtime: Runtime | undefined;
-  let compacting = false;
 
   const record = (module: string, action: string, extra: Partial<Decision> = {}) => {
     runtime?.log.push({
@@ -192,57 +174,104 @@ export const register: Register = (on, rawOptions) => {
     if (!pack) throw new Error(`unknown pack ${packName} (have: ${Object.keys(rt.packs).join(', ')})`);
     const repo = opts.repo ?? rt.repo;
     const needRepo = () => {
-      if (!repo) throw new Error('no repository: pass repo as owner/name or run inside a checkout with a GitHub remote');
+      if (!repo) throw new Error(`no repository: pass repo as the ${rt.forge.name} path or run inside a checkout with a ${rt.forge.name} remote`);
       return repo;
     };
-    const number = () => Number(ref.replace(/^#/, ''));
-    const fs = { read: (p: string) => rt.gh.git(['show', `HEAD:${p}`]).catch(() => readFile(p)), exists: (p: string) => existsFile(p) };
+    // the subject is parsed, and a bad one refused, before any forge request; a url names its own repo
+    const parsed = <K extends ParsedKind>(kind: K, bare?: 'issue' | 'pr') => parseSubject(kind, ref, rt.forge, opts.repo, bare);
     switch (pack.subject) {
-      case 'issue':
-        return issueSubject(rt.gh, needRepo(), number(), rt.config);
-      case 'pr':
-        return prSubject(rt.gh, needRepo(), number(), rt.config);
+      case 'issue': {
+        const p = parsed('issue');
+        return issueSubject(rt.forge, p.repo ?? needRepo(), p.number, rt.config);
+      }
+      case 'pr': {
+        const p = parsed('pr');
+        // base..head in the checkout is the pr the range would open, graded before it exists
+        if ('range' in p) return prRangeSubject(rt.git, p.range, rt.config, repo ? { forge: rt.forge, repo } : undefined);
+        return prSubject(rt.forge, p.repo ?? needRepo(), p.number, rt.config);
+      }
       case 'commit':
-        return commitSubject(rt.gh, ref || 'HEAD', rt.config);
+        return commitSubject(rt.git, parsed('commit').ref, rt.config);
       case 'release': {
-        // the checkout serves its own repo; any other repo, or no checkout at all, is read from github
+        const p = parsed('release');
+        // the checkout serves its own repo; any other repo, or no checkout at all, is read from the forge
         const local = rt.repo !== undefined && (opts.repo === undefined || opts.repo === rt.repo);
         const source = local
-          ? localSource(rt.gh, opts.ref ?? 'HEAD', readFile, existsFile)
-          : remoteSource(rt.gh, needRepo(), opts.ref ?? rt.config.prs.target ?? (await defaultBranch(rt.gh, needRepo())));
+          ? localSource(rt.git, opts.ref ?? 'HEAD', readFile, existsFile)
+          : remoteSource(rt.forge, needRepo(), opts.ref ?? defaultTarget(rt.config) ?? (await rt.forge.defaultBranch(needRepo())));
         const s = await releaseSubject(source, rt.config);
-        if (ref && ref !== 'release') s.facts['proposed'] = ref;
+        if (p.proposed !== undefined) s.facts['proposed'] = p.proposed;
         return s;
       }
       case 'rules': {
-        const kind = /^#?\d+$/.test(ref) ? (opts.text === 'issue' ? 'issue' : 'pr') : /^[0-9a-f]{7,40}$|\.\./.test(ref) ? 'commit' : 'text';
-        return rulesSubject(rt.gh, repo, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config, fs.read, fs.exists);
+        // a bare number is a pull request unless text says it is an issue; a text subject is the text itself
+        const p = parsed('mixed', opts.text === 'issue' ? 'issue' : 'pr').subject;
+        const host = { forge: rt.forge, git: rt.git, repo, source: ruleSource(rt, opts.repo), judge: rt.judge, store: rt.store };
+        if (p.kind === 'text') return rulesSubject(host, { kind: 'text', ref: opts.text ?? p.text }, rt.config);
+        if (p.kind === 'commit') return rulesSubject(host, p, rt.config);
+        return rulesSubject({ ...host, repo: p.repo ?? needRepo() }, { kind: p.kind, number: p.number }, rt.config);
       }
-      case 'message': {
-        const text = opts.text ?? ref;
-        const refs = await Promise.all(messageRefs(text, repo).map((r) => refDetail(rt.gh, r)));
-        return messageSubject(text, 'grade', refs);
+      case 'tree': {
+        // text is the subject when given; otherwise an issue or pull request is its title and body, anything else the text itself
+        const p = opts.text === undefined ? parsed('mixed').subject : { kind: 'text' as const, text: opts.text };
+        let text: string;
+        let label: string;
+        if (p.kind === 'text' || p.kind === 'commit') {
+          text = p.kind === 'text' ? p.text : p.ref;
+          label = truncate(text, 40);
+        } else {
+          const at = p.repo ?? needRepo();
+          const item = p.kind === 'issue' ? await rt.forge.issue(at, p.number) : await rt.forge.pull(at, p.number);
+          text = `${item.title}\n\n${item.body}`;
+          label = `${at}#${p.number}`;
+        }
+        if (!rt.root) throw new Error('no checkout: the tree subject indexes the working directory');
+        const root = rt.root;
+        const index = await indexTree({
+          list: async () => (await rt.git(['ls-files', '-z'])).split('\0'),
+          size: async (p) => (await statFile(`${root}/${p}`)).size,
+          read: (p) => readFile(`${root}/${p}`),
+        });
+        return treeSubject(text, label, index);
+      }
+      case 'plan': {
+        if (opts.text === undefined) throw new Error('the plan pack reads the plan from text: grade(pack: "plan", subject: "<issue number>", text: "<plan>")');
+        const p = parsed('issue');
+        return planSubject(rt.forge, p.repo ?? needRepo(), p.number, opts.text);
+      }
+      case 'log': {
+        // job:<id> or run:<id> through the forge, a bare number is a run, text is the log itself
+        if (opts.text !== undefined) return ciSubject(rt.forge, repo, { text: opts.text });
+        const m = /^(job|run):(\d+)$|^#?(\d+)$/.exec(ref);
+        if (!m) throw new Error(`log subject: expected run:<id>, job:<id>, a run id, or the log in text, got ${ref}`);
+        return ciSubject(rt.forge, repo, m[1] === 'job' ? { job: m[2]! } : { run: m[2] ?? m[3]! });
       }
       default:
         return textSubject(opts.text ?? ref);
     }
   }
 
+  // the checkout serves its own repo; any other repo, or no checkout at all, is read from the forge
+  function ruleSource(rt: Runtime, repo: string | undefined): RuleSource {
+    const local = rt.root !== undefined && (repo === undefined || repo === rt.repo);
+    if (local) return checkoutSource(rt.root!, rt.git, { read: readFile, exists: existsFile }, rt.forge);
+    const remote = repo ?? rt.repo;
+    if (!remote) throw new Error(`no repository: pass repo as the ${rt.forge.name} path or run inside a checkout with a ${rt.forge.name} remote`);
+    return forgeSource(rt.forge, remote);
+  }
+
   // file access via the engine, bound at session start
   let readFile: (p: string) => Promise<string> = async () => '';
   let existsFile: (p: string) => Promise<boolean> = async () => false;
+  let statFile: (p: string) => Promise<{ size: number }> = async () => ({ size: 0 });
 
-  type GradeOptions = { repo?: string; text?: string; ref?: string };
-
-  async function defaultBranch(gh: Gh, repo: string): Promise<string> {
-    return (await gh.json<{ default_branch: string }>(`repos/${repo}`)).default_branch;
-  }
+  type GradeOptions = { repo?: string; text?: string; ref?: string; top?: number };
 
   async function grade(rt: Runtime, packName: string, ref: string, opts?: GradeOptions): Promise<Report> {
     const pack = rt.packs[packName];
     if (!pack) throw new Error(`unknown pack ${packName}`);
     const subject = await subjectFor(rt, packName, ref, opts);
-    const report = await runPack(pack, subject, rt.judge, rt.config);
+    const report = await runPack(pack, subject, rt.judge, rt.config, { top: opts?.top });
     record('grade', report.verdict, { digest: `${packName} ${subject.ref}` });
     return report;
   }
@@ -251,6 +280,7 @@ export const register: Register = (on, rawOptions) => {
     const built = await next(e);
     const sift = {
       judge: (state: unknown, questions: Questions) => ready().judge.ask(state, questions),
+      rank: <T extends RankItem>(items: T[], questions: Questions, opts: RankOptions) => rank(items, questions, ready().judge, opts),
       grade: (pack: string, subject: string, opts?: GradeOptions) => grade(ready(), pack, subject, opts),
       backend: () => (runtime ? runtime.judge.name : 'unbound'),
     };
@@ -260,6 +290,7 @@ export const register: Register = (on, rawOptions) => {
   on('session.start', async ($, e, next) => {
     readFile = (p) => $.fs.read(p);
     existsFile = (p) => $.fs.exists(p);
+    statFile = (p) => $.fs.stat(p);
     const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) };
     const sessionId = await $.session.id();
     const log = new DecisionLog(store, sessionId);
@@ -274,27 +305,36 @@ export const register: Register = (on, rawOptions) => {
     const judge = new LoggedJudge(inner, (d) => log.push({ ...d, module: 'judge', action: 'ask', shadow: false }));
     // the main working tree, never a worktree the session started in and may later remove
     const spawnCwd = async () => (await $.session.repo())?.root ?? (await $.session.cwd());
-    const gh = new Gh((argv, init) => $.process.run(argv, init), spawnCwd);
-    const repoInfo = await gh.repoInfo();
+    const run = (argv: readonly string[], init?: Parameters<typeof $.process.run>[1]) => $.process.run(argv, init);
+    const forge = new GitHubForge(run, spawnCwd);
+    const git = localGit(run, spawnCwd);
+    const checkout = await forge.checkout();
     const root = await spawnCwd();
-    const repoConfig = (await $.fs.exists(`${root}/${CONFIG_PATH}`)) ? JSON.parse(await $.fs.read(`${root}/${CONFIG_PATH}`)) : undefined;
-    const config = resolveConfig([await optionConfig($, options.config, root), repoConfig], repoInfo?.defaultBranch);
+    const globalPath = globalConfigPath({ XDG_CONFIG_HOME: await $.env.get('XDG_CONFIG_HOME'), HOME: await $.env.get('HOME') });
+    const config = resolveConfig(
+      configLayers({
+        option: await optionConfig($, options.config, root),
+        global: await readJson($, globalPath),
+        repo: await readJson($, `${root}/${CONFIG_PATH}`),
+      }),
+      checkout?.defaultBranch,
+    );
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
-    const home = (await $.env.get('HOME')) ?? '/tmp';
     const startWatch = async (): Promise<string | undefined> => {
       const rt = ready();
       if (rt.watcher) return undefined;
       const repo = options.watchRepo || rt.repo;
       const triagePack = rt.packs['triage'];
-      if (!repo) return 'no repository to watch (set watchRepo or run in a checkout with a GitHub remote)';
+      if (!repo) return `no repository to watch (set watchRepo or run in a checkout with a ${forge.name} remote)`;
       if (!triagePack) return 'triage pack missing';
       const watcher = new Watcher(
         {
-          gh,
+          forge,
           store,
           judge,
           pack: triagePack,
           issuePack: rt.packs['issue'],
+          ciPack: rt.packs['ci'],
           config,
           now: () => Date.now(),
           deliver: async (text) => {
@@ -314,6 +354,7 @@ export const register: Register = (on, rawOptions) => {
           minIntervalMs: options.watchMinInterval * 1000,
           maxIntervalMs: options.watchMaxInterval * 1000,
           deferMaxAgeMs: options.watchDeferMaxAgeHours * 3600 * 1000,
+          stallMs: options.watchStallHours * 3600 * 1000,
           seedWindowMs: 90 * 24 * 3600 * 1000,
           rateFloor: 500,
           shadow: options.shadow,
@@ -331,23 +372,23 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    const ledgerPath = options.ledgerPath || (repoInfo ? `${home}/.local/state/fleet/${repoInfo.nameWithOwner.replace('/', '_')}/ledger.md` : undefined);
-    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, archiveDir: `${home}/.cache/sift/${sessionId}`, ledgerPath, held: [] };
+    runtime = { judge, log, config, packs, repo: checkout?.repo, root, forge, git, store, channels: channelTable(defaultChannels(forge), config.outbound.channels), startWatch, sessionId };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs: issue (subject: issue number), pr (PR number), commit (sha or range like main..HEAD), release (subject: "release" or a proposed version like v1.4.0, ref: the branch it is cut from, repo: any repo, no checkout needed), rules (subject: PR number, issue number with text="issue", commit, or free text in text). Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists), hunks (the same subjects as pr; judges each hunk of the diff alone against the stated purpose and lists the hunks that are unrelated to it, workarounds, or behaviour changes no test covers), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number or URL, an issue number with text="issue" or an issue URL, a commit ref or range, or free text in text), locate (an issue number or URL, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open), ci (a failed job as job:<id>, a run id or run:<id> for its first failed job, or the log in text; the lines that explain the failure, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {
             pack: { type: 'string', description: 'pack name' },
-            subject: { type: 'string', description: 'issue or PR number, commit or range, "release", or a version' },
-            repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from GitHub' },
-            text: { type: 'string', description: 'free text subject for the rules pack, or "issue" to grade an issue number against the rules' },
+            subject: { type: 'string', description: 'what the pack grades: an issue or PR number (N or #N) or URL, a commit ref or range, "release" or a version. See the pack list for what each accepts' },
+            repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from the code host' },
+            text: { type: 'string', description: 'free text subject for the rules and locate packs, the plan for the plan pack, a job log for the ci pack, or "issue" to grade an issue number against the rules' },
             ref: { type: 'string', description: 'release pack: the branch or sha the release is cut from. Defaults to HEAD in a checkout, else the configured PR target branch, else the default branch' },
+            top: { type: 'number', description: 'locate pack: how many paths to list per level, default 20' },
           },
           required: ['pack', 'subject'],
         },
@@ -363,6 +404,24 @@ export const register: Register = (on, rawOptions) => {
             questions: { type: 'object', description: 'id -> question' },
           },
           required: ['state', 'questions'],
+        },
+      });
+      await $.tool.register({
+        name: 'rank',
+        description:
+          'Score many items with the same typed questions and get them back in input order with their answers, plus a view sorted by one question. questions has the judge shape; {k} in a question stands for the item index and {field} for a field of an object item ({text} for a string item). mode "batched" fills each request with as many items as fit, so items can see each other and it is cheapest; "isolated" sends one request per item so no item colours another. Use it for "which of these N" problems: relevance, triage, dedup, picking a best candidate.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            items: { type: 'array', description: 'the items to score: strings or objects' },
+            questions: { type: 'object', description: 'id -> question, asked of every item' },
+            mode: { type: 'string', enum: ['batched', 'isolated'], description: 'batched (default) or isolated' },
+            context: { type: 'object', description: 'state every item is read against, placed beside the items' },
+            by: { type: 'string', description: 'the question the sorted view orders by, the first when absent' },
+            choice: { type: 'string', description: 'for a choice question in by: the key whose probability orders the view' },
+            fields: { type: 'array', items: { type: 'string' }, description: 'the item fields the state carries beside k, every field when absent; the others only fill the questions' },
+          },
+          required: ['items', 'questions'],
         },
       });
     }
@@ -387,9 +446,10 @@ export const register: Register = (on, rawOptions) => {
   });
 
   on('tool.call', { tool: 'mcp__sift__grade' }, async ($, e) => {
-    const input = e as unknown as { pack: string; subject: string; repo?: string; text?: string; ref?: string };
+    const input = e as unknown as { pack: string; subject: string; repo?: string; text?: string; ref?: string; top?: number };
     try {
-      const report = await grade(ready(), input.pack, String(input.subject), { repo: input.repo, text: input.text, ref: input.ref });
+      const subject = input.subject === undefined || input.subject === null ? '' : String(input.subject);
+      const report = await grade(ready(), input.pack, subject, { repo: input.repo, text: input.text, ref: input.ref, top: input.top });
       return { result: [{ type: 'text', text: formatReport(report) }] };
     } catch (error) {
       return { deny: `sift grade failed: ${messageOf(error)}` };
@@ -401,39 +461,29 @@ export const register: Register = (on, rawOptions) => {
     const result = await ready().judge.ask(input.state, input.questions);
     record('judge-tool', result.ok ? 'answered' : 'failed');
     const text = result.ok
-      ? Object.entries(result.answers)
-          .map(([id, a]) => `${id}: ${a.type === 'noul' ? a.p.toFixed(3) : a.type === 'choice' ? `${a.choice} (confidence ${a.confidence.toFixed(2)})` : `${a.legend} (confidence ${a.confidence.toFixed(2)})`}`)
-          .join('\n')
+      ? Object.entries(result.answers).map(([id, a]) => `${id}: ${answerLabel(a)}`).join('\n')
       : `judge unavailable: ${result.reason}: ${result.message}`;
     return result.ok ? { result: [{ type: 'text', text }] } : { deny: text };
   });
 
-  // gate before, prune after, on the same call
+  on('tool.call', { tool: 'mcp__sift__rank' }, async ($, e) => {
+    const input = e as unknown as { items: RankItem[]; questions: Questions; mode?: RankOptions['mode']; context?: Record<string, unknown>; by?: string; choice?: string; fields?: string[] };
+    const result = await rank(input.items, input.questions, ready().judge, { mode: input.mode ?? 'batched', context: input.context, by: input.by, choice: input.choice, fields: input.fields });
+    record('rank-tool', result.ok ? 'ranked' : 'failed', { digest: `${input.items.length} items, ${result.requests} requests` });
+    if (!result.ok) return { deny: `rank unavailable: ${result.reason}: ${result.message}` };
+    const lines = result.sorted.map((r) => `${r.index}: ${r.value.toFixed(3)} ${Object.entries(r.answers).map(([id, a]) => `${id}=${answerLabel(a)}`).join(' ')} ${digestOf(r.item)}`);
+    return { result: [{ type: 'text', text: [`${result.items.length} items in ${result.requests} request${result.requests === 1 ? '' : 's'}, sorted by ${input.by ?? Object.keys(input.questions)[0]}`, ...lines].join('\n') }] };
+  });
+
+  // outbound gate before, prune after, on the same call
   on('tool.call', async ($, e, next) => {
     if (e.tool.startsWith('mcp__sift__')) return next(e);
     const rt = runtime;
     if (!rt) return next(e);
-    const gated = options.gate && (e.tool === 'Bash' || e.tool === 'Write' || e.tool === 'Edit');
-    if (gated) {
-      const gatePack = rt.packs['gate'];
-      const input = e as unknown as Record<string, unknown>;
-      const g = { tool: e.tool, input, cwd: await $.session.cwd(), repoRoot: rt.root, task: await lastUserText($) };
-      if (mentionsSecret(g)) {
-        record('gate', 'skipped', { digest: `${e.tool} mentions a secret, not sent to the judge` });
-      } else if (gatePack) {
-        const decision = await runGate(g, gatePack, rt.judge, rt.config, options.gateFailClosed);
-        record('gate', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${e.tool}: ${decision.reason}` });
-        if (!decision.allow) {
-          if (options.shadow) $.ui.log(`sift gate (shadow): would deny ${e.tool}: ${decision.reason}`);
-          else return { deny: `sift gate: ${decision.reason}. Ask the user before retrying.` };
-        }
-      }
-    }
-    const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
+    const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, rt.channels) : undefined;
     if (outbound) {
       const rulesPack = rt.packs['rules'];
-      const artifact = outbound.kind && outbound.action ? { kind: outbound.kind, action: outbound.action } : undefined;
-      const subject = rulesPack ? await rulesSubject(rt.gh, rt.repo, { kind: 'text', ref: outbound.text, artifact }, rt.config, readFile, existsFile) : undefined;
+      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, git: rt.git, repo: rt.repo, source: ruleSource(rt, undefined), judge: rt.judge, store: rt.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, rt.config) : undefined;
       if (rulesPack && subject) {
         const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, rt.config);
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
@@ -448,16 +498,10 @@ export const register: Register = (on, rawOptions) => {
     if (!options.prune || !pruneTools(options).includes(e.tool) || r.deny !== undefined || r.isError) return r;
     const text = e.tool === 'Bash' ? (r.result as { stdout?: string } | undefined)?.stdout : e.tool === 'Read' ? (r.result as { type?: string; file?: { content?: string } } | undefined)?.file?.content : undefined;
     if (typeof text !== 'string' || estimateTokens(text) < options.pruneFloorTokens) return r;
-    const archivePath = `${rt.archiveDir}/${e.tool_use_id ?? Date.now()}.txt`;
-    try {
-      await $.fs.write(archivePath, text);
-    } catch {
-      // archive is a convenience; pruning proceeds with a recovery note that names the tool call instead
-    }
     const input = e as unknown as Record<string, unknown>;
     const pruned = await prune(
       text,
-      { tool: e.tool, input, task: await lastUserText($), archivePath },
+      { tool: e.tool, input, task: await lastUserText($) },
       rt.judge,
       { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold },
     );
@@ -479,126 +523,11 @@ export const register: Register = (on, rawOptions) => {
     return { result: { ...read, file: { ...read.file, content: pruned.text } } };
   });
 
-  on('session.compact', async ($, e, next) => {
-    const rt = runtime;
-    if (!options.compact || !rt || e.trigger === 'precompute') return next(e);
-    try {
-      if (rt.ledgerPath && (await $.fs.exists(rt.ledgerPath))) {
-        const ledger = await $.fs.read(rt.ledgerPath);
-        const result = await compactWithLedger(e.messages as unknown as Message[], rt.judge, {
-          ...COMPACT_DEFAULTS,
-          keepThreshold: options.compactKeepThreshold,
-          pinRecent: options.compactPinRecent,
-          truncateHead: options.compactTruncateHead,
-          instructions: e.instructions,
-          ledger,
-          ledgerPath: rt.ledgerPath,
-        });
-        // one line per compaction, grep-able: the numbers that say whether residue is growing
-        const report = `ledger: tokens ${result.tokensBefore} -> ${result.tokensAfter}, residue ${result.residueTokens}, summaries dropped ${result.summariesDropped}, in flight ${result.inFlight ? 'yes' : 'no'}, kept ${result.messages.length}/${e.messages.length}, ${result.decisions.filter((d) => d.action !== 'drop').length}/${result.decisions.length} calls kept, ${result.requests} request(s)`;
-        if (result.error) {
-          record('compact', 'fallback', { ok: false, reason: result.error, digest: report });
-          $.ui.log(`sift compact: built-in summary (${result.error})`);
-          return next(e);
-        }
-        record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: report, tokensRemoved: Math.max(0, result.tokensBefore - result.tokensAfter) });
-        if (options.shadow) {
-          $.ui.log(`sift compact (shadow): ${report}`);
-          return next(e);
-        }
-        $.ui.toast(`sift compact: ${report}`, { timeoutMs: 10_000 });
-        return { messages: result.messages as unknown as SessionMessage[] };
-      }
-      const result = await compact(e.messages as unknown as Message[], rt.judge, {
-        ...COMPACT_DEFAULTS,
-        keepThreshold: options.compactKeepThreshold,
-        pinRecent: options.compactPinRecent,
-        truncateHead: options.compactTruncateHead,
-        instructions: e.instructions,
-      });
-      if (result.error) {
-        record('compact', 'fallback', { ok: false, reason: result.error, digest: `${e.messages.length} messages` });
-        $.ui.log(`sift compact: built-in summary (${result.error})`);
-        return next(e);
-      }
-      const ratio = reduction(result);
-      const summary = `${Math.round(ratio * 100)}% smaller, ${result.decisions.filter((d) => d.action === 'drop').length} calls dropped, ${result.decisions.filter((d) => d.action === 'truncate').length} results truncated, ${result.requests} request(s), state ~${result.stateTokens} tokens (${result.stage})`;
-      if (ratio < options.compactMinReduction) {
-        record('compact', 'fallback', { digest: `below minimum: ${summary}` });
-        $.ui.log(`sift compact: built-in summary (${summary}, under ${Math.round(options.compactMinReduction * 100)}% minimum)`);
-        return next(e);
-      }
-      record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: summary, tokensRemoved: Math.max(0, estimateTokensOf(e.messages) - estimateTokensOf(result.messages)) });
-      if (options.shadow) {
-        $.ui.log(`sift compact (shadow): would keep ${result.messages.length}/${e.messages.length} messages, ${summary}`);
-        return next(e);
-      }
-      $.ui.toast(`sift compact: kept ${result.messages.length}/${e.messages.length} messages verbatim, ${summary}`, { timeoutMs: 10_000 });
-      return { messages: result.messages as unknown as SessionMessage[] };
-    } catch (error) {
-      $.ui.log(`sift compact: built-in summary (${messageOf(error)})`);
-      return next(e);
-    }
-  });
-
-  // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count.
-  // peer messages held since the last delivery ride along the same way
+  // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count
   on('prompt.submit', async (_$, e, next) => {
     const warnings = runtime?.log.takeWarnings() ?? [];
-    const held = takeHeld();
-    if (warnings.length === 0 && !held) return next(e);
-    return next({ ...e, context: [...(e.context ?? []), ...warnings, ...(held ? [held] : [])] });
-  });
-
-  function takeHeld(): string {
-    if (!runtime || runtime.held.length === 0) return '';
-    const digest = heldDigest(runtime.held);
-    runtime.held = [];
-    return digest;
-  }
-
-  // a peer message is judged before it is queued: nothing actionable is held into a digest, the rest arrives with its scores
-  on('session.receive', async (_$, e, next) => {
-    const rt = runtime;
-    if (!rt || !options.message || options.backend === 'off') return next(e);
-    if (e.origin.kind !== 'peer' && e.origin.kind !== 'peer-send-message') return next(e);
-    const pack = rt.packs['message'];
-    if (!pack) return next(e);
-    const from = /from-name="([^"]+)"/.exec(e.text)?.[1] ?? e.origin.kind;
-    const body = e.text.replace(/^<cross-session-message[^>]*>\s*/, '').replace(/\s*<\/cross-session-message>[\s\S]*$/, '');
-    const head = body.split('\n').find((l) => l.trim().length > 0) ?? '';
-    const refs = await Promise.all(messageRefs(body, rt.repo).map((r) => refDetail(rt.gh, r)));
-    const triage = await judgeMessage(pack, messageSubject(body, e.origin.kind, refs), rt.judge, rt.config);
-    const digest = `${from}: ${head.slice(0, 60)}`;
-    if (triage.error) {
-      record('message', 'fallback', { ok: false, reason: triage.error, digest });
-      return next(e);
-    }
-    if (triage.action === 'consume' && !options.shadow) {
-      record('message', 'consumed', { digest, answers: { label: triage.label } });
-      rt.held.push({ at: Date.now(), from, head, label: triage.label });
-      return { consumed: `sift: not actionable (${triage.label})` };
-    }
-    record('message', options.shadow && triage.action === 'consume' ? 'would-consume' : 'delivered', { digest, answers: { label: triage.label } });
-    const held = takeHeld();
-    const scores = `[sift message from ${from}] ${triage.label}${options.shadow && triage.action === 'consume' ? ' (shadow: would hold)' : ''}`;
-    return next({ ...e, text: [scores, e.text, held].filter(Boolean).join('\n') });
-  });
-
-  on('turn.complete', async ($, e, next) => {
-    if (options.compactAtPercent <= 0 || compacting) return next(e);
-    try {
-      const { context } = await $.session.usage();
-      if ((context.percent ?? 0) >= options.compactAtPercent) {
-        compacting = true;
-        await $.session.compact();
-      }
-    } catch (error) {
-      $.ui.log(`sift: auto-compact skipped (${messageOf(error)})`);
-    } finally {
-      compacting = false;
-    }
-    return next(e);
+    if (warnings.length === 0) return next(e);
+    return next({ ...e, context: [...(e.context ?? []), ...warnings] });
   });
 
   on('model.classify', async ($, e, next) => {
@@ -614,19 +543,6 @@ export const register: Register = (on, rawOptions) => {
     record('classify', options.shadow ? 'would-answer' : 'answered', { digest: e.text.slice(0, 60), answers: { label: `${answer.choice}@${answer.confidence.toFixed(2)}` } });
     if (options.shadow) return next(e);
     return { value: answer.choice };
-  });
-
-  on('turn.step', async function* ($, e, next) {
-    const rt = runtime;
-    if (!options.route || !rt || e.index !== 0 || e.agentId !== undefined || e.effort === undefined) return yield* next(e);
-    const routePack = rt.packs['route'];
-    if (!routePack) return yield* next(e);
-    const prompt = await lastUserText($);
-    const decision = await routeEffort(prompt, routePack, rt.judge, rt.config, options.routeMinEffort, options.routeMaxEffort);
-    record('route', decision.effort ? (options.shadow ? 'would-route' : 'routed') : 'none', { digest: prompt.slice(0, 60), answers: { effort: decision.label } });
-    if (!decision.effort || options.shadow || decision.effort === e.effort) return yield* next(e);
-    $.ui.status(`sift route: ${decision.effort}`);
-    return yield* next({ ...e, effort: decision.effort });
   });
 
   const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : String(n));
@@ -717,4 +633,8 @@ function pruneTools(options: Options): string[] {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function answerLabel(a: Answer): string {
+  return a.type === 'noul' ? a.p.toFixed(3) : a.type === 'choice' ? `${a.choice} (confidence ${a.confidence.toFixed(2)})` : `${a.legend} (confidence ${a.confidence.toFixed(2)})`;
 }

@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { Gh } from '../src/github/gh.ts';
-import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
+import type { Check, Conditional, Run, WatchItem } from '../src/forge/forge.ts';
+import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
-import { diffItems, diffRuns, hashOf, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
+import { diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
-import { Watcher, summarize } from '../src/watch/watcher.ts';
+import { Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
+import { fakeForge } from './fake-forge.ts';
 
 const rules: WatchRules = { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: true, login: 'me', protectedBranches: ['main', 'dev'], branchPattern: '^(feat|fix)/\\d+$' };
 
@@ -25,24 +26,30 @@ describe('item diffing', () => {
   });
 
   it('reports a run once, when it completes', () => {
-    const run = { name: 'ci', branch: 'main', event: 'push', status: 'completed', conclusion: 'failure', sha: 'abc', url: 'u', actor: 'a', updated: '1' };
-    expect(diffRuns({}, { '1': { ...run, status: 'in_progress' } }, 0)).toHaveLength(0);
-    expect(diffRuns({ '1': { ...run, status: 'in_progress' } }, { '1': run }, 0)).toHaveLength(1);
+    const run: Run = { id: '1', name: 'ci', branch: 'main', event: 'push', done: true, conclusion: 'failure', ok: false, sha: 'abc', url: 'u', actor: 'a', updatedAt: '1' };
+    const running: Run = { ...run, done: false, conclusion: null };
+    expect(diffRuns({}, { '1': running }, 0)).toHaveLength(0);
+    expect(diffRuns({ '1': running }, { '1': run }, 0)).toHaveLength(1);
     expect(diffRuns({ '1': run }, { '1': run }, 0)).toHaveLength(0);
   });
 
-  it('settles a head only once every check and status has finished', () => {
-    const done = { name: 'build', status: 'completed', conclusion: 'success' };
-    expect(settleChecks([done, { name: 'test', status: 'in_progress', conclusion: null }], [])).toBeUndefined();
-    expect(settleChecks([done], [{ context: 'ext', state: 'pending' }])).toBeUndefined();
-    expect(settleChecks([done, { name: 'test', status: 'completed', conclusion: 'success' }], [{ context: 'ext', state: 'success' }])).toEqual({ conclusion: 'success', total: 3, failed: [] });
-    expect(settleChecks([done, { name: 'test', status: 'completed', conclusion: 'failure' }], [])).toEqual({ conclusion: 'failure', total: 2, failed: ['test'] });
-    expect(settleChecks([], [])).toEqual({ conclusion: 'success', total: 0, failed: [] });
+  it('settles a head only once every check has finished', () => {
+    const done: Check = { name: 'build', done: true, conclusion: 'success', ok: true };
+    const running: Check = { name: 'test', done: false, conclusion: null, ok: false };
+    const ext = (state: string): Check => ({ name: 'ext', done: state !== 'pending', conclusion: state === 'pending' ? null : state, ok: state === 'success' });
+    expect(settleChecks([done, running])).toBeUndefined();
+    expect(settleChecks([done, ext('pending')])).toBeUndefined();
+    expect(settleChecks([done, { ...running, done: true, conclusion: 'success', ok: true }, ext('success')])).toEqual({ conclusion: 'success', total: 3, failed: [] });
+    expect(settleChecks([done, { ...running, done: true, conclusion: 'failure' }])).toEqual({ conclusion: 'failure', total: 2, failed: [{ name: 'test' }] });
+    expect(settleChecks([{ ...running, id: '7', done: true, conclusion: 'failure' }])!.failed).toEqual([{ name: 'test', id: '7' }]);
+    expect(settleChecks([])).toEqual({ conclusion: 'success', total: 0, failed: [] });
+    expect(pendingChecks([done, running, ext('pending')])).toEqual({ pending: ['test', 'ext'], total: 3 });
   });
 
   it('keeps no bodies in the store', () => {
-    const i = toItem({ n: 1, t: 't', s: 'open', u: 'x[bot]', bl: 9, bp: 'long body', c: 0, l: '', up: '1', cr: '2026-02-01', url: 'u', pr: false, m: false });
+    const i = toItem({ kind: 'issue', number: 1, title: 't', state: 'open', author: { login: 'x[bot]', bot: true }, body: { length: 9, head: 'long body' }, comments: 0, labels: ['p1', 'bug'], updatedAt: '1', createdAt: '2026-02-01', url: 'u', merged: false });
     expect(i.bot).toBe(true);
+    expect(i.labels).toBe('bug,p1');
     expect(JSON.stringify(i)).not.toContain('long body');
   });
 
@@ -55,13 +62,13 @@ describe('item diffing', () => {
 
 describe('rules', () => {
   it('settles ci without the judge', () => {
-    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', branch: 'feat/12', settled: true }), rules).action).toBe('deliver');
-    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', branch: 'feat/12', settled: true }), { ...rules, ci: 'none' }).action).toBe('drop');
+    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', ok: true, branch: 'feat/12', settled: true }), rules).action).toBe('deliver');
+    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', ok: true, branch: 'feat/12', settled: true }), { ...rules, ci: 'none' }).action).toBe('drop');
     expect(routeByRules(event({ kind: 'ci', conclusion: 'failure', branch: 'main' }), rules).action).toBe('deliver');
     expect(routeByRules(event({ kind: 'ci', conclusion: 'failure', branch: 'feat/12' }), rules).action).toBe('deliver');
     expect(routeByRules(event({ kind: 'ci', conclusion: 'failure', branch: 'scratch' }), rules).action).toBe('defer');
-    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', branch: 'main' }), rules).action).toBe('defer');
-    expect(routeByRules(event({ kind: 'ci', conclusion: 'success' }), { ...rules, ci: 'all' }).action).toBe('deliver');
+    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', ok: true, branch: 'main' }), rules).action).toBe('defer');
+    expect(routeByRules(event({ kind: 'ci', conclusion: 'success', ok: true }), { ...rules, ci: 'all' }).action).toBe('deliver');
     expect(routeByRules(event({ kind: 'ci', conclusion: 'failure' }), { ...rules, ci: 'none' }).action).toBe('drop');
   });
 
@@ -78,41 +85,31 @@ describe('rules', () => {
   });
 });
 
-// a gh that answers from canned responses, one per call in order
-function fakeGh(responses: (() => string)[]): Gh {
+// each read answers the next scripted value; a read past the script is unchanged
+function script<T>(...values: (Conditional<T> | (() => Conditional<T>))[]): () => Promise<Conditional<T>> {
   let i = 0;
-  return new Gh(async (argv) => {
-    if (argv[0] === 'gh' && argv[1] === 'api') {
-      const next = responses[i++] ?? (() => 'HTTP/2.0 304 Not Modified\r\n\r\n');
-      const out = next();
-      // a --jq page request gets the body alone, already in the slim shape
-      if (argv[2] === '--jq') return { exitCode: 0, stdout: out.slice(out.indexOf('\r\n\r\n') + 4), stderr: '' };
-      return { exitCode: 0, stdout: out, stderr: '' };
-    }
-    return { exitCode: 0, stdout: '{}', stderr: '' };
-  });
+  return async () => {
+    const next = values[i++];
+    return next === undefined ? { changed: false, rate: {} } : typeof next === 'function' ? next() : next;
+  };
 }
 
-const page = (body: unknown, etag = '"e"') => () => `HTTP/2.0 200 OK\r\nEtag: ${etag}\r\nX-Ratelimit-Remaining: 4000\r\n\r\n${JSON.stringify(body)}`;
-const notModified = () => 'HTTP/2.0 304 Not Modified\r\n\r\n';
-const issue = (n: number, over: Record<string, unknown> = {}) => ({ number: n, title: `Issue ${n}`, state: 'open', user: { login: 'alice' }, body: 'b', comments: 0, labels: [], updated_at: `2026-01-0${n}T00:00:00Z`, html_url: `https://x/${n}`, ...over });
-const slim = (n: number, over: Record<string, unknown> = {}) => ({ n, t: `Issue ${n}`, s: 'open', u: 'alice', bl: 1, bp: 'b', c: 0, l: '', up: `2026-01-0${n}T00:00:00Z`, cr: `2026-01-0${n}T00:00:00Z`, url: `https://x/${n}`, pr: false, m: false, ...over });
+const changed = <T>(value: T, token = 'e'): Conditional<T> => ({ changed: true, token, rate: { remaining: 4000 }, value });
+const same = <T>(): Conditional<T> => ({ changed: false, rate: { remaining: 4000 } });
+const slim = (n: number, over: Partial<WatchItem> = {}): WatchItem => ({ kind: 'issue', number: n, title: `Issue ${n}`, state: 'open', author: { login: 'alice', bot: false }, body: { length: 1, head: 'b' }, comments: 0, labels: [], updatedAt: `2026-01-0${n}T00:00:00Z`, createdAt: `2026-01-0${n}T00:00:00Z`, url: `https://x/${n}`, merged: false, ...over });
+const run = (id: number, name: string, done: boolean, conclusion: string | null, sha = 'abc1234def'): Run => ({ id: String(id), name, branch: 'feat/3', event: 'push', done, conclusion, ok: conclusion === 'success', sha, url: `https://x/runs/${id}`, actor: 'me', updatedAt: '1' });
+const check = (name: string, done: boolean, conclusion: string | null = done ? 'success' : null): Check => ({ name, done, conclusion, ok: conclusion === 'success' });
+const pull = (sha = 'abc1234def') => ({ number: 3, title: 'Feat 3', branch: 'feat/3', sha, url: 'https://x/pull/3', user: 'alice' });
 
 describe('watcher', () => {
   it('seeds silently, then delivers judged events and defers the rest with a digest', async () => {
-    const gh = fakeGh([
-      // tick 1: seed
-      page([issue(1)]),
-      page([slim(1), slim(2)]),
-      page({ workflow_runs: [] }),
-      // tick 2: issue 2 got a comment (judged), issue 1 got a label (deferred)
-      page([issue(2)], '"f"'),
-      page([slim(1, { l: 'p1' }), slim(2, { c: 1, up: '2026-01-03T00:00:00Z' })]),
-      notModified,
-      // detail fetches for the judged event
-      page(issue(2, { comments: 1 })),
-      page([{ user: { login: 'bob' }, body: 'is this still planned?' }]),
-    ]);
+    const forge = fakeForge({
+      // tick 1 seeds; tick 2: issue 2 got a comment (judged), issue 1 got a label (deferred)
+      items: script(changed([slim(1), slim(2)]), changed([slim(1, { labels: ['p1'] }), slim(2, { comments: 1, updatedAt: '2026-01-03T00:00:00Z' })], 'f')),
+      runs: script(changed([])),
+      issue: async (_r, n) => ({ ...slim(n), body: 'b', state: 'open' }),
+      comments: async () => [{ author: { login: 'bob', bot: false }, body: 'is this still planned?', createdAt: '2026-01-03T00:00:00Z' }],
+    });
     const store = new Map<string, unknown>();
     const delivered: string[] = [];
     const judge: Judge = {
@@ -132,7 +129,7 @@ describe('watcher', () => {
     const scheduled: (() => void)[] = [];
     const watcher = new Watcher(
       {
-        gh,
+        forge,
         store: { get: async (k) => store.get(k), set: async (k, v) => void store.set(k, JSON.parse(JSON.stringify(v))) },
         judge,
         pack: BUILTIN_PACKS['triage']!,
@@ -146,7 +143,7 @@ describe('watcher', () => {
           return { cancel: () => {} };
         },
       },
-      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: false, ignoreBots: true, ci: 'failures', triage: true, protectedBranches: ['main'] } },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: false, ignoreBots: true, ci: 'failures', triage: true, protectedBranches: ['main'] } },
     );
     await watcher.start();
     await watcher.tick();
@@ -161,46 +158,36 @@ describe('watcher', () => {
     expect(summarize([{ event: event({}), reason: 'a' }, { event: event({}), reason: 'a' }])).toBe('2 a');
   });
 
+  const silent = (over: Partial<WatchHost> = {}) => ({
+    store: { get: async () => undefined, set: async () => {} },
+    judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) } as Judge,
+    pack: BUILTIN_PACKS['triage']!,
+    config: DEFAULT_CONFIG,
+    log: () => {},
+    status: () => {},
+    schedule: () => ({ cancel: () => {} }),
+    ...over,
+  });
+  const ciRules = { ignoreSelf: true, ignoreBots: true, ci: 'failures' as const, triage: false, protectedBranches: ['main'], branchPattern: '^feat/\\d+$' };
+
   it('delivers one settled verdict per pr head when the last check completes', async () => {
-    const run = (id: number, name: string, status: string, conclusion: string | null) => ({ id, name, head_branch: 'feat/3', event: 'push', status, conclusion, head_sha: 'abc1234def', html_url: `https://x/runs/${id}`, actor: { login: 'me' }, updated_at: '1' });
-    const pulls = page([{ number: 3, title: 'Feat 3', head: { ref: 'feat/3', sha: 'abc1234def' }, html_url: 'https://x/pull/3' }]);
-    const gh = fakeGh([
-      // the login lookup for ignoreSelf
-      page({ login: 'me' }),
-      // tick 1: seed with both workflows running
-      page([issue(1)]),
-      page([slim(1)]),
-      page({ workflow_runs: [run(10, 'build', 'in_progress', null), run(11, 'test', 'in_progress', null)] }),
-      // tick 2: build finished, test still running
-      notModified,
-      page({ workflow_runs: [run(10, 'build', 'completed', 'success'), run(11, 'test', 'in_progress', null)] }, '"r2"'),
-      pulls,
-      page({ check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }, { name: 'test', status: 'in_progress', conclusion: null }] }),
-      page({ statuses: [] }),
-      // tick 3: test finished too
-      notModified,
-      page({ workflow_runs: [run(10, 'build', 'completed', 'success'), run(11, 'test', 'completed', 'success')] }, '"r3"'),
-      pulls,
-      page({ check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }, { name: 'test', status: 'completed', conclusion: 'success' }] }),
-      page({ statuses: [] }),
-    ]);
+    let test = false;
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      // tick 1: both running, the pr not yet open. tick 2: build finished, test still running, the pr opened. tick 3: test finished too, the head list unchanged
+      runs: script(changed([run(10, 'build', false, null), run(11, 'test', false, null)]), changed([run(10, 'build', true, 'success'), run(11, 'test', false, null)], 'r2'), () => {
+        test = true;
+        return changed([run(10, 'build', true, 'success'), run(11, 'test', true, 'success')], 'r3');
+      }),
+      pulls: script(same(), changed([pull()]), same()),
+      checks: async () => [check('build', true), check('test', test)],
+    });
     const delivered: string[] = [];
     const decisions: string[] = [];
     const watcher = new Watcher(
-      {
-        gh,
-        store: { get: async () => undefined, set: async () => {} },
-        judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) },
-        pack: BUILTIN_PACKS['triage']!,
-        config: DEFAULT_CONFIG,
-        now: () => 1_000_000,
-        deliver: async (t) => void delivered.push(t),
-        log: () => {},
-        status: () => {},
-        schedule: () => ({ cancel: () => {} }),
-        onDecision: (e, action, label) => decisions.push(`${action} ${e.id} ${label}`),
-      },
-      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'], branchPattern: '^feat/\\d+$' } },
+      { forge, ...silent(), now: () => 1_000_000, deliver: async (t) => void delivered.push(t), onDecision: (e, action, label) => decisions.push(`${action} ${e.id} ${label}`) },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules },
     );
     await watcher.start();
     await watcher.tick();
@@ -212,42 +199,161 @@ describe('watcher', () => {
     expect(delivered[0]).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks)');
     expect(delivered[0]).toContain('https://x/pull/3 · ci settled on pr');
     expect(watcher.snapshot().settled).toEqual({ '3@abc1234def': 'success' });
+    expect(watcher.snapshot().pending).toEqual({});
+  });
+
+  it('attaches the ci pack report on each failed check, one job per check, to a settled failure', async () => {
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      // tick 1: running, the pr not yet open. tick 2: both finished, test failed; the log read lists the open prs once more
+      runs: script(changed([run(10, 'build', false, null)]), changed([run(10, 'build', true, 'failure')], 'r2')),
+      pulls: script(same(), changed([pull()]), changed([pull()])),
+      checks: async () => [check('build', true), { ...check('test', true, 'failure'), id: '7' }, check('ext', true, 'error')],
+      jobLog: async (_r, id) => ({ job: `job ${id}`, run: '10', sha: 'abc1234def', url: `https://x/job/${id}`, steps: [{ name: 'Run npm test', ok: false, text: '2026-09-21T02:35:35.0000000Z FAIL tests/a.test.ts\n2026-09-21T02:35:36.0000000Z ##[error]Process completed with exit code 1.' }] }),
+      diff: async () => 'diff --git a/tests/a.test.ts b/tests/a.test.ts\n+x\n',
+    });
+    const judge: Judge = {
+      name: 'fake',
+      ask: async (_s, q: Questions) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k) => [k, { type: 'noul' as const, p: k === 'environment' ? 0.1 : 0.9 }])) }),
+    };
+    const delivered: string[] = [];
+    const watcher = new Watcher(
+      { forge, ...silent({ judge, ciPack: BUILTIN_PACKS['ci']! }), now: () => 1_000_000, deliver: async (t) => void delivered.push(t) },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules },
+    );
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    const lines = delivered[0]!.split('\n');
+    expect(lines[1]).toBe('ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (3 checks, failed: test, ext)');
+    expect(lines[2]).toBe('  by me · https://x/pull/3 · ci settled on pr');
+    expect(lines[3]).toBe('  sift ci o/r job 7: PASS (judge: fake)');
+    expect(lines[4]).toBe('    [info] log.trimmed: 2 of 2 lines read from the failing step Run npm test');
+    expect(lines[5]).toBe('    lines: top 2 of 2, 2 not ruled out');
+    expect(lines[6]).toBe('      1. [satisfied] 1: FAIL tests/a.test.ts = 0.90');
+    expect(lines.slice(8, 11).map((l) => l.slice(0, 28))).toEqual(['    [satisfied] own_fault = ', '    [violated] environment =', '    [satisfied] fixable_here']);
+    expect(lines[11]).toBe('  ext: no log to read');
+  });
+
+  it('delivers a pr head whose checks stay unfinished past the stall interval as stalled, once, then its verdict when it settles', async () => {
+    let test = false;
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      // tick 1: both running, the pr not yet open. tick 2: build finished, the head is pending. ticks 3 and 4: nothing moved. tick 5: test finished
+      runs: script(changed([run(10, 'build', false, null), run(11, 'test', false, null)]), changed([run(10, 'build', true, 'success'), run(11, 'test', false, null)], 'r2'), same(), same(), () => {
+        test = true;
+        return changed([run(10, 'build', true, 'success'), run(11, 'test', true, 'success')], 'r3');
+      }),
+      pulls: script(same(), changed([pull()]), same(), same(), same()),
+      checks: async () => [check('build', true), check('test', test)],
+    });
+    let pullReads = 0;
+    const probe = forge.pulls.bind(forge);
+    forge.pulls = (...args) => (pullReads += 1, probe(...args));
+    const delivered: string[] = [];
+    let now = 1_000_000;
+    const watcher = new Watcher(
+      { forge, ...silent(), now: () => now, deliver: async (t) => void delivered.push(t) },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 3600_000, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules },
+    );
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    expect(watcher.snapshot().pending).toEqual({ '3@abc1234def': { number: 3, title: 'Feat 3', branch: 'feat/3', sha: 'abc1234def', url: 'https://x/pull/3', user: 'me', since: 1_000_000, stalled: false } });
+    expect(watcher.snapshot().pulls).toEqual([pull()]);
+    now += 3600_000;
+    await watcher.tick();
+    // the stall check read the head list from state: one probe per tick, no refetch behind the 304
+    expect(pullReads).toBe(3);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('ci stalled: pr #3 feat/3 @abc1234: Feat 3 (1 of 2 checks pending: test)');
+    expect(delivered[0]).toContain('by me · https://x/pull/3 · ci stalled on pr');
+    expect(delivered[0]).toContain('deferred meanwhile: 1 ci success on pr #3, awaiting the other checks');
+    now += 3600_000;
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    expect(watcher.snapshot().pending['3@abc1234def']?.stalled).toBe(true);
+    await watcher.tick();
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1]).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks)');
+    expect(watcher.snapshot().pending).toEqual({});
+  });
+
+  it('forgets a pending head once its pr moved to a new commit', async () => {
+    let sha = 'aaa1234';
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      // tick 2: build finished on the first head, an external status still pending. tick 3: past the stall interval, but the pr head moved on: the new head starts over
+      runs: script(changed([run(10, 'build', false, null, 'aaa1234')]), changed([run(10, 'build', true, 'success', 'aaa1234')], 'r2'), () => {
+        sha = 'bbb1234';
+        return same();
+      }),
+      pulls: script(same(), () => changed([pull(sha)]), () => changed([pull(sha)])),
+      checks: async (_r, at) => [...(at === 'aaa1234' ? [check('build', true)] : []), { name: 'ext', done: false, conclusion: null, ok: false }],
+    });
+    const delivered: string[] = [];
+    let now = 1_000_000;
+    const watcher = new Watcher(
+      { forge, ...silent(), now: () => now, deliver: async (t) => void delivered.push(t) },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 3600_000, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules },
+    );
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(Object.keys(watcher.snapshot().pending)).toEqual(['3@aaa1234']);
+    now += 3600_000;
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    expect(watcher.snapshot().pending).toEqual({ '3@bbb1234': { number: 3, title: 'Feat 3', branch: 'feat/3', sha: 'bbb1234', url: 'https://x/pull/3', user: 'alice', since: now, stalled: false } });
+  });
+
+  it('delivers a pr head with no runs at all as stalled after the stall interval', async () => {
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      // tick 1: seed with the pr open, its only check queued and no run reported. tick 2: nothing changed. tick 3: past the stall interval, the check still queued
+      runs: script(changed([])),
+      pulls: script(changed([pull()]), same(), same()),
+      checks: async () => [check('build', false)],
+    });
+    const delivered: string[] = [];
+    let now = 1_000_000;
+    const watcher = new Watcher(
+      { forge, ...silent(), now: () => now, deliver: async (t) => void delivered.push(t) },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 3600_000, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules },
+    );
+    await watcher.start();
+    await watcher.tick();
+    expect(watcher.snapshot().pending).toEqual({ '3@abc1234def': { number: 3, title: 'Feat 3', branch: 'feat/3', sha: 'abc1234def', url: 'https://x/pull/3', user: 'alice', since: 1_000_000, stalled: false } });
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    now += 3600_000;
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('ci stalled: pr #3 feat/3 @abc1234: Feat 3 (1 of 1 checks pending: build)');
+    expect(delivered[0]).toContain('by alice · https://x/pull/3 · ci stalled on pr');
+    expect(watcher.snapshot().pending['3@abc1234def']?.stalled).toBe(true);
   });
 
   it('checks a new issue against the issue pack, the filer\'s own included, and delivers its findings', async () => {
-    const gh = fakeGh([
-      page({ login: 'me' }),
-      // tick 1: seed
-      page([issue(1)]),
-      page([slim(1)]),
-      page({ workflow_runs: [] }),
+    const forge = fakeForge({
+      login: async () => 'me',
       // tick 2: me filed issue 2 with no labels and a task label but no parent
-      page([issue(2)], '"f"'),
-      page([slim(2, { u: 'me', l: 'task', cr: '2026-06-01T00:00:00Z', up: '2026-06-01T00:00:00Z' })]),
-      notModified,
-      // the issue subject: item, comments, open issues, parent
-      page(issue(2, { user: { login: 'me' }, labels: [{ name: 'task' }], body: '## Summary\nthe summary' })),
-      page([]),
-      page([issue(2)]),
-      page(null),
-    ]);
+      items: script(changed([slim(1)]), changed([slim(2, { author: { login: 'me', bot: false }, labels: ['task'], createdAt: '2026-06-01T00:00:00Z', updatedAt: '2026-06-01T00:00:00Z' })], 'f')),
+      runs: script(changed([])),
+      issue: async (_r, n) => ({ ...slim(n), state: 'open', author: { login: 'me', bot: false }, labels: ['task'], body: '## Summary\nthe summary' }),
+      openIssues: async () => [{ number: 2, title: 'Issue 2' }],
+    });
     const delivered: string[] = [];
     const config = resolveConfig({ issues: { requiredLabelGroups: [['bug', 'enhancement']], childLabels: ['task'], templateSections: ['Summary', 'Acceptance'] } });
     const watcher = new Watcher(
-      {
-        gh,
-        store: { get: async () => undefined, set: async () => {} },
-        judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) },
-        pack: BUILTIN_PACKS['triage']!,
-        issuePack: BUILTIN_PACKS['issue']!,
-        config,
-        now: () => 1_750_000_000_000,
-        deliver: async (t) => void delivered.push(t),
-        log: () => {},
-        status: () => {},
-        schedule: () => ({ cancel: () => {} }),
-      },
-      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'] } },
+      { forge, ...silent({ config, issuePack: BUILTIN_PACKS['issue']! }), now: () => 1_750_000_000_000, deliver: async (t) => void delivered.push(t) },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: { ignoreSelf: true, ignoreBots: true, ci: 'failures', triage: false, protectedBranches: ['main'] } },
     );
     await watcher.start();
     await watcher.tick();

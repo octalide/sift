@@ -1,7 +1,7 @@
 import type { Judge } from '../judge/types.ts';
 import { runPack } from '../packs/run.ts';
 import type { Pack, Subject } from '../packs/types.ts';
-import type { RepoConfig } from '../github/config.ts';
+import type { RepoConfig } from '../repo/config.ts';
 import { truncate } from '../tokens.ts';
 import type { WatchEvent } from './poll.ts';
 
@@ -22,7 +22,8 @@ export function routeByRules(e: WatchEvent, rules: WatchRules): Route {
   if (e.kind === 'ci') {
     if (rules.ci === 'none') return { action: 'drop', reason: 'ci off' };
     if (e.settled) return { action: 'deliver', reason: 'ci settled on pr' };
-    const ok = e.conclusion === 'success' || e.conclusion === 'skipped' || e.conclusion === 'neutral';
+    if (e.stalled) return { action: 'deliver', reason: 'ci stalled on pr' };
+    const ok = e.ok === true;
     if (rules.ci === 'all') return { action: 'deliver', reason: 'ci all' };
     if (ok) return { action: 'defer', reason: 'ci success' };
     const branch = e.branch ?? '';
@@ -79,9 +80,9 @@ export async function judgeEvent(pack: Pack, subject: Subject, judge: Judge, con
   const actionable = report.judged.find((j) => j.id === 'actionable');
   const kind = report.judged.find((j) => j.id === 'kind');
   const urgency = report.judged.find((j) => j.id === 'urgency');
-  const p = actionable?.answer.type === 'noul' ? actionable.answer.p : undefined;
-  const kindLabel = kind?.answer.type === 'choice' ? kind.answer.choice : undefined;
-  const urgencyLabel = urgency?.answer.type === 'score' ? urgency.answer.legend.split(':')[0] : undefined;
+  const p = actionable?.answer?.type === 'noul' ? actionable.answer.p : undefined;
+  const kindLabel = kind?.answer?.type === 'choice' ? kind.answer.choice : undefined;
+  const urgencyLabel = urgency?.answer?.type === 'score' ? urgency.answer.legend.split(':')[0] : undefined;
   const parts = [p !== undefined ? `actionable ${p.toFixed(2)}` : '', kindLabel ? `kind ${kindLabel}` : '', urgencyLabel ? `urgency ${urgencyLabel}` : ''].filter(Boolean);
   // unclear delivers: the cost of a wasted look is lower than a missed question
   const action = actionable && actionable.band === 'violated' ? 'defer' : 'deliver';

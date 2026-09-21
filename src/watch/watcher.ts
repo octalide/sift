@@ -1,11 +1,12 @@
-import type { RepoConfig } from '../github/config.ts';
-import { Gh, GhError } from '../github/gh.ts';
+import type { RepoConfig } from '../repo/config.ts';
+import type { Forge, PullHead, Rate } from '../forge/forge.ts';
 import type { Judge } from '../judge/types.ts';
 import type { Finding, Pack } from '../packs/types.ts';
-import { runChecks } from '../packs/run.ts';
-import { issueSubject } from '../github/subjects.ts';
+import { formatReport, runChecks, runPack } from '../packs/run.ts';
+import { issueSubject } from '../repo/subjects.ts';
+import { ciSubject } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
-import { diffItems, diffRuns, formatEvent, initialState, ITEM_JQ, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type CheckRun, type CommitStatus, type Deferred, type RawItem, type WatchEvent, type WatchState } from './poll.ts';
+import { diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
 
 export type WatchOptions = {
@@ -13,6 +14,8 @@ export type WatchOptions = {
   minIntervalMs: number;
   maxIntervalMs: number;
   deferMaxAgeMs: number;
+  // how long the checks on a pr head may stay unfinished before the head is delivered as stalled
+  stallMs: number;
   // how far back the first poll looks; older items are still tracked from their next change
   seedWindowMs: number;
   rateFloor: number;
@@ -21,12 +24,14 @@ export type WatchOptions = {
 };
 
 export type WatchHost = {
-  gh: Gh;
+  forge: Forge;
   store: StoreLike;
   judge: Judge;
   pack: Pack;
   // the issue pack's mechanical checks run on every new issue, the filer's own included
   issuePack?: Pack;
+  // the ci pack runs on each failed check of a settled pr head and its report rides with the delivery
+  ciPack?: Pack;
   config: RepoConfig;
   now: () => number;
   deliver: (text: string) => Promise<void>;
@@ -37,6 +42,10 @@ export type WatchHost = {
 };
 
 type Timer = { cancel: () => void };
+
+type Pull = PullHead;
+
+const headKey = (p: Pull): string => `${p.number}@${p.sha}`;
 
 export class Watcher {
   private timer?: Timer;
@@ -58,7 +67,7 @@ export class Watcher {
     const stored = (await this.host.store.get(this.key)) as WatchState | undefined;
     if (stored && stored.version !== STATE_VERSION) this.host.log(`sift watch ${this.options.repo}: stored state is from an older version, reseeding`);
     this.state = stored && stored.version === STATE_VERSION ? stored : initialState();
-    if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.gh.login();
+    if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.forge.login();
     if (this.state.paused) {
       this.host.status(`watch paused (${this.options.repo})`);
       return;
@@ -125,14 +134,16 @@ export class Watcher {
     try {
       const a = await this.pollItems(now);
       const b = await this.pollRuns(now);
+      const c = await this.pollPulls(now);
       changed = a.changed || b.changed;
-      rateWait = Math.max(a.rateWait, b.rateWait);
+      rateWait = Math.max(a.rateWait, b.rateWait, c.rateWait);
       this.state.failures = 0;
       if (!this.state.seeded) {
         this.state.seeded = true;
+        if (c.changed) await this.seedHeads(now);
         this.host.log(`sift watch seeded for ${this.options.repo}, streaming changes from now`);
       } else {
-        await this.handle([...a.events, ...b.events]);
+        await this.handle([...a.events, ...b.events], c.changed);
       }
     } catch (error) {
       this.state.failures += 1;
@@ -151,57 +162,59 @@ export class Watcher {
   }
 
   private async pollItems(now: number): Promise<{ changed: boolean; events: WatchEvent[]; rateWait: number }> {
-    const probe = await this.host.gh.api(`repos/${this.options.repo}/issues?state=all&sort=updated&direction=desc&per_page=1`, {
-      etag: this.state.etags.issues,
-    });
-    const rateWait = this.rateWait(probe.remaining, probe.reset, now);
-    if (probe.status === 304) return { changed: false, events: [], rateWait };
     const stamp = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    // the seed window is fixed before the first read so the read and the cursor agree
     if (!this.state.seeded) {
       this.state.seededAt = stamp(now);
       this.state.cursor = stamp(now - this.options.seedWindowMs);
     }
-    const since = this.state.cursor;
-    const cursor = stamp(now);
-    const raw = await this.host.gh.pages<RawItem>(`repos/${this.options.repo}/issues?state=all&sort=updated&direction=asc&since=${since}`, ITEM_JQ);
-    const fresh = Object.fromEntries(raw.map((r) => [String(r.n), toItem(r)]));
+    const read = await this.host.forge.items(this.options.repo, this.state.cursor, this.state.etags.issues);
+    const rateWait = this.rateWait(read.rate, now);
+    if (!read.changed) return { changed: false, events: [], rateWait };
+    const fresh = Object.fromEntries(read.value.map((i) => [String(i.number), toItem(i)]));
     const events = this.state.seeded ? diffItems(this.state.items, fresh, now, this.state.seededAt) : [];
     this.state.items = { ...this.state.items, ...fresh };
-    this.state.cursor = cursor;
-    this.state.etags.issues = probe.etag;
+    this.state.cursor = stamp(now);
+    this.state.etags.issues = read.token;
     return { changed: true, events, rateWait };
   }
 
   private async pollRuns(now: number): Promise<{ changed: boolean; events: WatchEvent[]; rateWait: number }> {
-    let probe;
-    try {
-      probe = await this.host.gh.api(`repos/${this.options.repo}/actions/runs?per_page=30`, { etag: this.state.etags.runs });
-    } catch (error) {
-      // a repo without actions answers 404 or 403; that is not a failure
-      if (error instanceof GhError && /http 40[34]/.test(error.message)) return { changed: false, events: [], rateWait: 0 };
-      throw error;
-    }
-    const rateWait = this.rateWait(probe.remaining, probe.reset, now);
-    if (probe.status === 304) return { changed: false, events: [], rateWait };
-    const parsed = JSON.parse(probe.body || '{}') as { workflow_runs?: Parameters<typeof toRuns>[0] };
-    const fresh = toRuns(parsed.workflow_runs ?? []);
+    const read = await this.host.forge.runs(this.options.repo, this.state.etags.runs);
+    const rateWait = this.rateWait(read.rate, now);
+    if (!read.changed) return { changed: false, events: [], rateWait };
+    const fresh = toRuns(read.value);
     const events = this.state.seeded ? diffRuns(this.state.runs, fresh, now) : [];
     this.state.runs = trimRuns({ ...this.state.runs, ...fresh });
-    this.state.etags.runs = probe.etag;
+    this.state.etags.runs = read.token;
     return { changed: events.length > 0, events, rateWait };
   }
 
-  private rateWait(remaining: number | undefined, reset: number | undefined, now: number): number {
+  private rateWait({ remaining, reset }: Rate, now: number): number {
     if (remaining === undefined || remaining >= this.options.rateFloor) return 0;
     const wait = reset ? reset * 1000 - now + 5000 : this.options.maxIntervalMs;
     this.host.log(`sift watch ${this.options.repo}: ${remaining} api calls left, waiting ${Math.round(wait / 1000)}s`);
     return Math.max(wait, this.options.maxIntervalMs);
   }
 
-  private async handle(events: WatchEvent[]): Promise<void> {
+  // the open pr heads, fetched conditionally so an unchanged list costs nothing. a 200 replaces the list in state and
+  // every head on it is seeded; the steps of the poll read the list from state either way
+  private async pollPulls(now: number): Promise<{ changed: boolean; rateWait: number }> {
+    if (this.options.rules.ci === 'none') return { changed: false, rateWait: 0 };
+    const read = await this.host.forge.pulls(this.options.repo, this.state.etags.pulls);
+    const rateWait = this.rateWait(read.rate, now);
+    if (!read.changed) return { changed: false, rateWait };
+    this.state.pulls = read.value;
+    this.state.etags.pulls = read.token;
+    return { changed: true, rateWait };
+  }
+
+  private async handle(events: WatchEvent[], fresh: boolean): Promise<void> {
     const rules: WatchRules = { ...this.options.rules, login: this.state.login };
     const deliver: { event: WatchEvent; label: string }[] = [];
-    for (const e of await this.settleRuns(events)) {
+    const settled = await this.settleRuns(events);
+    const seeded = fresh ? await this.seedHeads(this.host.now()) : [];
+    for (const e of [...settled, ...seeded, ...(await this.stallHeads())]) {
       const filing = e.kind === 'issue' && e.isNew && !(rules.ignoreBots && e.bot) ? await this.fileCheck(e) : [];
       if (filing.length > 0) e.findings = filing.map((f) => `${f.check}: ${f.message}`);
       const route = filing.length > 0 ? { action: 'deliver' as const, reason: `filed with ${filing.length} finding${filing.length === 1 ? '' : 's'}` } : routeByRules(e, rules);
@@ -228,23 +241,23 @@ export class Watcher {
     }
     this.expireDeferred();
     if (deliver.length === 0) return;
-    for (const d of deliver) this.host.onDecision?.(d.event, 'deliver', d.label);
+    for (const d of deliver) {
+      this.host.onDecision?.(d.event, 'deliver', d.label);
+      if (d.event.settled && d.event.conclusion === 'failure') d.event.reports = await this.ciReports(d.event);
+    }
     await this.host.deliver(this.render(deliver));
     this.state.deferred = [];
     this.state.lastDelivery = this.host.now();
   }
 
   // a completed run on the head of an open pr is reported as the pr's verdict, once, when the last check finishes.
-  // until then the run event is held with the pr named. under ci: all the run events pass through as well
+  // until then the run event is held with the pr named and the head is tracked as pending. under ci: all the run events pass through as well
   private async settleRuns(events: WatchEvent[]): Promise<WatchEvent[]> {
     const runs = events.filter((e) => e.kind === 'ci' && !e.settled);
     if (runs.length === 0 || this.options.rules.ci === 'none') return events;
     const out: WatchEvent[] = events.filter((e) => e.kind !== 'ci');
-    const pulls = await this.openPulls().catch((error: unknown) => {
-      this.host.log(`sift watch ${this.options.repo}: could not list open prs (${error instanceof Error ? error.message : String(error)}), routing runs alone`);
-      return undefined;
-    });
-    if (!pulls) return events;
+    const pulls = this.state.pulls;
+    this.prunePending();
     const sha = (e: WatchEvent) => this.state.runs[e.id.replace(/^ci#/, '')]?.sha ?? '';
     for (const e of runs) {
       const pr = pulls.find((p) => p.sha === sha(e));
@@ -253,51 +266,131 @@ export class Watcher {
         continue;
       }
       if (this.options.rules.ci === 'all') out.push(e);
-      const key = `${pr.number}@${pr.sha}`;
+      const key = headKey(pr);
       if (this.state.settled[key]) {
         if (this.options.rules.ci !== 'all') this.host.onDecision?.(e, 'drop', `ci settled on pr #${pr.number} already delivered`);
         continue;
       }
-      const verdict = await this.settle(pr.sha).catch(() => undefined);
-      if (!verdict) {
+      const head = await this.settle(pr.sha).catch(() => undefined);
+      if (!head) continue;
+      if (!head.verdict) {
+        this.state.pending[key] ??= { ...pr, user: e.user, since: e.at, stalled: false };
         if (this.options.rules.ci !== 'all') this.defer(e, `ci ${e.conclusion ?? 'unknown'} on pr #${pr.number}, awaiting the other checks`);
         continue;
       }
-      this.state.settled = trimSettled({ ...this.state.settled, [key]: verdict.conclusion });
-      const failed = verdict.failed.length > 0 ? `, failed: ${verdict.failed.join(', ')}` : '';
+      out.push(this.settledEvent(pr, head.verdict, e.user, e.at));
+    }
+    return out;
+  }
+
+  // a pending head older than the stall interval is checked once more: settled by now it delivers the verdict,
+  // still unfinished it delivers as stalled, once. a head that moved or closed is forgotten, so a new commit starts over
+  private async stallHeads(): Promise<WatchEvent[]> {
+    const now = this.host.now();
+    const due = Object.entries(this.state.pending).filter(([, h]) => !h.stalled && now - h.since >= this.options.stallMs);
+    if (due.length === 0 || this.options.rules.ci === 'none') return [];
+    this.prunePending();
+    const out: WatchEvent[] = [];
+    for (const [key, h] of due) {
+      if (!this.state.pending[key]) continue;
+      const head = await this.settle(h.sha).catch(() => undefined);
+      if (!head) continue;
+      if (head.verdict) {
+        out.push(this.settledEvent(h, head.verdict, h.user, now));
+        continue;
+      }
+      h.stalled = true;
       out.push({
-        id: `ci-settled#${key}`,
+        id: `ci-stalled#${key}`,
         kind: 'ci',
-        number: pr.number,
-        title: `${pr.branch} @${pr.sha.slice(0, 7)}: ${pr.title} (${verdict.total} checks${failed})`,
-        user: e.user,
+        number: h.number,
+        title: `${h.branch} @${h.sha.slice(0, 7)}: ${h.title} (${head.pending.length} of ${head.total} checks pending: ${head.pending.join(', ')})`,
+        user: h.user,
         bot: false,
-        url: pr.url,
-        changes: [`ci settled ${verdict.conclusion}`],
-        at: e.at,
-        conclusion: verdict.conclusion,
-        branch: pr.branch,
-        settled: true,
+        url: h.url,
+        changes: ['ci stalled'],
+        at: now,
+        conclusion: null,
+        branch: h.branch,
+        stalled: true,
         isNew: true,
       });
     }
     return out;
   }
 
-  private async openPulls(): Promise<{ number: number; title: string; branch: string; sha: string; url: string }[]> {
-    const raw = await this.host.gh.json<{ number: number; title: string; head: { ref: string; sha: string }; html_url: string }[]>(
-      `repos/${this.options.repo}/pulls?state=open&per_page=100`,
-    );
-    return raw.map((p) => ({ number: p.number, title: p.title, branch: p.head.ref, sha: p.head.sha, url: p.html_url }));
+  private settledEvent(pr: Pull, verdict: NonNullable<ReturnType<typeof settleChecks>>, user: string, at: number): WatchEvent {
+    const key = headKey(pr);
+    this.state.settled = trimSettled({ ...this.state.settled, [key]: verdict.conclusion });
+    delete this.state.pending[key];
+    const failed = verdict.failed.length > 0 ? `, failed: ${verdict.failed.map((c) => c.name).join(', ')}` : '';
+    return {
+      id: `ci-settled#${key}`,
+      kind: 'ci',
+      number: pr.number,
+      title: `${pr.branch} @${pr.sha.slice(0, 7)}: ${pr.title} (${verdict.total} checks${failed})`,
+      user,
+      bot: false,
+      url: pr.url,
+      changes: [`ci settled ${verdict.conclusion}`],
+      at,
+      conclusion: verdict.conclusion,
+      ok: verdict.conclusion === 'success',
+      branch: pr.branch,
+      settled: true,
+      failed: verdict.failed,
+      isNew: true,
+    };
   }
 
-  private async settle(sha: string): Promise<ReturnType<typeof settleChecks>> {
-    const repo = this.options.repo;
-    const [checks, status] = await Promise.all([
-      this.host.gh.json<{ check_runs: CheckRun[] }>(`repos/${repo}/commits/${sha}/check-runs?per_page=100`),
-      this.host.gh.json<{ statuses: CommitStatus[] }>(`repos/${repo}/commits/${sha}/status`),
-    ]);
-    return settleChecks(checks.check_runs ?? [], status.statuses ?? []);
+  // the ci pack over each failed check that has a log, one report per job; a check the forge keeps no log for is named alone
+  private async ciReports(e: WatchEvent): Promise<string[]> {
+    const pack = this.host.ciPack;
+    if (!pack) return [];
+    const out: string[] = [];
+    for (const check of e.failed ?? []) {
+      if (check.id === undefined) {
+        out.push(`${check.name}: no log to read`);
+        continue;
+      }
+      try {
+        const subject = await ciSubject(this.host.forge, this.options.repo, { job: check.id });
+        out.push(formatReport(await runPack(pack, subject, this.host.judge, this.host.config)));
+      } catch (error) {
+        out.push(`${check.name}: could not read the log (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    return out;
+  }
+
+  // every open head not yet tracked is looked up once: unfinished checks make it pending from now, so a head whose
+  // checks never start still stalls; a head already finished is settled (delivered when no run reported it, silently on
+  // the seed poll); a head with nothing on it is neither, so a repo without ci sees no verdicts
+  private async seedHeads(now: number): Promise<WatchEvent[]> {
+    this.prunePending();
+    const out: WatchEvent[] = [];
+    for (const pr of this.state.pulls) {
+      const key = headKey(pr);
+      if (this.state.pending[key] || this.state.settled[key] || this.state.unchecked[key]) continue;
+      const head = await this.settle(pr.sha).catch(() => undefined);
+      if (!head) continue;
+      if (head.total === 0) this.state.unchecked[key] = true;
+      else if (head.verdict) out.push(this.settledEvent(pr, head.verdict, pr.user, now));
+      else this.state.pending[key] = { ...pr, since: now, stalled: false };
+    }
+    return out;
+  }
+
+  // a pending or unchecked head is only worth remembering while it is still the head of an open pr
+  private prunePending(): void {
+    const live = new Set(this.state.pulls.map(headKey));
+    for (const key of Object.keys(this.state.pending)) if (!live.has(key)) delete this.state.pending[key];
+    for (const key of Object.keys(this.state.unchecked)) if (!live.has(key)) delete this.state.unchecked[key];
+  }
+
+  private async settle(sha: string): Promise<{ verdict: ReturnType<typeof settleChecks>; pending: string[]; total: number }> {
+    const checks = await this.host.forge.checks(this.options.repo, sha);
+    return { verdict: settleChecks(checks), ...pendingChecks(checks) };
   }
 
   // mechanical findings of the issue pack on a fresh issue: labels, template, parent, milestone. no judge, no cost beyond the fetch
@@ -305,7 +398,7 @@ export class Watcher {
     const pack = this.host.issuePack;
     if (!pack || e.number === undefined) return [];
     try {
-      const subject = await issueSubject(this.host.gh, this.options.repo, e.number, this.host.config);
+      const subject = await issueSubject(this.host.forge, this.options.repo, e.number, this.host.config);
       return runChecks(pack, subject, this.host.config).filter((f) => f.severity !== 'info');
     } catch (error) {
       this.host.log(`sift watch ${this.options.repo}: could not check issue #${e.number} (${error instanceof Error ? error.message : String(error)})`);
@@ -333,6 +426,7 @@ export class Watcher {
       lines.push(`${formatEvent(event)}`);
       lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''}`);
       if (event.findings?.length) lines.push(`  filing: ${event.findings.join('; ')}`);
+      for (const report of event.reports ?? []) lines.push(...report.split('\n').map((l) => `  ${l}`));
     }
     if (this.state.deferred.length > 0) lines.push(`deferred meanwhile: ${summarize(this.state.deferred)}`);
     return lines.join('\n');
@@ -341,26 +435,20 @@ export class Watcher {
   // enough of the item for the triage pack: body, labels, the newest comment or review
   private async detail(e: WatchEvent): Promise<EventDetail> {
     if (e.kind === 'ci' || e.number === undefined) return {};
+    const { forge } = this.host;
     const repo = this.options.repo;
-    const item = await this.host.gh.json<{ body: string | null; labels: { name: string }[] }>(`repos/${repo}/issues/${e.number}`);
-    const detail: EventDetail = { body: item.body ?? '', labels: item.labels.map((l) => l.name) };
+    const item = await forge.issue(repo, e.number);
+    const detail: EventDetail = { body: item.body, labels: item.labels };
     if (e.changes.some((c) => c.startsWith('comments'))) {
-      const comments = await this.host.gh.json<{ user: { login: string }; body: string }[]>(
-        `repos/${repo}/issues/${e.number}/comments?per_page=1&direction=desc&sort=created`,
-      );
-      const c = comments[0];
-      if (c) detail.latestComment = { by: c.user.login, text: c.body };
+      const c = (await forge.comments(repo, e.kind, e.number, 1))[0];
+      if (c) detail.latestComment = { by: c.author.login, text: c.body };
     }
     if (e.kind === 'pr' && e.changes.some((c) => c.startsWith('activity'))) {
-      const reviews = await this.host.gh.json<{ user: { login: string }; state: string; body: string }[]>(`repos/${repo}/pulls/${e.number}/reviews?per_page=100`);
-      const r = reviews[reviews.length - 1];
-      if (r) detail.latestReview = { by: r.user.login, state: r.state, text: r.body };
+      const r = (await forge.reviews(repo, e.number, 1))[0];
+      if (r) detail.latestReview = { by: r.author.login, state: r.state, text: r.body };
       // a review made of inline comments alone has an empty body, the comments carry the ask
-      const inline = await this.host.gh.json<{ user: { login: string }; path: string; body: string }[]>(
-        `repos/${repo}/pulls/${e.number}/comments?per_page=1&direction=desc&sort=created`,
-      );
-      const c = inline[0];
-      if (c) detail.latestReviewComment = { by: c.user.login, path: c.path, text: c.body };
+      const c = (await forge.reviewComments(repo, e.number, 1))[0];
+      if (c) detail.latestReviewComment = { by: c.author.login, path: c.path, text: c.body };
     }
     return detail;
   }
