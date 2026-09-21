@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG } from '../src/github/config.ts';
 import type { Judge } from '../src/judge/types.ts';
-import { gateOutbound, ghBody, outboundOf, shellWord } from '../src/gate/outbound.ts';
+import { GitHubForge, ghBody } from '../src/forge/github.ts';
+import { extractors, gateOutbound, outboundOf } from '../src/gate/outbound.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
 import { materialize } from '../src/packs/run.ts';
 import { rulesSubject, textAbout } from '../src/github/subjects.ts';
 import type { Subject } from '../src/packs/types.ts';
+import { shellWord } from '../src/shell.ts';
+
+// write() reads the command alone, so the runner is never reached
+const github = new GitHubForge(async () => ({ exitCode: 1, stdout: '', stderr: '' }));
+const via = extractors(github);
 
 describe('outbound extraction', () => {
   const noRead = async (p: string) => {
@@ -18,6 +24,7 @@ describe('outbound extraction', () => {
     expect(await outboundOf('mcp__discord__send_embed', { title: 'T', description: 'D' }, noRead)).toMatchObject({ text: 'D\nT' });
     expect(await outboundOf('mcp__discord__list_channels', {}, noRead)).toBeUndefined();
     expect(await outboundOf('Write', { content: 'x' }, noRead)).toBeUndefined();
+    expect(await outboundOf('Bash', { command: 'gh pr comment 5 -b "x"' }, noRead)).toBeUndefined();
   });
 
   it('reads gh bodies from quoted words and heredocs', async () => {
@@ -28,10 +35,10 @@ describe('outbound extraction', () => {
     expect(ghBody(`gh issue comment 3 --body='single'`)).toEqual({ text: 'single' });
     expect(ghBody(`gh pr create -t "t" -b "$(cat <<'EOF'\n## Summary\n\nline two\nEOF\n)"`)).toEqual({ text: '## Summary\n\nline two' });
     expect(ghBody('gh pr create --fill')).toBeUndefined();
-    expect(await outboundOf('Bash', { command: 'gh pr comment 5 -b "looks good"' }, noRead)).toEqual({ channel: 'github', text: 'looks good', maxChars: undefined, kind: 'pr', action: 'comment' });
-    expect(await outboundOf('Bash', { command: 'gh issue create -t "t" --body "a chore"' }, noRead)).toMatchObject({ kind: 'issue', action: 'create' });
-    expect(await outboundOf('Bash', { command: 'gh pr view 5 --json body' }, noRead)).toBeUndefined();
-    expect(await outboundOf('Bash', { command: 'gh release create v1 --notes "n"' }, noRead)).toBeUndefined();
+    expect(await outboundOf('Bash', { command: 'gh pr comment 5 -b "looks good"' }, noRead, via)).toEqual({ channel: 'github', text: 'looks good', maxChars: undefined, kind: 'pr', action: 'comment' });
+    expect(await outboundOf('Bash', { command: 'gh issue create -t "t" --body "a chore"' }, noRead, via)).toMatchObject({ kind: 'issue', action: 'create' });
+    expect(await outboundOf('Bash', { command: 'gh pr view 5 --json body' }, noRead, via)).toBeUndefined();
+    expect(await outboundOf('Bash', { command: 'gh release create v1 --notes "n"' }, noRead, via)).toBeUndefined();
   });
 
   it('reads a --body-file body through the given reader', async () => {
@@ -44,10 +51,10 @@ describe('outbound extraction', () => {
       reads.push(p);
       return 'from the file';
     };
-    expect(await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file notes.md' }, read)).toEqual({ channel: 'github', maxChars: undefined, kind: 'issue', action: 'create', text: 'from the file' });
+    expect(await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file notes.md' }, read, via)).toEqual({ channel: 'github', maxChars: undefined, kind: 'issue', action: 'create', text: 'from the file' });
     expect(reads).toEqual(['notes.md']);
-    expect(await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file -' }, read)).toMatchObject({ text: '', denied: expect.stringContaining('stdin') });
-    expect(await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file gone.md' }, noRead)).toMatchObject({ text: '', denied: 'the body file gone.md cannot be read (ENOENT gone.md)' });
+    expect(await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file -' }, read, via)).toMatchObject({ text: '', denied: expect.stringContaining('stdin') });
+    expect(await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file gone.md' }, noRead, via)).toMatchObject({ text: '', denied: 'the body file gone.md cannot be read (ENOENT gone.md)' });
   });
 });
 
@@ -59,7 +66,7 @@ describe('rules subject for outbound text', () => {
 
   it('names the artifact in the subject and in every rule question', async () => {
     const body = 'The watcher misses body edits. Steps: edit an issue body, wait a poll.';
-    const s = await rulesSubject(undefined, undefined, { kind: 'text', ref: body, artifact: { kind: 'issue', action: 'create' } }, config, read, exists);
+    const s = await rulesSubject({ forge: github, read, exists }, { kind: 'text', ref: body, artifact: { kind: 'issue', action: 'create' } }, config);
     expect(s.state['subject']).toMatchObject({ kind: 'text', artifact: 'issue', action: 'create', about: 'the body of a new GitHub issue', text: body });
     expect(s.facts['subject']).toBe('The subject (the body of a new GitHub issue)');
     const step = materialize(BUILTIN_PACKS['rules']!, s).steps[0]!;
@@ -69,16 +76,17 @@ describe('rules subject for outbound text', () => {
   });
 
   it('leaves plain text unlabelled', async () => {
-    const s = await rulesSubject(undefined, undefined, { kind: 'text', ref: 'free text' }, config, read, exists);
+    const s = await rulesSubject({ read, exists }, { kind: 'text', ref: 'free text' }, config);
     expect(s.state['subject']).toEqual({ kind: 'text', text: 'free text' });
     expect(s.facts['subject']).toBe('The subject');
     expect(materialize(BUILTIN_PACKS['rules']!, s).steps[0]?.questions['rules']?.instructions).toMatch(/^The subject complies with this rule: \{text\}$/);
   });
 
   it('describes each artifact and action', () => {
-    expect(textAbout({ kind: 'pr', action: 'comment' })).toBe('a comment on a pull request');
-    expect(textAbout({ kind: 'issue', action: 'edit' })).toBe('the edited body of a GitHub issue');
-    expect(textAbout({ kind: 'release', action: 'create' })).toBe('the notes of a new GitHub release');
+    expect(textAbout({ kind: 'pr', action: 'comment' }, github.nouns)).toBe('a comment on a pull request');
+    expect(textAbout({ kind: 'issue', action: 'edit' }, github.nouns)).toBe('the edited body of a GitHub issue');
+    expect(textAbout({ kind: 'release', action: 'create' }, github.nouns)).toBe('the notes of a new GitHub release');
+    expect(textAbout({ kind: 'issue', action: 'create' })).toBe('the body of a new issue');
   });
 });
 
@@ -100,7 +108,7 @@ describe('outbound gate', () => {
   it('passes an issue body when pull request rules do not apply to it', async () => {
     const docs = { 'CONTRIBUTING.md': '## Pull requests\n\nThe body carries verification evidence.\n\n## Prose\n\nNo em dashes.\n' };
     const config = { ...DEFAULT_CONFIG, rules: { docs: ['CONTRIBUTING.md'], maxRules: 200 } };
-    const s = await rulesSubject(undefined, undefined, { kind: 'text', ref: 'The watcher misses body edits.', artifact: { kind: 'issue', action: 'create' } }, config, async (p) => docs[p as keyof typeof docs] ?? '', async (p) => p in docs);
+    const s = await rulesSubject({ forge: github, read: async (p) => docs[p as keyof typeof docs] ?? '', exists: async (p) => p in docs }, { kind: 'text', ref: 'The watcher misses body edits.', artifact: { kind: 'issue', action: 'create' } }, config);
     const asked: string[] = [];
     const j: Judge = {
       name: 'fake',
@@ -117,7 +125,7 @@ describe('outbound gate', () => {
   });
 
   it('judges a --body-file body and denies one it cannot read', async () => {
-    const out = await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file notes.md' }, async () => 'a — b');
+    const out = await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file notes.md' }, async () => 'a — b', via);
     const seen: unknown[] = [];
     const j: Judge = {
       name: 'fake',
@@ -129,7 +137,7 @@ describe('outbound gate', () => {
     const fileSubject: Subject = { ...subject, state: { ...subject.state, subject: { kind: 'text', text: out!.text } } };
     expect(await gateOutbound(out!, fileSubject, pack, j, DEFAULT_CONFIG)).toMatchObject({ allow: false, reason: 'breaks: No em dashes.' });
     expect(seen).toEqual([{ kind: 'text', text: 'a — b' }]);
-    const stdin = await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file -' }, async () => '');
+    const stdin = await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file -' }, async () => '', via);
     const d = await gateOutbound(stdin!, subject, pack, judge([]), DEFAULT_CONFIG);
     expect(d).toMatchObject({ allow: false, reason: 'the body is read from stdin (--body-file -), which cannot be judged; pass --body or a file path' });
     expect(d.report).toBeUndefined();

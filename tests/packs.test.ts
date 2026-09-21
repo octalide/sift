@@ -1,17 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import type { Gh } from '../src/github/gh.ts';
+import type { Git } from '../src/forge/git.ts';
 import { parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
 import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, SEMVER_PATTERN, CALVER_PATTERN } from '../src/github/version.ts';
 import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/github/manifest.ts';
 import { lineDiff } from '../src/github/diff.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
-import { lastReleaseTag, linkedIssues, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf } from '../src/github/subjects.ts';
+import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { validatePack } from '../src/packs/load.ts';
 import { materialize, runChecks, runPack, verdictOf } from '../src/packs/run.ts';
+import { fakeForge } from './fake-forge.ts';
 import type { Subject } from '../src/packs/types.ts';
 
 const answering = (answers: Answers): Judge => ({
@@ -413,75 +414,76 @@ describe('github helpers', () => {
   });
 
   it('drops merge commits from a pull request before the convention judges them', async () => {
-    const gh = {
-      json: async (path: string) => {
-        if (path === 'repos/o/r/pulls/7') return { title: 't', body: 'Closes #1', user: { login: 'me' }, base: { ref: 'dev' }, head: { ref: 'perf/1', sha: 'h' }, draft: false, additions: 1, deletions: 0, changed_files: 1 };
-        if (path.startsWith('repos/o/r/pulls/7/commits')) {
-          return [
-            { sha: 'a'.repeat(40), parents: [{ sha: 'x' }], commit: { message: 'perf(#1): faster' } },
-            { sha: 'b'.repeat(40), parents: [{ sha: 'a'.repeat(40) }, { sha: 'y' }], commit: { message: "Merge remote-tracking branch 'origin/dev' into perf/1" } },
-          ];
-        }
-        if (path.startsWith('repos/o/r/issues/1')) return { number: 1, title: 'one', body: '' };
-        if (path.includes('/comments')) return [];
-        if (path.includes('/check-runs')) return { check_runs: [] };
-        throw new Error(path);
-      },
-      text: async () => 'diff',
-    } as unknown as Gh;
-    const s = await prSubject(gh, 'o/r', 7, DEFAULT_CONFIG);
+    const forge = fakeForge({
+      pull: async (_r, n) => ({ ...(await fakeForge().pull('o/r', n)), body: 'Closes #1', base: 'dev', head: { branch: 'perf/1', sha: 'h' } }),
+      pullCommits: async () => [
+        { sha: 'a'.repeat(40), message: 'perf(#1): faster', merge: false },
+        { sha: 'b'.repeat(40), message: "Merge remote-tracking branch 'origin/dev' into perf/1", merge: true },
+      ],
+      diff: async () => 'diff',
+    });
+    const s = await prSubject(forge, 'o/r', 7, DEFAULT_CONFIG);
     expect((s.facts['commits'] as { message: string }[]).map((c) => c.message)).toEqual(['perf(#1): faster']);
     expect((s.state as { commits: string[] }).commits).toEqual(['perf(#1): faster']);
+    expect(s.facts['linked']).toEqual([1]);
+    expect(s.facts['has_issue']).toBe(true);
     expect(runChecks(BUILTIN_PACKS['pr']!, s, DEFAULT_CONFIG).filter((f) => f.check === 'pr.commits')).toEqual([]);
   });
 
-  it('reads a release from github when there is no checkout', async () => {
+  it('links issues by the forge relation, then closing keywords, then the branch name', async () => {
+    expect(linkedOf([5], 'Closes #4', 'feat/3')).toEqual([5]);
+    expect(linkedOf([], 'Closes #4, fixes #9', 'feat/3')).toEqual([4, 9]);
+    expect(linkedOf([], 'no keyword', 'feat/3')).toEqual([3]);
+    expect(linkedOf([], 'no keyword', 'scratch')).toEqual([]);
+    expect(branchIssue('fix/12-short-title')).toBe(12);
+    expect(branchIssue('12-title')).toBe(12);
+    expect(branchIssue('release/v1.2')).toBeUndefined();
+    const forge = fakeForge({ closingIssues: async () => [8], pull: async (_r, n) => ({ ...(await fakeForge().pull('o/r', n)), body: 'Closes #4' }) });
+    const s = await prSubject(forge, 'o/r', 7, DEFAULT_CONFIG);
+    expect(s.facts['linked']).toEqual([8]);
+    expect((s.state as { linked_issue: { number: number } }).linked_issue.number).toBe(8);
+  });
+
+  it('reads a release from the forge when there is no checkout', async () => {
     const calls: string[] = [];
-    const gh = {
-      pages: async (path: string) => {
-        calls.push(path);
-        return path.startsWith('repos/o/r/tags') ? ['v0.4.0', 'v0.3.0'] : [];
+    const forge = fakeForge({
+      tags: async () => ['v0.4.0', 'v0.3.0'],
+      compare: async (_r, base, head) => {
+        calls.push(`compare ${base}...${head}`);
+        return [
+          { sha: 'c'.repeat(40), message: 'feat(#3): three', merge: false },
+          { sha: 'b'.repeat(40), message: 'Merge pull request #2', merge: true },
+          { sha: 'a'.repeat(40), message: 'fix(#1): one', merge: false },
+        ];
       },
-      json: async (path: string) => {
-        calls.push(path);
-        return {
-          commits: [
-            { sha: 'a'.repeat(40), parents: [{ sha: 'x' }], commit: { message: 'fix(#1): one' } },
-            { sha: 'b'.repeat(40), parents: [{ sha: 'x' }, { sha: 'y' }], commit: { message: 'Merge pull request #2' } },
-            { sha: 'c'.repeat(40), parents: [{ sha: 'x' }], commit: { message: 'feat(#3): three' } },
-          ],
-        };
-      },
-      text: async (path: string) => {
-        calls.push(path);
-        if (path.includes('ref=v0.4.0')) return '[dep.std]\nref = "tag/v5.0.0"\n';
-        if (path.includes('CHANGELOG')) throw new Error('404');
+      file: async (_r, path, ref) => {
+        calls.push(`${path}@${ref}`);
+        if (ref === 'v0.4.0') return '[dep.std]\nref = "tag/v5.0.0"\n';
+        if (path.includes('CHANGELOG')) return undefined;
         return '[dep.std]\nref = "tag/v6.0.0"\n';
       },
-    } as unknown as Gh;
+    });
     const config = resolveConfig({ release: { scheme: 'semver', changelog: 'CHANGELOG.md', manifests: [{ path: 'mach.toml', keys: ['^dep\\.'], bump: 'minor' }] } });
-    const s = await releaseSubject(remoteSource(gh, 'o/r', 'dev'), config);
+    const s = await releaseSubject(remoteSource(forge, 'o/r', 'dev'), config);
     expect(s.ref).toBe('v0.4.0..dev');
     expect((s.facts['commits'] as { subject: string }[]).map((c) => c.subject)).toEqual(['feat(#3): three', 'fix(#1): one']);
     expect(s.facts['bump']).toBe('minor');
     expect(s.facts['manifests']).toHaveLength(1);
     expect(s.facts['changelogPath']).toBeUndefined();
     expect(s.facts['changelog_changed']).toBe(false);
-    expect(calls).toContain('repos/o/r/compare/v0.4.0...dev');
-    expect(calls).toContain('repos/o/r/contents/mach.toml?ref=dev');
+    expect(calls).toContain('compare v0.4.0...dev');
+    expect(calls).toContain('mach.toml@dev');
   });
 
   it('reads a release from the checkout, taking the working tree for HEAD', async () => {
-    const gh = {
-      git: async (argv: string[]) => {
-        if (argv[0] === 'tag') return 'v1.0.0\n';
-        if (argv[0] === 'log') return `\u001e${'d'.repeat(40)}\nfeat(#4): four\n`;
-        if (argv[0] === 'show') return argv[1] === 'v1.0.0:CHANGELOG.md' ? '# Changelog\n\n## 1.0.0\n- old' : '';
-        return '';
-      },
-    } as unknown as Gh;
+    const git: Git = async (argv) => {
+      if (argv[0] === 'tag') return 'v1.0.0\n';
+      if (argv[0] === 'log') return `\u001e${'d'.repeat(40)}\nfeat(#4): four\n`;
+      if (argv[0] === 'show') return argv[1] === 'v1.0.0:CHANGELOG.md' ? '# Changelog\n\n## 1.0.0\n- old' : '';
+      return '';
+    };
     const config = resolveConfig({ release: { scheme: 'semver', changelog: 'CHANGELOG.md' } });
-    const s = await releaseSubject(localSource(gh, 'HEAD', async () => '# Changelog\n\n## Unreleased\n- four\n\n## 1.0.0\n- old', async () => true), config);
+    const s = await releaseSubject(localSource(git, 'HEAD', async () => '# Changelog\n\n## Unreleased\n- four\n\n## 1.0.0\n- old', async () => true), config);
     expect(s.ref).toBe('v1.0.0..HEAD');
     expect(s.facts['changelogAdded']).toBe('## Unreleased\n- four\n');
     expect(s.facts['changelog_changed']).toBe(true);
@@ -506,15 +508,17 @@ describe('github helpers', () => {
     ]);
   });
 
-  it('reads a rule doc from the checkout or from github by owner/repo:path@ref', async () => {
+  it('reads a rule doc from the checkout or from the forge by repo:path@ref', async () => {
     const calls: string[] = [];
-    const gh = { text: async (path: string) => (calls.push(path), '# remote') } as unknown as Gh;
-    expect(await ruleDoc('CONTRIBUTING.md', gh, async () => '# local', async (p: string) => p === 'CONTRIBUTING.md')).toBe('# local');
-    expect(await ruleDoc('MISSING.md', gh, async () => '', async () => false)).toBeUndefined();
-    expect(await ruleDoc('briar-systems/mach-std:MIGRATION.md@v6.0.0', gh, async () => '', async () => false)).toBe('# remote');
-    expect(calls).toEqual(['repos/briar-systems/mach-std/contents/MIGRATION.md?ref=v6.0.0']);
-    expect(await ruleDoc('o/r:doc/RULES.md', gh, async () => '', async () => false)).toBe('# remote');
-    expect(calls[1]).toBe('repos/o/r/contents/doc/RULES.md');
+    const forge = fakeForge({ file: async (repo, path, ref) => (calls.push(`${repo}:${path}@${ref}`), '# remote') });
+    expect(await ruleDoc('CONTRIBUTING.md', forge, async () => '# local', async (p: string) => p === 'CONTRIBUTING.md')).toBe('# local');
+    expect(await ruleDoc('MISSING.md', forge, async () => '', async () => false)).toBeUndefined();
+    expect(await ruleDoc('briar-systems/mach-std:MIGRATION.md@v6.0.0', forge, async () => '', async () => false)).toBe('# remote');
+    expect(calls).toEqual(['briar-systems/mach-std:MIGRATION.md@v6.0.0']);
+    expect(await ruleDoc('o/r:doc/RULES.md', forge, async () => '', async () => false)).toBe('# remote');
+    expect(calls[1]).toBe('o/r:doc/RULES.md@undefined');
+    expect(await ruleDoc('group/sub/project:RULES.md', forge, async () => '', async () => false)).toBe('# remote');
+    expect(calls[2]).toBe('group/sub/project:RULES.md@undefined');
     expect(await ruleDoc('o/r:doc/RULES.md', undefined, async () => '', async () => false)).toBeUndefined();
   });
 });
