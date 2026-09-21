@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GitHubForge } from '../src/forge/github.ts';
+import { GitHubForge, splitJobLog } from '../src/forge/github.ts';
 
 type Reply = { status?: number; body?: unknown; etag?: string };
 
@@ -21,13 +21,13 @@ function github(table: Record<string, Reply | ((argv: readonly string[]) => Repl
 describe('github forge', () => {
   it('merges check runs and commit statuses into one list of checks', async () => {
     const forge = github({
-      'repos/o/r/commits/abc/check-runs': { body: { check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }, { name: 'test', status: 'in_progress', conclusion: null }, { name: 'lint', status: 'completed', conclusion: 'timed_out' }] } },
+      'repos/o/r/commits/abc/check-runs': { body: { check_runs: [{ id: 1, name: 'build', status: 'completed', conclusion: 'success' }, { id: 2, name: 'test', status: 'in_progress', conclusion: null }, { id: 3, name: 'lint', status: 'completed', conclusion: 'timed_out' }] } },
       'repos/o/r/commits/abc/status': { body: { statuses: [{ context: 'ext', state: 'pending' }, { context: 'cov', state: 'error' }] } },
     });
     expect(await forge.checks('o/r', 'abc')).toEqual([
-      { name: 'build', done: true, conclusion: 'success', ok: true },
-      { name: 'test', done: false, conclusion: null, ok: false },
-      { name: 'lint', done: true, conclusion: 'timed_out', ok: false },
+      { name: 'build', id: '1', done: true, conclusion: 'success', ok: true },
+      { name: 'test', id: '2', done: false, conclusion: null, ok: false },
+      { name: 'lint', id: '3', done: true, conclusion: 'timed_out', ok: false },
       { name: 'ext', done: false, conclusion: null, ok: false },
       { name: 'cov', done: true, conclusion: 'error', ok: false },
     ]);
@@ -116,5 +116,44 @@ describe('github forge', () => {
     const merge = writes.find((w) => w.kind === 'pr' && w.action === 'merge')!;
     expect(merge).toMatchObject({ body: ['--body', '-b'], file: ['--body-file', '-F'] });
     expect(new RegExp(merge.command).test('gh pr merge 3 --merge --body x')).toBe(true);
+  });
+
+  it('reads a job log with escapes allowed and splits it at the runner\'s step marks', async () => {
+    const calls: string[] = [];
+    const log = [
+      '\uFEFF2026-09-21T02:35:09.9377426Z Current runner version: 2.337.0',
+      '2026-09-21T02:35:10.6877018Z ##[group]Run actions/checkout@v6',
+      '2026-09-21T02:35:10.6889601Z ##[endgroup]',
+      '2026-09-21T02:35:10.7940015Z ##[group]Getting Git version info',
+      '2026-09-21T02:35:10.8094836Z ##[endgroup]',
+      '2026-09-21T02:35:32.9188808Z ##[group]Run set -euo pipefail',
+      '2026-09-21T02:35:32.9189137Z \u001b[36;1mset -euo pipefail\u001b[0m',
+      '2026-09-21T02:35:32.9239413Z ##[endgroup]',
+      '2026-09-21T02:38:09.8202143Z FAIL x86_64-linux vec/load_literal golden: line 594,595c594',
+      '2026-09-21T02:47:54.6635256Z ##[error]Process completed with exit code 1.',
+      '2026-09-21T02:47:54.6774571Z Post job cleanup.',
+      '2026-09-21T02:47:54.9609986Z Cleaning up orphan processes',
+    ].join('\n');
+    const forge = github(
+      {
+        'repos/o/r/actions/jobs/7/logs': { body: log },
+        'repos/o/r/actions/jobs/7': { body: { id: 7, run_id: 3, head_sha: 'abc', name: 'codegen', status: 'completed', conclusion: 'failure', html_url: 'https://x/job/7' } },
+        'repos/o/r/actions/runs/3/jobs': { body: [{ id: 7, run_id: 3, head_sha: 'abc', name: 'codegen', status: 'completed', conclusion: 'failure', html_url: 'https://x/job/7' }] },
+      },
+      calls,
+    );
+    const read = await forge.jobLog('o/r', '7');
+    expect(read).toMatchObject({ job: 'codegen', run: '3', sha: 'abc', url: 'https://x/job/7' });
+    expect(read.steps.map((s) => [s.name, s.ok])).toEqual([
+      ['Set up job', true],
+      ['Run actions/checkout@v6', true],
+      ['Run set -euo pipefail', false],
+      ['Post job cleanup', true],
+    ]);
+    expect(read.steps[2]!.text).toContain('FAIL x86_64-linux');
+    expect(read.steps[2]!.text).not.toContain('Cleaning up');
+    expect(calls.find((c) => c.includes('/logs'))).toContain('--allow-escape-sequences');
+    expect(await forge.jobs('o/r', '3')).toEqual([{ id: '7', name: 'codegen', run: '3', sha: 'abc', done: true, conclusion: 'failure', ok: false, url: 'https://x/job/7' }]);
+    expect(splitJobLog('')).toEqual([]);
   });
 });
