@@ -41,6 +41,8 @@ export type WatchEvent = {
   branch?: string;
   // every check on the head of an open pr completed; number is the pr
   settled?: boolean;
+  // checks on the head of an open pr did not all finish within the stall interval; number is the pr
+  stalled?: boolean;
   // mechanical findings of the issue pack on a new issue
   findings?: string[];
   // set when the event is new
@@ -48,7 +50,7 @@ export type WatchEvent = {
 };
 
 // bump when the stored shape changes; a store from an older version is reseeded
-export const STATE_VERSION = 3;
+export const STATE_VERSION = 4;
 
 export type WatchState = {
   version: number;
@@ -59,6 +61,8 @@ export type WatchState = {
   runs: Record<string, Run>;
   // pr@sha -> conclusion, one settled delivery per head
   settled: Record<string, string>;
+  // pr@sha -> the open pr head whose checks have not all finished, one stalled delivery per head
+  pending: Record<string, PendingHead>;
   etags: { issues?: string; runs?: string };
   deferred: Deferred[];
   paused: boolean;
@@ -75,6 +79,18 @@ export type Deferred = {
   label?: string;
 };
 
+export type PendingHead = {
+  number: number;
+  title: string;
+  branch: string;
+  sha: string;
+  url: string;
+  user: string;
+  // when the head was first seen with a finished check beside unfinished ones
+  since: number;
+  stalled: boolean;
+};
+
 export function initialState(): WatchState {
   return {
     version: STATE_VERSION,
@@ -83,6 +99,7 @@ export function initialState(): WatchState {
     items: {},
     runs: {},
     settled: {},
+    pending: {},
     etags: {},
     deferred: [],
     paused: false,
@@ -243,8 +260,15 @@ export function settleChecks(checks: CheckRun[], statuses: CommitStatus[]): { co
   return { conclusion: bad.length > 0 ? 'failure' : 'success', total: checks.length + statuses.length, failed: bad };
 }
 
+// the checks on a head that have not finished, named as the settled verdict names failures
+export function pendingChecks(checks: CheckRun[], statuses: CommitStatus[]): { pending: string[]; total: number } {
+  const pending = [...checks.filter((c) => c.status !== 'completed').map((c) => c.name), ...statuses.filter((s) => s.state === 'pending').map((s) => s.context)];
+  return { pending, total: checks.length + statuses.length };
+}
+
 export function formatEvent(e: WatchEvent): string {
   if (e.kind === 'ci' && e.settled) return `ci settled ${e.conclusion ?? 'unknown'}: pr #${e.number} ${e.title}`;
+  if (e.kind === 'ci' && e.stalled) return `ci stalled: pr #${e.number} ${e.title}`;
   const head = e.kind === 'ci' ? `ci ${e.conclusion ?? 'unknown'}: ${e.title}` : `${e.kind} #${e.number} ${e.changes.join(', ')}: ${e.title}`;
   return head;
 }

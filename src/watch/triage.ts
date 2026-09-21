@@ -22,6 +22,7 @@ export function routeByRules(e: WatchEvent, rules: WatchRules): Route {
   if (e.kind === 'ci') {
     if (rules.ci === 'none') return { action: 'drop', reason: 'ci off' };
     if (e.settled) return { action: 'deliver', reason: 'ci settled on pr' };
+    if (e.stalled) return { action: 'deliver', reason: 'ci stalled on pr' };
     const ok = e.conclusion === 'success' || e.conclusion === 'skipped' || e.conclusion === 'neutral';
     if (rules.ci === 'all') return { action: 'deliver', reason: 'ci all' };
     if (ok) return { action: 'defer', reason: 'ci success' };
