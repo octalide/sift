@@ -5,6 +5,8 @@ import type { Forge } from '../forge/forge.ts';
 export type ParsedSubject =
   | { kind: 'issue'; number: number; repo?: string }
   | { kind: 'pr'; number: number; repo?: string }
+  // base..head in the checkout, the pull request it would open
+  | { kind: 'pr'; range: string }
   | { kind: 'commit'; ref: string }
   | { kind: 'release'; proposed?: string };
 
@@ -12,15 +14,16 @@ export type ParsedKind = ParsedSubject['kind'];
 
 const NUMBER = /^#?(\d+)$/;
 const URL = /^[a-z][a-z0-9+.-]*:\/\//i;
-const NOUN: Record<'issue' | 'pr', string> = { issue: 'issue', pr: 'pull request' };
+const RANGE = /^[^\s#-][^\s]*\.\.[^\s]*$/;
 const A_NOUN: Record<'issue' | 'pr', string> = { issue: 'an issue', pr: 'a pull request' };
 
 // the forms each kind accepts, as the refusal names them
 export function expectedSubject(kind: ParsedKind, forge: Pick<Forge, 'name'>): string {
   switch (kind) {
     case 'issue':
+      return `an issue number (N or #N) or a ${forge.name} issue URL`;
     case 'pr':
-      return `${A_NOUN[kind]} number (N or #N) or a ${forge.name} ${NOUN[kind]} URL`;
+      return `a pull request number (N or #N), a ${forge.name} pull request URL, or a range (dev..HEAD)`;
     case 'commit':
       return 'a commit ref (a sha, branch or tag) or range (main..HEAD)';
     case 'release':
@@ -41,19 +44,23 @@ export function parseSubject(kind: ParsedKind, ref: string | undefined, forge: P
     throw new Error(`${kind} pack: ${why} (${JSON.stringify(shown(raw))}); expected ${expected}`);
   };
   const link = forge.parseUrl(raw);
+  // an issue or pull request by number or url; the two kinds share the forms, only the kind differs
+  const numbered = (kind: 'issue' | 'pr'): { number: number; repo?: string } => {
+    const n = NUMBER.exec(raw);
+    if (n) return { number: Number(n[1]) };
+    if (link) {
+      if (link.kind !== kind) return refuse(`subject is ${A_NOUN[link.kind]} URL, not ${A_NOUN[kind]}`);
+      if (repo !== undefined && repo !== link.repo) return refuse(`subject URL names ${link.repo} but repo is ${repo}`);
+      return { number: link.number, repo: link.repo };
+    }
+    if (URL.test(raw)) return refuse(`subject is a URL ${forge.name} does not serve as ${A_NOUN[kind]}`);
+    return refuse(/\s/.test(raw) ? 'subject reads as text, not a reference' : 'subject is not a number');
+  };
   switch (kind) {
     case 'issue':
-    case 'pr': {
-      const n = NUMBER.exec(raw);
-      if (n) return { kind, number: Number(n[1]) };
-      if (link) {
-        if (link.kind !== kind) return refuse(`subject is ${A_NOUN[link.kind]} URL, not ${A_NOUN[kind]}`);
-        if (repo !== undefined && repo !== link.repo) return refuse(`subject URL names ${link.repo} but repo is ${repo}`);
-        return { kind, number: link.number, repo: link.repo };
-      }
-      if (URL.test(raw)) return refuse(`subject is a URL ${forge.name} does not serve as ${A_NOUN[kind]}`);
-      return refuse(/\s/.test(raw) ? 'subject reads as text, not a reference' : 'subject is not a number');
-    }
+      return { kind, ...numbered(kind) };
+    case 'pr':
+      return RANGE.test(raw) ? { kind, range: raw } : { kind, ...numbered(kind) };
     case 'commit': {
       if (link || URL.test(raw)) return refuse('subject is a URL');
       if (raw.startsWith('#')) return refuse('subject is an issue number, not a ref');

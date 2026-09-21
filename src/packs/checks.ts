@@ -69,11 +69,12 @@ export const CHECKS: Record<string, Check> = {
     const needs = c.issues.childLabels.some((l) => labels.includes(l));
     return needs && s.facts['parent'] === undefined ? [fail('issue.parent', 'labeled as a child but has no parent sub-issue link')] : [];
   },
-  'pr.linked': (s, c) => (c.prs.linkIssue && ((s.facts['linked'] as number[]) ?? []).length === 0 ? [fail('pr.linked', 'no linked issue: none related by the forge, no Closes #n in the body, no issue number in the branch name')] : []),
+  // a pr subject built from a local range carries no forge facts: a check whose fact is absent skips
+  'pr.linked': (s, c) => (c.prs.linkIssue && s.facts['linked'] !== undefined && (s.facts['linked'] as number[]).length === 0 ? [fail('pr.linked', 'no linked issue: none related by the forge, no Closes #n in the body, no issue number in the branch name')] : []),
   'pr.target': (s, c) => {
     const targets = c.prs.targets;
-    if (targets === undefined) return [];
-    const base = String(s.facts['base'] ?? '');
+    if (targets === undefined || s.facts['base'] === undefined) return [];
+    const base = String(s.facts['base']);
     const ok = Array.isArray(targets) ? targets.includes(base) : new RegExp(targets).test(base);
     return ok ? [] : [fail('pr.target', `targets ${base}, expected ${Array.isArray(targets) ? targets.join(' or ') : `a branch matching ${targets}`}`)];
   },
@@ -83,7 +84,8 @@ export const CHECKS: Record<string, Check> = {
     return new RegExp(c.branches.pattern).test(head) ? [] : [warn('pr.branch', `branch ${head} does not match ${c.branches.pattern}`)];
   },
   'pr.ci': (s) => {
-    const failed = (s.facts['checks_failed'] as string[]) ?? [];
+    if (s.facts['checks_failed'] === undefined) return [];
+    const failed = s.facts['checks_failed'] as string[];
     const pending = (s.facts['checks_pending'] as string[]) ?? [];
     return [
       ...failed.map((n) => fail('pr.ci', `check failed: ${n}`)),
@@ -91,11 +93,16 @@ export const CHECKS: Record<string, Check> = {
     ];
   },
   'pr.template': (s, c) => {
-    const { missing, empty } = sectionsFilled((s.facts['sections'] as Record<string, string>) ?? {}, c.prs.templateSections);
+    if (s.facts['sections'] === undefined) return [];
+    const { missing, empty } = sectionsFilled(s.facts['sections'] as Record<string, string>, c.prs.templateSections);
     return [
       ...missing.map((m) => warn('pr.template', `missing section: ${m}`)),
       ...empty.map((m) => warn('pr.template', `empty section: ${m}`)),
     ];
+  },
+  'pr.drift': (s) => {
+    const drift = (s.facts['drift'] as { path: string }[] | undefined) ?? [];
+    return drift.length > 0 ? [warn('pr.drift', `also changed on the base since the branch point: ${drift.map((d) => d.path).join(', ')}`)] : [];
   },
   'pr.commits': (s, c) => commitFindings('pr.commits', ((s.facts['commits'] as { sha: string; message: string }[]) ?? []).map((x) => parseCommit(x.sha, x.message, c.commits.format)), c),
   'commit.format': (s, c) => commitFindings('commit.format', (s.facts['commits'] as ParsedCommit[]) ?? [], c),

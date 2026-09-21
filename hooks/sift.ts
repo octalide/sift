@@ -6,7 +6,7 @@ import type { Forge } from '../src/forge/forge.ts';
 import { localGit, type Git } from '../src/forge/git.ts';
 import { GitHubForge } from '../src/forge/github.ts';
 import { CONFIG_PATH, configLayers, defaultTarget, globalConfigPath, resolveConfig, type RepoConfig } from '../src/github/config.ts';
-import { commitSubject, issueSubject, planSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
+import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import { indexTree, treeSubject } from '../src/locate/tree.ts';
 import { digestOf, JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
@@ -185,6 +185,8 @@ export const register: Register = (on, rawOptions) => {
       }
       case 'pr': {
         const p = parsed('pr');
+        // base..head in the checkout is the pr the range would open, graded before it exists
+        if ('range' in p) return prRangeSubject(rt.git, p.range, rt.config, repo ? { forge: rt.forge, repo } : undefined);
         return prSubject(rt.forge, p.repo ?? needRepo(), p.number, rt.config);
       }
       case 'commit':
@@ -346,7 +348,7 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, or a PR URL), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number, an issue number with text="issue", a commit, or free text in text), locate (an issue number, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number, an issue number with text="issue", a commit, or free text in text), locate (an issue number, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {

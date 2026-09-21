@@ -86,7 +86,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     name: 'pr',
     subject: 'pr',
     description: 'Does this PR do what its issue asks, nothing more, without workarounds, and is it safe to merge?',
-    checks: ['pr.linked', 'pr.target', 'pr.branch', 'pr.ci', 'pr.template', 'pr.commits'],
+    checks: ['pr.linked', 'pr.target', 'pr.branch', 'pr.ci', 'pr.template', 'pr.commits', 'pr.drift'],
     questions: {
       addresses_issue: {
         type: 'noul',
@@ -137,6 +137,26 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
         severity: 'info',
       },
     },
+    // each file the base also changed since the branch point, the two patches side by side
+    rank: [
+      {
+        from: 'drift',
+        label: 'path',
+        list: 'each',
+        questions: {
+          drift_collides: {
+            type: 'noul',
+            instructions: 'The pull request\'s patch to {path} and the base branch\'s patch to it conflict in meaning: merging both would leave the file wrong even where the lines do not overlap.',
+            criteria: {
+              true: 'One side changes what the other relies on: a renamed or removed symbol the other still uses, the same behaviour changed two ways, a contract one side extends and the other rewrites.',
+              false: 'The two patches touch independent parts of the file, or make the same change, and both stand after a merge.',
+            },
+            inverted: true,
+            severity: 'warn',
+          },
+        },
+      },
+    ],
   },
   commit: {
     name: 'commit',

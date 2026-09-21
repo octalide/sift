@@ -3,10 +3,10 @@ import type { Git } from '../src/forge/git.ts';
 import { parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
 import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, SEMVER_PATTERN, CALVER_PATTERN } from '../src/github/version.ts';
 import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/github/manifest.ts';
-import { lineDiff } from '../src/github/diff.ts';
+import { driftOf, lineDiff, splitDiff } from '../src/github/diff.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
-import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, planSubject, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf } from '../src/github/subjects.ts';
+import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, planSubject, prRangeSubject, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
@@ -476,10 +476,77 @@ describe('github helpers', () => {
     expect(branchIssue('fix/12-short-title')).toBe(12);
     expect(branchIssue('12-title')).toBe(12);
     expect(branchIssue('release/v1.2')).toBeUndefined();
+    expect(branchIssue('feat/12-title', '^feat/(?<issue>\\d+)-')).toBe(12);
+    expect(branchIssue('user/44/feat', '^user/(?<issue>\\d+)/')).toBe(44);
     const forge = fakeForge({ closingIssues: async () => [8], pull: async (_r, n) => ({ ...(await fakeForge().pull('o/r', n)), body: 'Closes #4' }) });
     const s = await prSubject(forge, 'o/r', 7, DEFAULT_CONFIG);
     expect(s.facts['linked']).toEqual([8]);
     expect((s.state as { linked_issue: { number: number } }).linked_issue.number).toBe(8);
+  });
+
+  it('splits a unified diff per file and pairs the files two diffs both touch', () => {
+    const a = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\ndiff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts\n';
+    const b = 'diff --git a/new.ts b/new.ts\n@@ -1 +1 @@\n-p\n+q\ndiff --git a/other.ts b/other.ts\n@@ -1 +1 @@\n-1\n+2\n';
+    expect(splitDiff(a).map((f) => f.path)).toEqual(['src/a.ts', 'new.ts']);
+    expect(splitDiff(a)[0]!.patch).toBe('diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y');
+    expect(splitDiff('')).toEqual([]);
+    expect(driftOf(a, b)).toEqual([{ path: 'new.ts', pr: 'diff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts', base: 'diff --git a/new.ts b/new.ts\n@@ -1 +1 @@\n-p\n+q' }]);
+  });
+
+  it('reads the drift of a pull request from the base since the branch point and asks about each file', async () => {
+    const calls: string[] = [];
+    const forge = fakeForge({
+      diff: async () => 'diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/y.ts b/y.ts\n@@ -1 +1 @@\n-a\n+b\n',
+      compareDiff: async (_r, base, head) => {
+        calls.push(`${base}...${head}`);
+        return 'diff --git a/y.ts b/y.ts\n@@ -1 +1 @@\n-a\n+c\n';
+      },
+    });
+    const s = await prSubject(forge, 'o/r', 7, DEFAULT_CONFIG);
+    expect(calls).toEqual(['abc1234def...dev']);
+    expect(s.facts['has_drift']).toBe(true);
+    expect((s.state as { drift: string[] }).drift).toEqual(['y.ts']);
+    expect(runChecks(BUILTIN_PACKS['pr']!, s, DEFAULT_CONFIG).filter((f) => f.check === 'pr.drift')).toEqual([{ check: 'pr.drift', severity: 'warn', message: 'also changed on the base since the branch point: y.ts' }]);
+    const { steps } = materialize(BUILTIN_PACKS['pr']!, s);
+    expect(steps.map((st) => [st.step.from, st.items.length])).toEqual([['drift', 1]]);
+    expect(steps[0]!.items[0]).toMatchObject({ path: 'y.ts', pr: expect.stringContaining('+b'), base: expect.stringContaining('+c') });
+    // answers every question it is asked as a noul at 0.9: the pack's own pass, then the drift rank
+    const judge: Judge = { name: 'fake', ask: async (_state, questions) => ({ ok: true, answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: 'noul', p: 0.9 }])), backend: 'fake', latencyMs: 1 }) };
+    const report = await runPack(BUILTIN_PACKS['pr']!, s, judge, DEFAULT_CONFIG);
+    expect(report.ranked[0]!.items[0]).toMatchObject({ label: 'y.ts', band: 'violated', severity: 'warn', instructions: expect.stringContaining('y.ts') });
+    expect(report.verdict).toBe('warn');
+    const clean = await prSubject(fakeForge({ diff: async () => 'diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-a\n+b\n' }), 'o/r', 7, DEFAULT_CONFIG);
+    expect(clean.facts['has_drift']).toBe(false);
+    expect(runChecks(BUILTIN_PACKS['pr']!, clean, DEFAULT_CONFIG).filter((f) => f.check === 'pr.drift')).toEqual([]);
+  });
+
+  it('grades a local base..head range as the pr it would open, skipping the checks only a forge answers', async () => {
+    const calls: string[] = [];
+    const git: Git = async (argv) => {
+      calls.push(argv.join(' '));
+      if (argv[0] === 'diff' && argv[1] === 'dev...HEAD') return 'diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-a\n+b\n';
+      if (argv[0] === 'diff' && argv[1] === 'HEAD...dev') return 'diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-a\n+c\n';
+      if (argv[0] === 'log') return `\u001e${'a'.repeat(40)}\nfeat(#12): twelve\n`;
+      if (argv[0] === 'rev-parse') return 'feat/12\n';
+      return '';
+    };
+    const config = resolveConfig({ branches: { pattern: '^(feat|fix)/(?<issue>\\d+)$' }, prs: { linkIssue: true, targets: ['dev'], templateSections: ['Summary'] } });
+    const forge = fakeForge({ checks: async () => [{ name: 'ci', done: true, conclusion: 'failure', ok: false }] });
+    const s = await prRangeSubject(git, 'dev..HEAD', config, { forge, repo: 'o/r' });
+    expect(calls).toContain('log --format=%x1e%H%n%B --no-merges dev..HEAD');
+    expect(s.ref).toBe('dev..HEAD');
+    expect(s.facts['head']).toBe('feat/12');
+    expect(s.facts['has_issue']).toBe(true);
+    expect((s.state as { linked_issue: { number: number } }).linked_issue.number).toBe(12);
+    expect((s.state as { commits: string[] }).commits).toEqual(['feat(#12): twelve']);
+    expect(s.facts['has_drift']).toBe(true);
+    for (const key of ['linked', 'base', 'checks_failed', 'sections']) expect(s.facts[key]).toBeUndefined();
+    const findings = runChecks(BUILTIN_PACKS['pr']!, s, config);
+    expect(findings.map((f) => f.check)).toEqual(['pr.drift']);
+    const scratch = await prRangeSubject(async (argv) => (argv[0] === 'rev-parse' ? 'scratch\n' : ''), 'dev..HEAD', config, { forge, repo: 'o/r' });
+    expect(scratch.facts['has_issue']).toBe(false);
+    expect(runChecks(BUILTIN_PACKS['pr']!, scratch, config).map((f) => f.check)).toEqual(['pr.branch']);
+    await expect(prRangeSubject(git, '..HEAD', config)).rejects.toThrow('no base');
   });
 
   it('reads a release from the forge when there is no checkout', async () => {

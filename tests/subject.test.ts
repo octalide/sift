@@ -20,6 +20,9 @@ describe('grade subject', () => {
     expect(parseSubject('pr', '#7', forge)).toEqual({ kind: 'pr', number: 7 });
     expect(parseSubject('issue', 'https://fake/o/r/issue/80', forge)).toEqual({ kind: 'issue', number: 80, repo: 'o/r' });
     expect(parseSubject('pr', 'https://fake/other/repo/pr/3', forge, 'other/repo')).toEqual({ kind: 'pr', number: 3, repo: 'other/repo' });
+    expect(parseSubject('pr', 'dev..HEAD', forge)).toEqual({ kind: 'pr', range: 'dev..HEAD' });
+    expect(parseSubject('pr', 'origin/dev...feat/1', forge)).toEqual({ kind: 'pr', range: 'origin/dev...feat/1' });
+    expect(() => parseSubject('issue', 'dev..HEAD', forge)).toThrow('not a number');
   });
 
   it('refuses a missing subject with the expected form named, before any request', () => {
@@ -30,7 +33,7 @@ describe('grade subject', () => {
       expect(refused(kind, '   ')).toBe(message);
     }
     expect(expectedSubject('issue', forge)).toBe('an issue number (N or #N) or a Fake issue URL');
-    expect(expectedSubject('pr', forge)).toBe('a pull request number (N or #N) or a Fake pull request URL');
+    expect(expectedSubject('pr', forge)).toBe('a pull request number (N or #N), a Fake pull request URL, or a range (dev..HEAD)');
   });
 
   it('refuses text, a url of the wrong kind, a url of another forge and a url that contradicts repo', () => {

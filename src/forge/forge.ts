@@ -136,6 +136,9 @@ export interface Forge {
   tags(repo: string): Promise<string[]>;
   // commits reachable from head and not from base, newest first
   compare(repo: string, base: string, head: string): Promise<Commit[]>;
+  // the unified diff from the merge base of base and head to head: compareDiff(head, base) is what base
+  // changed since the two parted
+  compareDiff(repo: string, base: string, head: string): Promise<string>;
   // every commit reachable from ref, newest first
   commits(repo: string, ref: string): Promise<Commit[]>;
   // a file at a ref (the default branch when unset), undefined when absent

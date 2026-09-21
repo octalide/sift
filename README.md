@@ -54,6 +54,7 @@ The tools are registered as `mcp__sift__grade`, `mcp__sift__judge` and `mcp__sif
 
 ```
 grade(pack: "pr", subject: "42")               # or "#42", or the PR's URL
+grade(pack: "pr", subject: "dev..HEAD")        # the PR this branch would open, graded before it exists
 grade(pack: "issue", subject: "17")            # or "#17", or an issue URL, which may name another repo
 grade(pack: "commit", subject: "main..HEAD")
 grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
@@ -65,9 +66,11 @@ grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free t
 grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17: covers it, adds nothing, decides nothing it leaves open
 ```
 
-The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `commit` takes a ref or range, `release` takes a tag or `release`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
+The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
 
-A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable).
+A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, drift, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable).
+
+A PR grade reads the base branch as well: `pr.drift` warns with the files the PR touches that also changed on the base since the branch point (the merge base to the base head), and `drift_collides` is asked of each such file with the PR's patch and the base's patch side by side, so a conflict in meaning is caught where the lines alone would merge clean. A `base..head` subject grades the same way from the checkout before the PR exists: the diff, commits and drift come from `git`, the issue from the head branch name (a `(?<issue>)` group in `branches.pattern` names it, otherwise the number segment of `feat/52` or `52-title`), and the checks only a forge can answer (`pr.linked`, `pr.target`, `pr.ci`, `pr.template`) skip rather than fail.
 
 The `issue` pack asks whether the body is substantive, which type label fits, whether the change stays in this repository, whether it needs a parent, which open issue it duplicates, whether it is `implementable` (a competent engineer could build it without making a decision the body does not make: two valid designs, an unnamed interface, an unstated edge behaviour all fail it), whether its scope is clear enough to reject an unrelated change, which open issue it is `blocked_by` (`none` unless the title or body says so, or the same code must change there first), and how ready it is. A violated `implementable` fails the report.
 
@@ -196,7 +199,7 @@ A noul's optional `criteria` is Jev's shape, `{ "true": "...", "false": "..." }`
 
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, and `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`).
 
-A pack may also carry `rank`, a list of steps run in order after the questions, each one `rank` over a subject list with the subject state as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by), `list` (`each` prints every item in order, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`) and `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out (a band other than violated), which makes steps hierarchical. The rules pack is one `each` step over the rule paragraphs; locate is two `top` steps, directories then the files within those not ruled out, so each rank reads only what could matter.
+A pack may also carry `rank`, a list of steps run in order after the questions, each one `rank` over a subject list with the subject state as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by), `list` (`each` prints every item in order, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`) and `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out (a band other than violated), which makes steps hierarchical. The rules pack is one `each` step over the rule paragraphs, the pr pack one over the drifted files; locate is two `top` steps, directories then the files within those not ruled out, so each rank reads only what could matter.
 
 The `tree` subject is a text (an issue's title and body, or free text) over an index of the checkout built in code from `git ls-files`: every directory with its file count and a sample of names, every file with its first non-empty lines and the exported or top-level symbol names a per-extension regex finds. `node_modules` and similar trees, lockfiles, binaries by extension, files with nul bytes and files over 200 kB never enter it.
 
@@ -205,7 +208,7 @@ Subject kinds and the checks they support:
 | subject | checks |
 |---|---|
 | `issue` | `issue.labels`, `issue.milestone`, `issue.template`, `issue.parent` |
-| `pr` | `pr.linked`, `pr.target`, `pr.branch`, `pr.ci`, `pr.template`, `pr.commits` |
+| `pr` | `pr.linked`, `pr.target`, `pr.branch`, `pr.ci`, `pr.template`, `pr.commits`, `pr.drift` |
 | `commit` | `commit.format` |
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
