@@ -60,7 +60,7 @@ export type Decision = {
   shadow: boolean;
   // the session that made the decision; the ring is shared by every session running the plugin
   session?: string;
-  // what a judge call cost, and what a compaction or prune took out of the context
+  // what a judge call cost, and what a prune took out of the context
   requestTokens?: number;
   responseTokens?: number;
   tokensRemoved?: number;

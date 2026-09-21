@@ -7,7 +7,7 @@
     {
       "name": "sift",
       "source": ".",
-      "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading."
+      "description": "Typed judgement calls for Claude Code: tool output pruning, repo watching, and issue/PR/commit/release/rules grading."
     }
   ],
   "description": "Typed judgement calls for Claude Code sessions."

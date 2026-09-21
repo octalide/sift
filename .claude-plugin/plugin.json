@@ -1,7 +1,7 @@
 {
   "name": "sift",
   "version": "0.9.1",
-  "description": "Typed judgement calls for Claude Code: verbatim compaction, tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
+  "description": "Typed judgement calls for Claude Code: tool output pruning, repo watching, and issue/PR/commit/release/rules grading, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
   },
@@ -49,48 +49,6 @@
       "title": "Shadow mode",
       "description": "Every module logs what it would have done and does nothing. Use it to calibrate thresholds before trusting them.",
       "default": false
-    },
-    "compact": {
-      "type": "boolean",
-      "title": "Context compaction",
-      "description": "Replace the compaction summary with the transcript minus the tool calls and results the judge marks stale. Text is never touched.",
-      "default": true
-    },
-    "compactKeepThreshold": {
-      "type": "number",
-      "title": "Compaction keep threshold",
-      "default": 0.5,
-      "description": "Minimum probability that a tool call or its result is still needed. Below it the call is dropped or the result truncated."
-    },
-    "compactPinRecent": {
-      "type": "number",
-      "title": "Compaction pinned recent messages",
-      "default": 6,
-      "description": "Newest messages never touched by compaction."
-    },
-    "compactMinReduction": {
-      "type": "number",
-      "title": "Compaction minimum reduction ratio",
-      "default": 0.25,
-      "description": "Compaction falls back to the built-in summary when the estimated reduction is below this ratio."
-    },
-    "compactTruncateHead": {
-      "type": "number",
-      "title": "Compaction truncated result head chars",
-      "default": 300,
-      "description": "Characters of a truncated tool result kept before the omission note."
-    },
-    "compactAtPercent": {
-      "type": "number",
-      "title": "Compact at context percent",
-      "description": "Request compaction after a turn once the context passes this fill. 0 leaves compaction to the engine's own trigger.",
-      "default": 0
-    },
-    "ledgerPath": {
-      "type": "string",
-      "title": "Ledger file",
-      "description": "A file holding the session's durable state. While it exists, compaction keeps the ledger's live contents, the last prompt, the pinned turns and the judged working set, and drops every prior summary. Empty means ~/.local/state/fleet/<owner>_<name>/ledger.md for the session's repository.",
-      "default": ""
     },
     "prune": {
       "type": "boolean",

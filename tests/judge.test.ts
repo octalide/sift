@@ -92,7 +92,7 @@ describe('usage accounting', () => {
     const log = new DecisionLog({ get: async (k) => store.get(k), set: async (k, v) => void store.set(k, v) }, 's');
     log.push(decisions[0]!);
     log.push({ at: 1, module: 'prune', backend: 'x', ok: true, digest: '', action: 'pruned', shadow: false, tokensRemoved: 500 });
-    log.push({ at: 1, module: 'compact', backend: 'x', ok: true, digest: '', action: 'would-compact', shadow: true, tokensRemoved: 9000 });
+    log.push({ at: 1, module: 'prune', backend: 'x', ok: true, digest: '', action: 'would-prune', shadow: true, tokensRemoved: 9000 });
     const stats = await log.stats();
     expect(stats.session.cost).toEqual({ requestTokens: decisions[0]!.requestTokens, responseTokens: decisions[0]!.responseTokens, tokensRemoved: 500 });
     expect(stats.byModule['prune']!.tokensRemoved).toBe(500);

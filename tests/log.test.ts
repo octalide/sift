@@ -11,17 +11,17 @@ describe('decision log', () => {
     log.push(decision({}));
     log.push(decision({ ok: false, reason: 'rejected: criteria', at: 5 }));
     log.push(decision({ ok: false, reason: 'http 400', at: 6 }));
-    log.push(decision({ module: 'compact', ok: false, reason: 'http 413', at: 7 }));
+    log.push(decision({ module: 'message', ok: false, reason: 'http 413', at: 7 }));
     const stats = await log.stats();
     expect(stats.calls).toBe(6);
     expect(stats.failures).toBe(4);
     expect(stats.session).toMatchObject({ calls: 4, failures: 3 });
-    expect(stats.session.lastFailure).toMatchObject({ module: 'compact', at: 7 });
+    expect(stats.session.lastFailure).toMatchObject({ module: 'message', at: 7 });
     expect((await log.recent(10)).every((d) => d.session !== undefined)).toBe(true);
     const warnings = log.takeWarnings();
     expect(warnings).toEqual([
       'sift prune fell back 2 times since the last prompt (jev: http 400), the built-in behaviour ran instead',
-      'sift compact fell back once since the last prompt (jev: http 413), the built-in behaviour ran instead',
+      'sift message fell back once since the last prompt (jev: http 413), the built-in behaviour ran instead',
     ]);
     expect(log.takeWarnings()).toEqual([]);
   });

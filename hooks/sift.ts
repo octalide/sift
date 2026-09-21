@@ -1,7 +1,5 @@
-import type { EngineInterface, PluginOptions, Register, SessionMessage } from 'claude-code';
+import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
-import { compact, COMPACT_DEFAULTS, reduction, type Message } from '../src/compact/compact.ts';
-import { compactWithLedger } from '../src/compact/ledger.ts';
 import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
 import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/config.ts';
 import { Gh } from '../src/github/gh.ts';
@@ -14,7 +12,7 @@ import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
 import type { Pack, Report, Subject } from '../src/packs/types.ts';
 import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
-import { estimateTokens, estimateTokensOf } from '../src/tokens.ts';
+import { estimateTokens } from '../src/tokens.ts';
 import { Watcher } from '../src/watch/watcher.ts';
 
 type Options = {
@@ -24,14 +22,6 @@ type Options = {
   jevBaseUrl: string;
   fallbackModel: string;
   shadow: boolean;
-  compact: boolean;
-  compactKeepThreshold: number;
-  compactPinRecent: number;
-  compactMinReduction: number;
-  compactTruncateHead: number;
-  compactAtPercent: number;
-  // the session's ledger file; empty means the fleet default for the session repo
-  ledgerPath: string;
   prune: boolean;
   pruneFloorTokens: number;
   pruneChunkLines: number;
@@ -60,13 +50,6 @@ const DEFAULTS: Options = {
   jevBaseUrl: JUDGE_DEFAULTS.jevBaseUrl,
   fallbackModel: JUDGE_DEFAULTS.fallbackModel,
   shadow: false,
-  compact: true,
-  compactKeepThreshold: COMPACT_DEFAULTS.keepThreshold,
-  compactPinRecent: COMPACT_DEFAULTS.pinRecent,
-  compactMinReduction: 0.25,
-  compactTruncateHead: COMPACT_DEFAULTS.truncateHead,
-  compactAtPercent: 0,
-  ledgerPath: '',
   prune: true,
   pruneFloorTokens: PRUNE_DEFAULTS.floorTokens,
   pruneChunkLines: PRUNE_DEFAULTS.chunkLines,
@@ -114,8 +97,6 @@ type Runtime = {
   // builds and starts the watcher; returns the reason when it cannot
   startWatch: () => Promise<string | undefined>;
   sessionId: string;
-  // where the session's ledger would be; it counts only while the file exists
-  ledgerPath?: string;
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -149,7 +130,6 @@ async function lastUserText($: EngineInterface): Promise<string> {
 export const register: Register = (on, rawOptions) => {
   const options = resolveOptions(rawOptions);
   let runtime: Runtime | undefined;
-  let compacting = false;
 
   const record = (module: string, action: string, extra: Partial<Decision> = {}) => {
     runtime?.log.push({
@@ -257,7 +237,6 @@ export const register: Register = (on, rawOptions) => {
     const repoConfig = (await $.fs.exists(`${root}/${CONFIG_PATH}`)) ? JSON.parse(await $.fs.read(`${root}/${CONFIG_PATH}`)) : undefined;
     const config = resolveConfig([await optionConfig($, options.config, root), repoConfig], repoInfo?.defaultBranch);
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
-    const home = (await $.env.get('HOME')) ?? '/tmp';
     const startWatch = async (): Promise<string | undefined> => {
       const rt = ready();
       if (rt.watcher) return undefined;
@@ -308,8 +287,7 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    const ledgerPath = options.ledgerPath || (repoInfo ? `${home}/.local/state/fleet/${repoInfo.nameWithOwner.replace('/', '_')}/ledger.md` : undefined);
-    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, ledgerPath };
+    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -434,89 +412,11 @@ export const register: Register = (on, rawOptions) => {
     return { result: { ...read, file: { ...read.file, content: pruned.text } } };
   });
 
-  on('session.compact', async ($, e, next) => {
-    const rt = runtime;
-    if (!options.compact || !rt || e.trigger === 'precompute') return next(e);
-    try {
-      if (rt.ledgerPath && (await $.fs.exists(rt.ledgerPath))) {
-        const ledger = await $.fs.read(rt.ledgerPath);
-        const result = await compactWithLedger(e.messages as unknown as Message[], rt.judge, {
-          ...COMPACT_DEFAULTS,
-          keepThreshold: options.compactKeepThreshold,
-          pinRecent: options.compactPinRecent,
-          truncateHead: options.compactTruncateHead,
-          instructions: e.instructions,
-          ledger,
-          ledgerPath: rt.ledgerPath,
-        });
-        // one line per compaction, grep-able: the numbers that say whether residue is growing
-        const report = `ledger: tokens ${result.tokensBefore} -> ${result.tokensAfter}, residue ${result.residueTokens}, summaries dropped ${result.summariesDropped}, in flight ${result.inFlight ? 'yes' : 'no'}, kept ${result.messages.length}/${e.messages.length}, ${result.decisions.filter((d) => d.action !== 'drop').length}/${result.decisions.length} calls kept, ${result.requests} request(s)`;
-        if (result.error) {
-          record('compact', 'fallback', { ok: false, reason: result.error, digest: report });
-          $.ui.log(`sift compact: built-in summary (${result.error})`);
-          return next(e);
-        }
-        record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: report, tokensRemoved: Math.max(0, result.tokensBefore - result.tokensAfter) });
-        if (options.shadow) {
-          $.ui.log(`sift compact (shadow): ${report}`);
-          return next(e);
-        }
-        $.ui.toast(`sift compact: ${report}`, { timeoutMs: 10_000 });
-        return { messages: result.messages as unknown as SessionMessage[] };
-      }
-      const result = await compact(e.messages as unknown as Message[], rt.judge, {
-        ...COMPACT_DEFAULTS,
-        keepThreshold: options.compactKeepThreshold,
-        pinRecent: options.compactPinRecent,
-        truncateHead: options.compactTruncateHead,
-        instructions: e.instructions,
-      });
-      if (result.error) {
-        record('compact', 'fallback', { ok: false, reason: result.error, digest: `${e.messages.length} messages` });
-        $.ui.log(`sift compact: built-in summary (${result.error})`);
-        return next(e);
-      }
-      const ratio = reduction(result);
-      const summary = `${Math.round(ratio * 100)}% smaller, ${result.decisions.filter((d) => d.action === 'drop').length} calls dropped, ${result.decisions.filter((d) => d.action === 'truncate').length} results truncated, ${result.requests} request(s), state ~${result.stateTokens} tokens (${result.stage})`;
-      if (ratio < options.compactMinReduction) {
-        record('compact', 'fallback', { digest: `below minimum: ${summary}` });
-        $.ui.log(`sift compact: built-in summary (${summary}, under ${Math.round(options.compactMinReduction * 100)}% minimum)`);
-        return next(e);
-      }
-      record('compact', options.shadow ? 'would-compact' : 'compacted', { digest: summary, tokensRemoved: Math.max(0, estimateTokensOf(e.messages) - estimateTokensOf(result.messages)) });
-      if (options.shadow) {
-        $.ui.log(`sift compact (shadow): would keep ${result.messages.length}/${e.messages.length} messages, ${summary}`);
-        return next(e);
-      }
-      $.ui.toast(`sift compact: kept ${result.messages.length}/${e.messages.length} messages verbatim, ${summary}`, { timeoutMs: 10_000 });
-      return { messages: result.messages as unknown as SessionMessage[] };
-    } catch (error) {
-      $.ui.log(`sift compact: built-in summary (${messageOf(error)})`);
-      return next(e);
-    }
-  });
-
   // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count
   on('prompt.submit', async (_$, e, next) => {
     const warnings = runtime?.log.takeWarnings() ?? [];
     if (warnings.length === 0) return next(e);
     return next({ ...e, context: [...(e.context ?? []), ...warnings] });
-  });
-
-  on('turn.complete', async ($, e, next) => {
-    if (options.compactAtPercent <= 0 || compacting) return next(e);
-    try {
-      const { context } = await $.session.usage();
-      if ((context.percent ?? 0) >= options.compactAtPercent) {
-        compacting = true;
-        await $.session.compact();
-      }
-    } catch (error) {
-      $.ui.log(`sift: auto-compact skipped (${messageOf(error)})`);
-    } finally {
-      compacting = false;
-    }
-    return next(e);
   });
 
   on('model.classify', async ($, e, next) => {
