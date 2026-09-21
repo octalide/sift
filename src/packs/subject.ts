@@ -44,20 +44,23 @@ export function parseSubject(kind: ParsedKind, ref: string | undefined, forge: P
     throw new Error(`${kind} pack: ${why} (${JSON.stringify(shown(raw))}); expected ${expected}`);
   };
   const link = forge.parseUrl(raw);
+  // an issue or pull request by number or url; the two kinds share the forms, only the kind differs
+  const numbered = (kind: 'issue' | 'pr'): { number: number; repo?: string } => {
+    const n = NUMBER.exec(raw);
+    if (n) return { number: Number(n[1]) };
+    if (link) {
+      if (link.kind !== kind) return refuse(`subject is ${A_NOUN[link.kind]} URL, not ${A_NOUN[kind]}`);
+      if (repo !== undefined && repo !== link.repo) return refuse(`subject URL names ${link.repo} but repo is ${repo}`);
+      return { number: link.number, repo: link.repo };
+    }
+    if (URL.test(raw)) return refuse(`subject is a URL ${forge.name} does not serve as ${A_NOUN[kind]}`);
+    return refuse(/\s/.test(raw) ? 'subject reads as text, not a reference' : 'subject is not a number');
+  };
   switch (kind) {
     case 'issue':
-    case 'pr': {
-      const n = NUMBER.exec(raw);
-      if (n) return { kind, number: Number(n[1]) };
-      if (kind === 'pr' && RANGE.test(raw)) return { kind, range: raw };
-      if (link) {
-        if (link.kind !== kind) return refuse(`subject is ${A_NOUN[link.kind]} URL, not ${A_NOUN[kind]}`);
-        if (repo !== undefined && repo !== link.repo) return refuse(`subject URL names ${link.repo} but repo is ${repo}`);
-        return { kind, number: link.number, repo: link.repo };
-      }
-      if (URL.test(raw)) return refuse(`subject is a URL ${forge.name} does not serve as ${A_NOUN[kind]}`);
-      return refuse(/\s/.test(raw) ? 'subject reads as text, not a reference' : 'subject is not a number');
-    }
+      return { kind, ...numbered(kind) };
+    case 'pr':
+      return RANGE.test(raw) ? { kind, range: raw } : { kind, ...numbered(kind) };
     case 'commit': {
       if (link || URL.test(raw)) return refuse('subject is a URL');
       if (raw.startsWith('#')) return refuse('subject is an issue number, not a ref');
