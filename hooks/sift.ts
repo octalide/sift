@@ -246,7 +246,7 @@ export const register: Register = (on, rawOptions) => {
   // the checkout serves its own repo; any other repo, or no checkout at all, is read from the forge
   function ruleSource(rt: Runtime, repo: string | undefined): RuleSource {
     const local = rt.root !== undefined && (repo === undefined || repo === rt.repo);
-    if (local) return checkoutSource(rt.root!, rt.git, { read: readFile, exists: existsFile }, rt.forge, rt.repo);
+    if (local) return checkoutSource(rt.root!, rt.git, { read: readFile, exists: existsFile }, rt.forge);
     const remote = repo ?? rt.repo;
     if (!remote) throw new Error(`no repository: pass repo as the ${rt.forge.name} path or run inside a checkout with a ${rt.forge.name} remote`);
     return forgeSource(rt.forge, remote);

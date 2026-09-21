@@ -147,6 +147,22 @@ const TEMPLATE_DIRS = ['', 'docs', '.github'];
 const TEMPLATE_FILE: Record<Template['kind'], RegExp> = { issue: /^issue_template\.(md|yml|yaml)$/i, pr: /^pull_request_template\.md$/i };
 const TEMPLATE_DIR: Record<Template['kind'], RegExp> = { issue: /^issue_template$/i, pr: /^pull_request_template$/i };
 const TEMPLATE_ENTRY: Record<Template['kind'], RegExp> = { issue: /\.(md|yml|yaml)$/i, pr: /\.md$/i };
+// config.yml beside issue forms configures the chooser, it is no template
+const TEMPLATE_CHOOSER = /^config\.ya?ml$/i;
+
+// the kind of template at a path, from where github documents them; undefined anywhere else
+export function templateKind(path: string): Template['kind'] | undefined {
+  const parts = path.split('/');
+  const name = parts.pop()!;
+  const single = parts.length <= 1 && TEMPLATE_DIRS.includes(parts[0] ?? '');
+  const sub = parts.pop();
+  const nested = sub !== undefined && parts.length <= 1 && TEMPLATE_DIRS.includes(parts[0] ?? '');
+  for (const kind of ['issue', 'pr'] as const) {
+    if (single && TEMPLATE_FILE[kind].test(name)) return kind;
+    if (nested && TEMPLATE_DIR[kind].test(sub) && TEMPLATE_ENTRY[kind].test(name) && !TEMPLATE_CHOOSER.test(name)) return kind;
+  }
+  return undefined;
+}
 
 export class GitHubForge implements Forge {
   readonly name = 'GitHub';
@@ -242,21 +258,24 @@ export class GitHubForge implements Forge {
     return [...(runs.check_runs ?? []).map(checkRun), ...(statuses.statuses ?? []).map(status)];
   }
 
+  template(path: string): Template['kind'] | undefined {
+    return templateKind(path);
+  }
+
   async templates(repo: string): Promise<Template[]> {
     const out: Template[] = [];
     const list = (dir: string) => this.gh.json<GhEntry[]>(`repos/${repo}/contents/${dir}`).catch((e: unknown) => (missing(e) ? [] : Promise.reject(e)));
-    const read = async (kind: Template['kind'], entry: GhEntry) => {
-      const body = await this.file(repo, entry.path);
-      if (body !== undefined) out.push({ kind, name: entry.path, body });
+    const read = async (kind: Template['kind'], entries: GhEntry[]) => {
+      for (const e of entries.filter((e) => e.type === 'file' && templateKind(e.path) === kind)) {
+        const body = await this.file(repo, e.path);
+        if (body !== undefined) out.push({ kind, name: e.path, body });
+      }
     };
     for (const dir of TEMPLATE_DIRS) {
       const entries = await list(dir);
       for (const kind of ['issue', 'pr'] as const) {
-        for (const e of entries.filter((e) => e.type === 'file' && TEMPLATE_FILE[kind].test(e.name))) await read(kind, e);
-        for (const d of entries.filter((e) => e.type === 'dir' && TEMPLATE_DIR[kind].test(e.name))) {
-          // config.yml beside issue forms configures the chooser, it is no template
-          for (const e of (await list(d.path)).filter((e) => e.type === 'file' && TEMPLATE_ENTRY[kind].test(e.name) && !/^config\.ya?ml$/i.test(e.name))) await read(kind, e);
-        }
+        await read(kind, entries);
+        for (const d of entries.filter((e) => e.type === 'dir' && TEMPLATE_DIR[kind].test(e.name))) await read(kind, await list(d.path));
       }
     }
     return out;
