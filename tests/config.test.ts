@@ -27,3 +27,13 @@ describe('global config', () => {
     expect(resolveConfig(configLayers({})).commits.convention).toBe('none');
   });
 });
+
+describe('outbound channels in config', () => {
+  it('reads the channel list and rejects a bad regex by name', () => {
+    const slack = { name: 'slack', tool: '^mcp__slack__post_message$', text: { fields: ['text'] }, limit: 40000, kind: 'a Slack message' };
+    expect(resolveConfig({ outbound: { channels: [slack] } }).outbound.channels).toEqual([slack]);
+    expect(resolveConfig({}).outbound.channels).toEqual([]);
+    expect(() => resolveConfig({ outbound: { channels: [{ ...slack, tool: '(' }] } })).toThrow(/outbound\.channels\[slack\]\.tool is not a valid regex/);
+    expect(() => resolveConfig({ outbound: { channels: [{ name: 'glab', tool: '^Bash$', text: { command: '[', body: ['-m'] } }] } })).toThrow(/outbound\.channels\[glab\]\.text\.command is not a valid regex/);
+  });
+});

@@ -1,6 +1,6 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
-import type { Check, Forge, ForgeAction, ForgeArtifact } from '../forge/forge.ts';
+import type { Check, Forge } from '../forge/forge.ts';
 import type { Git } from '../forge/git.ts';
 import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, type Bump, type ParsedCommit } from './commits.ts';
 import { compareVersions, parseTag, SEMVER_PATTERN, type Version } from './version.ts';
@@ -225,21 +225,8 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
   };
 }
 
-export type { ForgeArtifact, ForgeAction } from '../forge/forge.ts';
-
-// free text the rules are read against, and when known, the artifact it is about to become
-export type RulesTarget = { kind: 'pr' | 'issue' | 'commit'; ref: string } | { kind: 'text'; ref: string; artifact?: { kind: ForgeArtifact; action: ForgeAction } };
-
-// how an artifact is named when no forge is bound to name it
-const PLAIN_NOUNS: Record<ForgeArtifact, string> = { issue: 'issue', pr: 'pull request', release: 'release' };
-
-// what the text is, in the words the judge reads: "the body of a new GitHub issue"
-export function textAbout(artifact: { kind: ForgeArtifact; action: ForgeAction }, nouns: Record<ForgeArtifact, string> = PLAIN_NOUNS): string {
-  const noun = nouns[artifact.kind];
-  if (artifact.action === 'comment') return `a comment on a ${noun}`;
-  if (artifact.action === 'edit') return `the edited ${artifact.kind === 'release' ? 'notes' : 'body'} of a ${noun}`;
-  return `the ${artifact.kind === 'release' ? 'notes' : 'body'} of a new ${noun}`;
-}
+// free text the rules are read against, and when known, what it is about to become in the words the judge reads
+export type RulesTarget = { kind: 'pr' | 'issue' | 'commit'; ref: string } | { kind: 'text'; ref: string; about?: string };
 
 // the checkout the rules are read from, and the forge behind it when the session has one
 export type RulesHost = { forge?: Forge; git?: Git; repo?: string; read: ReadLike; exists: ExistsLike };
@@ -269,8 +256,8 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
     subject = { kind: 'commit', ...s.state };
     about = `commit ${target.ref}`;
   } else if (target.kind === 'text') {
-    about = target.artifact ? textAbout(target.artifact, forge?.nouns) : undefined;
-    subject = { kind: 'text', ...(target.artifact ? { artifact: target.artifact.kind, action: target.artifact.action, about } : {}), text: truncate(target.ref, BODY_CAP) };
+    about = target.about;
+    subject = { kind: 'text', ...(about ? { about } : {}), text: truncate(target.ref, BODY_CAP) };
   }
   return {
     kind: 'rules',

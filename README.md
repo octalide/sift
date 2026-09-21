@@ -16,7 +16,7 @@ Everything sift does is built on that one call, directly or through `rank`, whic
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed and leaves a one-line note in their place with the omitted line range and how to get it back (re-read the file by range for Read, rerun the command for Bash). Nothing is kept on disk | on |
 | `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, locate, plan, or a repo-defined one), `mcp__sift__judge` answers raw typed questions and `mcp__sift__rank` asks the same questions of many items | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
-| `gateOutbound` | `tool.call` (pre) | checks text about to leave the session (a Discord message, a `gh pr`, `gh issue` or `gh release` create, comment or edit body) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
+| `gateOutbound` | `tool.call` (pre) | checks text about to leave the session through a channel table (Discord messages and `gh pr|issue|release` bodies by default, more by config) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
 
 `shadow: true` makes every module log what it would have done without doing it. Use it to calibrate thresholds against your own traffic before trusting them.
@@ -152,7 +152,21 @@ With no version pattern configured, no version is computed or checked. The tags 
 
 ## Outbound text
 
-With `gateOutbound: true` the text a tool call is about to send is checked before the call runs: Discord `send_message`, `send_dm`, `edit_message`, `send_webhook_message`, `create_forum_post` content and embed text, and the body of `gh pr|issue|release create|comment|edit` in a Bash command: the `--body`/`-b` value, quoted or in a `$(cat <<'EOF' ... EOF)` heredoc, or the file named by `--body-file`/`-F`, read before the command runs. A body from stdin (`--body-file -`) or an unreadable file is denied without a judge call. The channel's hard limit is mechanical (2000 characters for Discord) and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`, each question naming what the text is (`The subject (the body of a new GitHub issue) complies with this rule: ...`) so a rule written for another artifact, a pull request rule against an issue body, is answered as not applying rather than broken: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
+With `gateOutbound: true` the text a tool call is about to send is checked before the call runs. Where text leaves the session is a table of channels, one entry per place: a `name` a config entry replaces it by, a `tool` regex over the tool name, where the `text` is in the call, an optional hard `limit` in characters, and `kind`, what the text is in the words the rules question names it by. The text is either `{ "fields": [...] }`, the named fields of the tool input joined in order, or for a shell command `{ "command": <regex>, "body": [flags], "file": [flags] }`: the value after a body flag, a quoted word or a `$(cat <<'EOF' ... EOF)` heredoc, else the file named by a file flag, read before the command runs. A body from stdin (`--body-file -`) or an unreadable file is denied without a judge call. The first channel whose tool and text match decides.
+
+The default table ships Discord (`send_message`, `edit_message`, `send_webhook_message` and `send_dm` content, `create_forum_post` content and embed text, 2000 characters each) and one entry per write the code host's cli makes: `gh pr|issue create|comment|edit` by `--body`/`-b` or `--body-file`/`-F` and `gh release create|edit` by `--notes`/`-n` or `--notes-file`/`-F`, named `github-pr-comment`, `github-release-create` and so on, each with its `kind` (`a comment on a pull request`, `the notes of a new GitHub release`). `outbound.channels` in the config adds entries to the table, or replaces a default entry of the same name:
+
+```json
+"outbound": {
+  "channels": [
+    { "name": "slack", "tool": "^mcp__slack__post_message$", "text": { "fields": ["text"] }, "limit": 40000, "kind": "a Slack message" },
+    { "name": "gitlab-mr-note", "tool": "^Bash$", "text": { "command": "^glab\\s+mr\\s+note\\b", "body": ["--message", "-m"] }, "kind": "a note on a merge request" },
+    { "name": "discord-message", "tool": "^mcp__discord__send_message$", "text": { "fields": ["content"] }, "limit": 1000, "kind": "a Discord message" }
+  ]
+}
+```
+
+The channel's limit is mechanical and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`, each question naming the channel's `kind` (`The subject (the body of a new GitHub issue) complies with this rule: ...`) so a rule written for another artifact, a pull request rule against an issue body, is answered as not applying rather than broken: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
 
 ## Packs
 

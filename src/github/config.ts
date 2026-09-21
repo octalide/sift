@@ -1,5 +1,6 @@
 import { CONVENTIONAL_FORMAT } from './commits.ts';
 import { CALVER_PATTERN, SEMVER_PATTERN } from './version.ts';
+import type { Channel } from '../gate/channels.ts';
 
 // presets expand to a regex at resolve time; an explicit pattern beside one wins
 export const COMMIT_FORMATS = { conventional: CONVENTIONAL_FORMAT } as const;
@@ -61,6 +62,10 @@ export type RepoConfig = {
     // file (arrays indexed numerically), pattern a regex over the text of any file whose matched text must not change
     manifests: { path: string; keys?: string[]; pattern?: string; bump: 'major' | 'minor' | 'patch' }[];
   };
+  outbound: {
+    // channels added to the default table, or replacing a default entry of the same name
+    channels: Channel[];
+  };
 };
 
 export const DEFAULT_CONFIG: RepoConfig = {
@@ -75,6 +80,7 @@ export const DEFAULT_CONFIG: RepoConfig = {
   prs: { linkIssue: false, templateSections: [] },
   rules: { docs: ['CONTRIBUTING.md', 'CLAUDE.md', 'AGENTS.md', '.github/PULL_REQUEST_TEMPLATE.md'], maxRules: 200 },
   release: { tagPrefix: 'v', zeroVerBreaking: 'minor', manifests: [] },
+  outbound: { channels: [] },
 };
 
 export const CONFIG_PATH = '.sift/config.json';
@@ -123,6 +129,10 @@ function expandPresets(config: RepoConfig): RepoConfig {
     ['prs.targets', typeof prs.targets === 'string' ? prs.targets : undefined],
     ['release.versionPattern', release.versionPattern],
     ['release.tagPattern', release.tagPattern],
+    ...resolved.outbound.channels.flatMap((c): [string, string | undefined][] => [
+      [`outbound.channels[${c.name}].tool`, c.tool],
+      [`outbound.channels[${c.name}].text.command`, c.text && 'command' in c.text ? c.text.command : undefined],
+    ]),
   ] as const) {
     if (pattern === undefined) continue;
     try {
