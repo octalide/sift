@@ -8,14 +8,15 @@ import { manifestChanges, manifestFormat, type ManifestChange } from './manifest
 import { driftOf, lineDiff, type Drift } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
+import { discoverRules, type RuleSource } from '../rules/discover.ts';
+import type { Judge } from '../judge/types.ts';
+import type { StoreLike } from '../log.ts';
 
 const BODY_CAP = 20_000;
 const DIFF_CAP = 60_000;
 const COMMENT_CAP = 6_000;
 const DRIFT_CAP = 12_000;
 
-import type { ReadLike, ExistsLike } from './source.ts';
-export type { ReadLike, ExistsLike } from './source.ts';
 
 export function sectionsOf(markdown: string): Record<string, string> {
   const sections: Record<string, string> = {};
@@ -287,17 +288,13 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
 // free text the rules are read against, and when known, what it is about to become in the words the judge reads
 export type RulesTarget = { kind: 'pr' | 'issue' | 'commit'; ref: string } | { kind: 'text'; ref: string; about?: string };
 
-// the checkout the rules are read from, and the forge behind it when the session has one
-export type RulesHost = { forge?: Forge; git?: Git; repo?: string; read: ReadLike; exists: ExistsLike };
+// the checkout or repository the rules are read from, the judge that discovers them and the store that caches them
+export type RulesHost = { forge?: Forge; git?: Git; repo?: string; source: RuleSource; judge: Judge; store: StoreLike };
 
 export async function rulesSubject(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject> {
-  const { forge, git, repo, read, exists } = host;
-  const rules: { source: string; text: string }[] = [];
-  for (const doc of config.rules.docs) {
-    const text = await ruleDoc(doc, forge, read, exists);
-    if (text === undefined) continue;
-    for (const rule of ruleParagraphs(text)) rules.push({ source: doc, text: rule });
-  }
+  const { forge, git, repo } = host;
+  const found = await discoverRules(host.source, config.rules, host.judge, host.store);
+  const rules = [...found.rules];
   const total = rules.length;
   rules.splice(config.rules.maxRules);
   let subject: Record<string, unknown> = { kind: target.kind, ref: target.ref };
@@ -322,8 +319,17 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
     kind: 'rules',
     ref: `${target.kind}:${truncate(target.ref, 40)}`,
     state: { subject },
-    facts: { rules, has_rules: rules.length > 0, total_rules: total, subject: about ? `The subject (${about})` : 'The subject' },
+    facts: {
+      rules,
+      has_rules: rules.length > 0,
+      total_rules: total,
+      docs: found.docs,
+      candidates: found.candidates,
+      cached: found.cached,
+      subject: about ? `The subject (${about})` : 'The subject',
+    },
     options: {},
+    ...(found.error === undefined ? {} : { judgeError: `rule discovery: ${found.error}` }),
   };
 }
 
@@ -352,82 +358,6 @@ export function textSubject(text: string, context?: string): Subject {
     facts: {},
     options: {},
   };
-}
-
-// bullets and short paragraphs that read as rules, headings kept as context prefix
-// a rule doc is a path in the checkout or repo:path[@ref] read from the forge; undefined when absent
-export async function ruleDoc(doc: string, forge: Forge | undefined, read: ReadLike, exists: ExistsLike): Promise<string | undefined> {
-  const remote = /^((?:[\w.-]+\/)+[\w.-]+):([^@]+?)(?:@(.+))?$/.exec(doc);
-  if (!remote) return (await exists(doc)) ? read(doc) : undefined;
-  if (!forge) return undefined;
-  const [, repo, path, ref] = remote;
-  return forge.file(repo!, path!, ref);
-}
-
-// a markdown table row is one rule, its cells named by the header: "5.x: a; 6.0.0: b"
-function tableRows(lines: string[]): string[] {
-  const cells = (line: string) =>
-    line
-      .trim()
-      .replace(/^\||\|$/g, '')
-      .split('|')
-      .map((c) => c.trim());
-  const header = cells(lines[0]!);
-  return lines
-    .slice(2)
-    .map(cells)
-    .filter((row) => row.some((c) => c.length > 0))
-    .map((row) => row.map((c, i) => (header[i] ? `${header[i]}: ${c}` : c)).join('; '));
-}
-
-export function ruleParagraphs(markdown: string): string[] {
-  const out: string[] = [];
-  let heading = '';
-  let buffer: string[] = [];
-  const flush = () => {
-    const text = buffer.join(' ').replace(/\s+/g, ' ').trim();
-    buffer = [];
-    if (text.length < 12 || text.startsWith('```')) return;
-    out.push(heading ? `${heading}: ${text}` : text);
-  };
-  let inCode = false;
-  let table: string[] = [];
-  const flushTable = () => {
-    if (table.length >= 2) for (const row of tableRows(table)) out.push(heading ? `${heading}: ${row}` : row);
-    table = [];
-  };
-  for (const line of markdown.split('\n')) {
-    if (line.startsWith('```')) {
-      inCode = !inCode;
-      continue;
-    }
-    if (inCode) continue;
-    if (/^\s*\|.*\|\s*$/.test(line)) {
-      if (table.length === 0) flush();
-      table.push(line);
-      continue;
-    }
-    flushTable();
-    const h = /^#{1,6}\s+(.+)$/.exec(line);
-    if (h) {
-      flush();
-      heading = h[1]!.trim();
-      continue;
-    }
-    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
-      flush();
-      buffer.push(line.replace(/^\s*([-*+]|\d+\.)\s+/, ''));
-      continue;
-    }
-    if (line.trim() === '') {
-      flush();
-      continue;
-    }
-    buffer.push(line.trim());
-  }
-  flushTable();
-  flush();
-  return out;
 }
 
 export function commitsOf(subject: Subject): ParsedCommit[] {

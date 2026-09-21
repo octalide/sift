@@ -150,8 +150,13 @@ export const CHECKS: Record<string, Check> = {
     return [info('tree.indexed', `${files} files in ${dirs} directories indexed, ${skipped} skipped`)];
   },
   'rules.present': (s, c) => {
-    if (!s.facts['has_rules']) return [info('rules.present', 'no rule documents found in the repo')];
+    const docs = (s.facts['docs'] as string[] | undefined) ?? [];
+    const candidates = Number(s.facts['candidates'] ?? 0);
+    if (!s.facts['has_rules']) return [info('rules.present', candidates > 0 ? `no rules found in ${candidates} candidate document${candidates === 1 ? '' : 's'}` : 'no rule documents found in the repo')];
     const total = Number(s.facts['total_rules'] ?? 0);
-    return total > c.rules.maxRules ? [warn('rules.present', `${c.rules.maxRules} of ${total} rules used, raise rules.maxRules to judge the rest`)] : [];
+    const used = Math.min(total, c.rules.maxRules);
+    const out = [info('rules.present', `${used} rule${used === 1 ? '' : 's'} from ${docs.join(', ')}${s.facts['cached'] ? ' (cached)' : ''}`)];
+    if (total > c.rules.maxRules) out.push(warn('rules.present', `${c.rules.maxRules} of ${total} rules used, raise rules.maxRules to judge the rest`));
+    return out;
   },
 };

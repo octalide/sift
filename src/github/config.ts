@@ -41,8 +41,10 @@ export type RepoConfig = {
     templateSections: string[];
   };
   rules: {
-    // paths in the checkout, or owner/repo:path[@ref] read from github
+    // documents used without being judged as rule documents: paths in the checkout, or owner/repo:path[@ref] read from the forge
     docs: string[];
+    // paths or globs (* within a segment, ** across) never considered as rule documents
+    exclude: string[];
     // rules past this count are dropped and rules.present says so
     maxRules: number;
   };
@@ -78,7 +80,7 @@ export const DEFAULT_CONFIG: RepoConfig = {
   branches: { protected: [] },
   issues: { requiredLabelGroups: [], milestone: false, templateSections: [], childLabels: [] },
   prs: { linkIssue: false, templateSections: [] },
-  rules: { docs: ['CONTRIBUTING.md', 'CLAUDE.md', 'AGENTS.md', '.github/PULL_REQUEST_TEMPLATE.md'], maxRules: 200 },
+  rules: { docs: [], exclude: [], maxRules: 200 },
   release: { tagPrefix: 'v', zeroVerBreaking: 'minor', manifests: [] },
   outbound: { channels: [] },
 };
