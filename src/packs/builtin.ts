@@ -158,6 +158,51 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       },
     ],
   },
+  hunks: {
+    name: 'hunks',
+    subject: 'pr',
+    description: 'Which hunk of this PR is wrong: unrelated to its stated purpose, a workaround, or a behaviour change no test covers?',
+    checks: [],
+    questions: {},
+    // one request per hunk, so no hunk colours another: the hunk is read against the stated purpose and the map of the whole change
+    rank: [
+      {
+        from: 'hunks',
+        mode: 'isolated',
+        list: 'violated',
+        label: '{file} {header}',
+        context: ['title', 'body', 'linked_issue', 'commits', 'changes'],
+        questions: {
+          unrelated: {
+            type: 'noul',
+            instructions: 'The hunk {header} of {file} does not serve the stated purpose of the pull request.',
+            criteria: {
+              true: 'The hunk is an unrelated refactor, a formatting sweep, or a drive-by fix in another subsystem that the title, body, linked issue and commits do not call for.',
+              false: 'The hunk does part of what the pull request says it does, or is the small change needed to make that compile, build or read right.',
+            },
+            inverted: true,
+            severity: 'warn',
+          },
+          workaround: {
+            type: 'noul',
+            instructions: 'The hunk {header} of {file} patches a symptom rather than its cause: a defensive fallback, a swallowed error, a special case added where a general fix was needed, or a TODO left in place of the fix.',
+            inverted: true,
+            severity: 'warn',
+          },
+          untested: {
+            type: 'noul',
+            instructions: 'The hunk {header} of {file} changes behaviour and no hunk of the diff adds or changes a test for it.',
+            criteria: {
+              true: 'The hunk changes what the code does and none of the hunks listed under changes, judged by their file and header, touches a test of that behaviour.',
+              false: 'The hunk changes no behaviour (a comment, a type, a rename, documentation, a test itself), or a hunk under changes visibly tests what it changes.',
+            },
+            inverted: true,
+            severity: 'warn',
+          },
+        },
+      },
+    ],
+  },
   commit: {
     name: 'commit',
     subject: 'commit',

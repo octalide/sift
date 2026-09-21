@@ -3,7 +3,7 @@ import type { Git } from '../src/forge/git.ts';
 import { CONVENTIONAL_BUMPS, parseCommit, parseLog, requiredBump } from '../src/github/commits.ts';
 import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, SEMVER_PATTERN, CALVER_PATTERN } from '../src/github/version.ts';
 import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/github/manifest.ts';
-import { driftOf, lineDiff, splitDiff } from '../src/github/diff.ts';
+import { driftOf, hunksOf, lineDiff, splitDiff } from '../src/github/diff.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
 import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, planSubject, prRangeSubject, prSubject, releaseSubject, sectionsOf } from '../src/github/subjects.ts';
@@ -555,6 +555,60 @@ describe('github helpers', () => {
     expect(splitDiff(a)[0]!.patch).toBe('diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y');
     expect(splitDiff('')).toEqual([]);
     expect(driftOf(a, b)).toEqual([{ path: 'new.ts', pr: 'diff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts', base: 'diff --git a/new.ts b/new.ts\n@@ -1 +1 @@\n-p\n+q' }]);
+  });
+
+  it('splits a diff into hunks, a hunkless file being one hunk of its own', () => {
+    const diff = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@ export function f() {\n-x\n+y\n@@ -9 +9 @@\n+@@ not a header\ndiff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts\n';
+    expect(hunksOf(diff)).toEqual([
+      { file: 'src/a.ts', header: '@@ -1,2 +1,2 @@ export function f() {', text: '-x\n+y' },
+      { file: 'src/a.ts', header: '@@ -9 +9 @@', text: '+@@ not a header' },
+      { file: 'new.ts', header: '', text: 'diff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts' },
+    ]);
+    expect(hunksOf('')).toEqual([]);
+  });
+
+  it('judges every hunk of a pull request alone against its purpose and the map of the change', async () => {
+    const diff = 'diff --git a/src/x.ts b/src/x.ts\n@@ -1 +1 @@ f\n-a\n+b\n@@ -5 +5 @@ g\n-c\n+d\ndiff --git a/tests/x.test.ts b/tests/x.test.ts\n@@ -1 +1 @@ it\n-e\n+f\n';
+    const s = await prSubject(fakeForge({ diff: async () => diff }), 'o/r', 7, DEFAULT_CONFIG);
+    expect((s.state as { changes: unknown }).changes).toEqual([
+      { file: 'src/x.ts', header: '@@ -1 +1 @@ f' },
+      { file: 'src/x.ts', header: '@@ -5 +5 @@ g' },
+      { file: 'tests/x.test.ts', header: '@@ -1 +1 @@ it' },
+    ]);
+    expect((s.facts['hunks'] as { text: string }[]).map((h) => h.text)).toEqual(['-a\n+b', '-c\n+d', '-e\n+f']);
+    const { steps } = materialize(BUILTIN_PACKS['hunks']!, s);
+    expect(steps.map((st) => [st.step.from, st.items.length, st.by])).toEqual([['hunks', 3, 'unrelated']]);
+    // one request per hunk carrying the purpose fields and the hunk, never the diff; the second hunk is a workaround, the third untested
+    const states: Record<string, unknown>[] = [];
+    const judge: Judge = {
+      name: 'fake',
+      ask: async (state, questions) => {
+        states.push(state as Record<string, unknown>);
+        const item = (state as { item: { header: string } }).item;
+        const p = (id: string) => (id === 'workaround' && item.header.endsWith('g') ? 0.9 : id === 'untested' && item.header.endsWith('it') ? 0.8 : 0.1);
+        return { ok: true, answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: 'noul', p: p(id) }])), backend: 'fake', latencyMs: 1 };
+      },
+    };
+    const report = await runPack(BUILTIN_PACKS['hunks']!, s, judge, DEFAULT_CONFIG);
+    expect(states).toHaveLength(3);
+    expect(Object.keys(states[0]!).sort()).toEqual(['body', 'changes', 'commits', 'item', 'linked_issue', 'title']);
+    expect(states[1]!['item']).toEqual({ k: 1, file: 'src/x.ts', header: '@@ -5 +5 @@ g', text: '-c\n+d' });
+    expect(report.mechanical).toEqual([]);
+    const step = report.ranked[0]!;
+    expect([step.list, step.total, step.kept]).toEqual(['violated', 3, 1]);
+    expect(step.items.map((i) => i.label)).toEqual(['src/x.ts @@ -5 +5 @@ g', 'tests/x.test.ts @@ -1 +1 @@ it']);
+    expect(step.items[0]!.asked.map((j) => [j.id, j.band])).toEqual([['hunks_2.unrelated', 'satisfied'], ['hunks_2.workaround', 'violated'], ['hunks_2.untested', 'satisfied']]);
+    expect(step.items[0]!).toMatchObject({ id: 'hunks_2', band: 'satisfied', instructions: expect.stringContaining('@@ -5 +5 @@ g of src/x.ts does not serve') });
+    expect(report.verdict).toBe('warn');
+    expect(formatReport(report).split('\n').slice(1)).toEqual(['  hunks: 2 of 3 ruled out', '    [violated] src/x.ts @@ -5 +5 @@ g: workaround = 0.90', '    [violated] tests/x.test.ts @@ -1 +1 @@ it: untested = 0.80']);
+    // an each list prints every question of every item
+    const each = { ...BUILTIN_PACKS['hunks']!, rank: [{ ...BUILTIN_PACKS['hunks']!.rank![0]!, list: 'each' as const }] };
+    const lines = formatReport(await runPack(each, s, judge, DEFAULT_CONFIG)).split('\n');
+    expect(lines).toHaveLength(10);
+    expect(lines[5]).toMatch(/^  \[violated\] hunks_2\.workaround = 0\.90: The hunk @@ -5 \+5 @@ g of src\/x\.ts patches a symptom/);
+    // a step context names fields the state does not have without sending them
+    expect(validatePack({ subject: 'pr', rank: [{ from: 'hunks', context: ['title'], questions: { q: { type: 'noul', instructions: 'x' } } }] }, 'ok').rank![0]!.context).toEqual(['title']);
+    expect(() => validatePack({ subject: 'pr', rank: [{ from: 'hunks', context: 'title', questions: { q: { type: 'noul', instructions: 'x' } } }] }, 'bad')).toThrow(/context must be an array/);
   });
 
   it('reads the drift of a pull request from the base since the branch point and asks about each file', async () => {
