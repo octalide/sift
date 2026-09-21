@@ -17,6 +17,24 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
         },
         severity: 'warn',
       },
+      implementable: {
+        type: 'noul',
+        instructions: 'A competent engineer could implement this from the body without making a decision the body does not make.',
+        criteria: {
+          true: 'Every choice the work turns on is settled in the body: one design, named interfaces, stated behaviour on the edges it raises.',
+          false: 'The body leaves a decision open: two valid designs it does not choose between, an interface it needs but does not name, or an edge case whose behaviour it does not state.',
+        },
+        severity: 'fail',
+      },
+      scope_clear: {
+        type: 'noul',
+        instructions: 'The body states what is in and out of scope, so a reviewer could reject an unrelated change to the PR that implements it.',
+        criteria: {
+          true: 'The body bounds the change: what it touches, what it leaves alone, or what done looks like, clearly enough that a change outside it is recognisable.',
+          false: 'The body names a goal with no bounds, so any change in its area could be argued to belong.',
+        },
+        severity: 'warn',
+      },
       type: {
         type: 'choice',
         instructions: 'Which kind of issue is this, judged from the title and body alone?',
@@ -44,6 +62,13 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
         when: 'has_others',
         severity: 'warn',
         hi: 0.7,
+      },
+      blocked_by: {
+        type: 'choice',
+        instructions: 'Which open issue, if any, must be resolved before work on this one can start? Only when the title or body says it depends on that issue, or the same code must change there first. Otherwise none.',
+        options: 'open_issues',
+        when: 'has_others',
+        severity: 'info',
       },
       readiness: {
         type: 'score',

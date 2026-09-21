@@ -350,12 +350,32 @@ describe('mechanical checks', () => {
   });
 });
 
+describe('issue pack', () => {
+  it('fails an issue that leaves a decision open and warns on unbounded scope', async () => {
+    const subject: Subject = { kind: 'issue', ref: 'r#1', state: {}, facts: { labels: [], sections: {}, has_others: false }, options: {} };
+    const ready = { substantive: { type: 'noul' as const, p: 0.9 }, single_repo: { type: 'noul' as const, p: 0.9 }, needs_parent: { type: 'noul' as const, p: 0.1 }, readiness: { type: 'score' as const, score: 2, expected: 2, legend: 'ready', probabilities: [0, 0, 1], confidence: 1 } };
+    const config = resolveConfig(undefined);
+    const open = await runPack(BUILTIN_PACKS['issue']!, subject, answering({ ...ready, implementable: { type: 'noul', p: 0.1 }, scope_clear: { type: 'noul', p: 0.9 } }), config);
+    expect(open.verdict).toBe('fail');
+    expect(open.judged.find((j) => j.id === 'implementable')).toMatchObject({ band: 'violated', severity: 'fail' });
+    const loose = await runPack(BUILTIN_PACKS['issue']!, subject, answering({ ...ready, implementable: { type: 'noul', p: 0.9 }, scope_clear: { type: 'noul', p: 0.1 } }), config);
+    expect(loose.verdict).toBe('warn');
+    expect(loose.judged.find((j) => j.id === 'scope_clear')).toMatchObject({ band: 'violated', severity: 'warn' });
+    const clear = await runPack(BUILTIN_PACKS['issue']!, subject, answering({ ...ready, implementable: { type: 'noul', p: 0.9 }, scope_clear: { type: 'noul', p: 0.9 } }), config);
+    expect(clear.verdict).toBe('pass');
+  });
+});
+
 describe('pack materialization', () => {
   it('skips when-gated questions, fills runtime options, and expands rules', () => {
     const subject: Subject = { kind: 'issue', ref: 'x', state: {}, facts: { has_others: true }, options: { open_issues: { '#3': 'three' }, type_labels: {} } };
     const { questions } = materialize(BUILTIN_PACKS['issue']!, subject);
     expect(questions['duplicate_of']).toMatchObject({ type: 'choice', criteria: { '#3': 'three', none: expect.any(String) } });
+    expect(questions['blocked_by']).toMatchObject({ type: 'choice', criteria: { '#3': 'three', none: expect.any(String) } });
     expect(questions['type']).toBeUndefined();
+    const alone = materialize(BUILTIN_PACKS['issue']!, { ...subject, facts: { has_others: false } });
+    expect(alone.questions['blocked_by']).toBeUndefined();
+    expect(alone.questions['duplicate_of']).toBeUndefined();
     const rules: Subject = { kind: 'rules', ref: 'x', state: {}, facts: { rules: [{ text: 'no em dashes' }, { text: 'tests pass' }] }, options: {} };
     const expanded = materialize(BUILTIN_PACKS['rules']!, rules);
     expect(expanded.questions).toEqual({});
