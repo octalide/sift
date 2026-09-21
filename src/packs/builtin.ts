@@ -236,6 +236,43 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       },
     ],
   },
+  plan: {
+    name: 'plan',
+    subject: 'plan',
+    description: 'Does this plan cover what its issue asks for, nothing more, without deciding anything the issue leaves open?',
+    checks: [],
+    questions: {
+      covers: {
+        type: 'noul',
+        instructions: 'The plan addresses every point the issue asks for.',
+        criteria: {
+          true: 'Each thing the issue asks for is met by a step of the plan, or the plan says why it is left out.',
+          false: 'The issue asks for something no step of the plan meets and the plan does not say why.',
+        },
+        severity: 'fail',
+      },
+      adds_nothing: {
+        type: 'noul',
+        instructions: 'The plan includes work the issue does not ask for.',
+        criteria: {
+          true: 'A step of the plan changes something the issue does not mention and the change is not needed to do what it asks: a refactor, a rename, a drive-by fix, a feature the issue leaves for later.',
+          false: 'Every step serves a point of the issue, or is the small change needed to make one land.',
+        },
+        inverted: true,
+        severity: 'warn',
+      },
+      decides_unasked: {
+        type: 'noul',
+        instructions: 'The plan rests on a decision the issue does not make.',
+        criteria: {
+          true: 'A step picks between options the issue leaves open and the outcome differs by the pick: a public interface, a name or format others depend on, which of several approaches, what to do with a case the issue does not cover, whether something the issue leaves out is in scope.',
+          false: 'Every choice the plan makes is one the issue states, or a routine one any implementer would make the same way.',
+        },
+        inverted: true,
+        severity: 'fail',
+      },
+    },
+  },
   triage: {
     name: 'triage',
     subject: 'event',

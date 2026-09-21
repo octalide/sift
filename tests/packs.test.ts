@@ -6,7 +6,7 @@ import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/g
 import { lineDiff } from '../src/github/diff.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/github/config.ts';
 import { splitResponse } from '../src/github/gh.ts';
-import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf } from '../src/github/subjects.ts';
+import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, planSubject, prSubject, releaseSubject, ruleDoc, ruleParagraphs, sectionsOf } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
@@ -391,6 +391,24 @@ describe('pack materialization', () => {
     expect(validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x' } } }, 'ok').name).toBe('ok');
     expect(() => validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', criteria: 'prose' } } }, 'bad')).toThrow(/true, false/);
     expect(validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', criteria: { true: 'yes', false: 'no' } } } }, 'ok').name).toBe('ok');
+  });
+  it('reads a plan beside its issue and fails on an unasked decision', async () => {
+    const forge = fakeForge({ issue: async (_r, n) => ({ ...(await fakeForge().issue('o/r', n)), title: 'plan pack', body: 'New pack `plan`.' }) });
+    const s = await planSubject(forge, 'o/r', 61, 'add the pack');
+    expect(s.kind).toBe('plan');
+    expect(s.ref).toBe('o/r#61');
+    expect(s.state).toMatchObject({ number: 61, issue: { title: 'plan pack', body: 'New pack `plan`.' }, plan: 'add the pack' });
+    expect(s.facts['has_plan']).toBe(true);
+    expect(BUILTIN_PACKS['plan']!.checks).toEqual([]);
+    const report = await runPack(
+      BUILTIN_PACKS['plan']!,
+      s,
+      answering({ covers: { type: 'noul', p: 0.9 }, adds_nothing: { type: 'noul', p: 0.1 }, decides_unasked: { type: 'noul', p: 0.9 } }),
+      DEFAULT_CONFIG,
+    );
+    const bands = Object.fromEntries(report.judged.map((j) => [j.id, j.band]));
+    expect(bands).toEqual({ covers: 'satisfied', adds_nothing: 'satisfied', decides_unasked: 'violated' });
+    expect(report.verdict).toBe('fail');
   });
 });
 
