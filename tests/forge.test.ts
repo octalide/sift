@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { GitHubForge, splitJobLog, templateKind } from '../src/forge/github.ts';
 
-type Reply = { status?: number; body?: unknown; etag?: string };
+type Reply = { status?: number; body?: unknown; etag?: string; headers?: string[] };
 
 // a gh that answers each api path from a table; a --jq page answers the body alone
 function github(table: Record<string, Reply | ((argv: readonly string[]) => Reply)>, calls: string[] = []): GitHubForge {
@@ -14,7 +14,8 @@ function github(table: Record<string, Reply | ((argv: readonly string[]) => Repl
     if (!reply) return { exitCode: 1, stdout: 'HTTP/2.0 404 Not Found\r\n\r\n{"message":"Not Found"}', stderr: '' };
     const body = reply.body === undefined ? '' : typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body);
     if (argv[2] === '--jq') return { exitCode: 0, stdout: body, stderr: '' };
-    return { exitCode: 0, stdout: `HTTP/2.0 ${reply.status ?? 200} OK\r\nEtag: ${reply.etag ?? '"e"'}\r\nX-Ratelimit-Remaining: 4000\r\n\r\n${body}`, stderr: '' };
+    const headers = reply.headers ?? [`Etag: ${reply.etag ?? '"e"'}`, 'X-Ratelimit-Remaining: 4000'];
+    return { exitCode: 0, stdout: `HTTP/2.0 ${reply.status ?? 200} OK\r\n${headers.join('\r\n')}\r\n\r\n${body}`, stderr: '' };
   });
 }
 
@@ -135,7 +136,7 @@ describe('github forge', () => {
     expect(new RegExp(merge.command).test('gh pr merge 3 --merge --body x')).toBe(true);
   });
 
-  it('reads a job log with escapes allowed and splits it at the runner\'s step marks', async () => {
+  it('reads a job log under gh\'s default accept from the download it is redirected to and splits it at the runner\'s step marks', async () => {
     const calls: string[] = [];
     const log = [
       '\uFEFF2026-09-21T02:35:09.9377426Z Current runner version: 2.337.0',
@@ -153,7 +154,8 @@ describe('github forge', () => {
     ].join('\n');
     const forge = github(
       {
-        'repos/o/r/actions/jobs/7/logs': { body: log },
+        // the logs endpoint answers a 302 that gh follows, so the response printed is the blob store's: text/plain, no api headers
+        'repos/o/r/actions/jobs/7/logs': { body: log, headers: ['Content-Type: text/plain', 'Content-Length: 19481', 'Server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0'] },
         'repos/o/r/actions/jobs/7': { body: { id: 7, run_id: 3, head_sha: 'abc', name: 'codegen', status: 'completed', conclusion: 'failure', html_url: 'https://x/job/7' } },
         'repos/o/r/actions/runs/3/jobs': { body: [{ id: 7, run_id: 3, head_sha: 'abc', name: 'codegen', status: 'completed', conclusion: 'failure', html_url: 'https://x/job/7' }] },
       },
@@ -169,7 +171,9 @@ describe('github forge', () => {
     ]);
     expect(read.steps[2]!.text).toContain('FAIL x86_64-linux');
     expect(read.steps[2]!.text).not.toContain('Cleaning up');
-    expect(calls.find((c) => c.includes('/logs'))).toContain('--allow-escape-sequences');
+    const logsCall = calls.find((c) => c.includes('/logs'))!;
+    expect(logsCall).toContain('--allow-escape-sequences');
+    expect(logsCall).not.toContain('Accept:');
     expect(await forge.jobs('o/r', '3')).toEqual([{ id: '7', name: 'codegen', run: '3', sha: 'abc', done: true, conclusion: 'failure', ok: false, url: 'https://x/job/7' }]);
     expect(splitJobLog('')).toEqual([]);
   });
