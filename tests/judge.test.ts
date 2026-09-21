@@ -256,6 +256,31 @@ describe('rank', () => {
     expect(empty).toMatchObject({ ok: true, items: [], sorted: [], requests: 0 });
   });
 
+  it('drops an answer under a key no item or question owns and counts it', async () => {
+    const extra: Judge = {
+      name: 'fake',
+      ask: async (_state, questions) => ({
+        ok: true,
+        backend: 'fake',
+        latencyMs: 1,
+        answers: {
+          ...Object.fromEntries(Object.keys(questions).map((k) => [k, { type: 'noul' as const, p: 0.5 }])),
+          needed_7: { type: 'noul' as const, p: 0.9 },
+          other_0: { type: 'noul' as const, p: 0.9 },
+          plain: { type: 'noul' as const, p: 0.9 },
+        },
+      }),
+    };
+    const result = await rank(['a', 'b'], needed, extra, { mode: 'batched' });
+    if (!result.ok) throw new Error(result.message);
+    expect(result.items.map((r) => r.answers)).toEqual([{ needed: { type: 'noul', p: 0.5 } }, { needed: { type: 'noul', p: 0.5 } }]);
+    expect(result.dropped).toBe(3);
+    const isolated = await rank(['a'], needed, extra, { mode: 'isolated' });
+    if (!isolated.ok) throw new Error(isolated.message);
+    expect(isolated.items[0]!.answers).toEqual({ needed: { type: 'noul', p: 0.5 } });
+    expect(isolated.dropped).toBe(3);
+  });
+
   it('fails as a whole when any request fails', async () => {
     let calls = 0;
     const flaky: Judge = {

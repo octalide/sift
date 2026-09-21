@@ -90,6 +90,8 @@ export type Report = {
   verdict: Verdict;
   backend: string;
   judgeError?: string;
+  // answers under an id no question asked for, dropped without touching the verdict
+  dropped?: number;
 };
 
 // what a subject builder hands the pack runner
