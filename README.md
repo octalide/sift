@@ -96,7 +96,7 @@ Other plugins can call the same thing through `$.sift.judge`, `$.sift.rank` and 
 
 Conventions are read from `.sift/config.json` in the repository. The defaults are neutral: no commit format, label, template, version or changelog check runs until it is configured. Out of the box sift reads CONTRIBUTING.md, CLAUDE.md, AGENTS.md and the PR template as rule documents, treats the default branch as protected, and otherwise relies on the judged questions, which hold for any project. Every mechanical check is opt-in, so there is nothing to switch off.
 
-To apply one set of conventions across many repos, set the `config` option to a path or inline JSON of the same shape. It sits under each repo's own file, field by field. A strict setup for a conventional-commits, semver-tagged, `dev` into `main` workflow looks like this:
+Three layers apply in order, each field by field over the last: the defaults, a global file, then the repository's `.sift/config.json`. The global file is `$XDG_CONFIG_HOME/sift/config.json` (`~/.config/sift/config.json` when `XDG_CONFIG_HOME` is unset) and is read when it exists. The `config` option, set to a path relative to the repo root or inline JSON of the same shape, takes the global file's place: when it is set the file is not read. A strict setup for a conventional-commits, semver-tagged, `dev` into `main` workflow looks like this:
 
 ```json
 {

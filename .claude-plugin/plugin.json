@@ -164,7 +164,7 @@
     "config": {
       "type": "string",
       "title": "Conventions",
-      "description": "Repository conventions in the shape of .sift/config.json, as inline JSON or a path relative to the repo root. Applied over the defaults and under each repo's own .sift/config.json. Empty uses the neutral defaults: no commit format, version or changelog checks.",
+      "description": "Conventions in the shape of .sift/config.json, as inline JSON or a path relative to the repo root. Three layers apply in order, field by field: the neutral defaults, then this option or, when it is empty, $XDG_CONFIG_HOME/sift/config.json (~/.config/sift/config.json) if it exists, then each repo's own .sift/config.json. Empty with no global file uses the defaults: no commit format, version or changelog checks.",
       "default": ""
     },
     "gateOutbound": {
