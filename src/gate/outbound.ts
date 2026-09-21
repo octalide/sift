@@ -17,7 +17,7 @@ export async function outboundOf(tool: string, input: Record<string, unknown>, r
     if (got === undefined) continue;
     const base = { channel: c.name, limit: c.limit, kind: c.kind };
     if ('text' in got) return { ...base, text: got.text };
-    if (got.file === '-') return { ...base, text: '', denied: 'the body is read from stdin (--body-file -), which cannot be judged; pass --body or a file path' };
+    if (got.file === '-') return { ...base, text: '', denied: 'the body is read from stdin (--body-file -) with no heredoc in the command, so it cannot be judged; pass --body, a file path or a heredoc' };
     try {
       return { ...base, text: await read(got.file) };
     } catch (err) {

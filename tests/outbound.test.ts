@@ -46,6 +46,22 @@ describe('outbound extraction', () => {
     expect(await outboundOf('Bash', { command: 'gh release create v1 --notes "n"' }, noRead, via)).toMatchObject({ channel: 'github-release-create', text: 'n', kind: 'the notes of a new GitHub release' });
     expect(await outboundOf('Bash', { command: 'gh release edit v1 -F notes.md' }, async () => 'notes', via)).toMatchObject({ channel: 'github-release-edit', text: 'notes' });
     expect(await outboundOf('Bash', { command: 'gh release create v1 --body "n"' }, noRead, via)).toBeUndefined();
+    expect(await outboundOf('Bash', { command: 'gh pr review 5 --approve -b "ship it"' }, noRead, via)).toEqual({ channel: 'github-pr-review', text: 'ship it', limit: undefined, kind: 'a review on a pull request' });
+    expect(await outboundOf('Bash', { command: 'gh pr review 5 --request-changes --body-file r.md' }, async () => 'needs work', via)).toMatchObject({ channel: 'github-pr-review', text: 'needs work' });
+    expect(await outboundOf('Bash', { command: 'gh pr merge 5 --merge --body "Merge #5"' }, noRead, via)).toEqual({ channel: 'github-pr-merge', text: 'Merge #5', limit: undefined, kind: 'a merge commit message' });
+    expect(await outboundOf('Bash', { command: 'gh pr merge 5 --merge -F m.md' }, async () => 'merged', via)).toMatchObject({ channel: 'github-pr-merge', text: 'merged' });
+    expect(await outboundOf('Bash', { command: 'gh pr merge 5 --merge --delete-branch' }, noRead, via)).toBeUndefined();
+    expect(await outboundOf('Bash', { command: 'gh pr review 5 --approve' }, noRead, via)).toBeUndefined();
+  });
+
+  it('reads a --body-file - body from the heredoc on stdin', async () => {
+    expect(ghBody("gh pr review 5 --approve --body-file - <<'EOF'\n## Review\n\nline two\nEOF")).toEqual({ text: '## Review\n\nline two' });
+    expect(ghBody('gh pr merge 5 --merge -F - <<EOF\nmerge #5\nEOF\n')).toEqual({ text: 'merge #5' });
+    expect(ghBody('gh issue create -t "t" --body-file=- <<-"END"\n\tindented\n\tEND')).toEqual({ text: '\tindented' });
+    expect(ghBody("gh pr review 5 --body-file - <<'EOF'\nnot EOF yet\nEOF\n")).toEqual({ text: 'not EOF yet' });
+    expect(ghBody('gh pr review 5 --body-file -')).toEqual({ file: '-' });
+    expect(ghBody("gh pr review 5 --body-file - <<'EOF'\nunterminated")).toEqual({ file: '-' });
+    expect(await outboundOf('Bash', { command: "gh pr review 5 --approve --body-file - <<'EOF'\nfrom stdin\nEOF" }, noRead, via)).toEqual({ channel: 'github-pr-review', text: 'from stdin', limit: undefined, kind: 'a review on a pull request' });
   });
 
   it('reads a --body-file body through the given reader', async () => {
@@ -119,6 +135,8 @@ describe('rules subject for outbound text', () => {
     expect(textAbout({ kind: 'issue', action: 'edit' }, github.nouns)).toBe('the edited body of a GitHub issue');
     expect(textAbout({ kind: 'release', action: 'create' }, github.nouns)).toBe('the notes of a new GitHub release');
     expect(textAbout({ kind: 'issue', action: 'create' })).toBe('the body of a new issue');
+    expect(textAbout({ kind: 'pr', action: 'review' }, github.nouns)).toBe('a review on a pull request');
+    expect(textAbout({ kind: 'pr', action: 'merge' }, github.nouns)).toBe('a merge commit message');
   });
 });
 
@@ -171,7 +189,7 @@ describe('outbound gate', () => {
     expect(seen).toEqual([{ kind: 'text', text: 'a — b' }]);
     const stdin = await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file -' }, async () => '', via);
     const d = await gateOutbound(stdin!, subject, pack, judge([]), DEFAULT_CONFIG);
-    expect(d).toMatchObject({ allow: false, reason: 'the body is read from stdin (--body-file -), which cannot be judged; pass --body or a file path' });
+    expect(d).toMatchObject({ allow: false, reason: 'the body is read from stdin (--body-file -) with no heredoc in the command, so it cannot be judged; pass --body, a file path or a heredoc' });
     expect(d.report).toBeUndefined();
   });
 

@@ -103,11 +103,18 @@ describe('github forge', () => {
 
   it('lists the artifact writes gh makes with their body flags', () => {
     const { writes } = github({});
-    expect(writes.map((w) => `${w.kind} ${w.action}`)).toEqual(['pr create', 'pr comment', 'pr edit', 'issue create', 'issue comment', 'issue edit', 'release create', 'release edit']);
+    expect(writes.map((w) => `${w.kind} ${w.action}`)).toEqual(['pr create', 'pr comment', 'pr edit', 'pr review', 'pr merge', 'issue create', 'issue comment', 'issue edit', 'release create', 'release edit']);
     const comment = writes.find((w) => w.kind === 'pr' && w.action === 'comment')!;
     expect(comment).toMatchObject({ body: ['--body', '-b'], file: ['--body-file', '-F'] });
     expect(new RegExp(comment.command).test('gh pr comment 3 -b x')).toBe(true);
     expect(new RegExp(comment.command).test('gh pr view 5')).toBe(false);
     expect(writes.find((w) => w.kind === 'release' && w.action === 'create')).toMatchObject({ body: ['--notes', '-n'], file: ['--notes-file', '-F'] });
+    const review = writes.find((w) => w.kind === 'pr' && w.action === 'review')!;
+    expect(review).toMatchObject({ body: ['--body', '-b'], file: ['--body-file', '-F'] });
+    expect(new RegExp(review.command).test('gh pr review 3 --approve -b x')).toBe(true);
+    expect(new RegExp(review.command).test('gh pr reviews 3')).toBe(false);
+    const merge = writes.find((w) => w.kind === 'pr' && w.action === 'merge')!;
+    expect(merge).toMatchObject({ body: ['--body', '-b'], file: ['--body-file', '-F'] });
+    expect(new RegExp(merge.command).test('gh pr merge 3 --merge --body x')).toBe(true);
   });
 });
