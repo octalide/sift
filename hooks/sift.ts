@@ -7,7 +7,6 @@ import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/confi
 import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
-import { heldDigest, judgeMessage, messageRefs, messageSubject, refDetail, type Held } from '../src/message/message.ts';
 import { JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { DecisionLog, type Cost } from '../src/log.ts';
@@ -49,7 +48,6 @@ type Options = {
   watchTriage: boolean;
   watchDeferMaxAgeHours: number;
   grade: boolean;
-  message: boolean;
   gateOutbound: boolean;
   classify: boolean;
   // conventions applied under every repo's .sift/config.json: a path or inline json
@@ -85,7 +83,6 @@ const DEFAULTS: Options = {
   watchTriage: true,
   watchDeferMaxAgeHours: 24,
   grade: true,
-  message: false,
   gateOutbound: false,
   classify: false,
   config: '',
@@ -119,8 +116,6 @@ type Runtime = {
   sessionId: string;
   // where the session's ledger would be; it counts only while the file exists
   ledgerPath?: string;
-  // peer messages consumed since the last delivery, reported as one digest line
-  held: Held[];
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -204,11 +199,6 @@ export const register: Register = (on, rawOptions) => {
       case 'rules': {
         const kind = /^#?\d+$/.test(ref) ? (opts.text === 'issue' ? 'issue' : 'pr') : /^[0-9a-f]{7,40}$|\.\./.test(ref) ? 'commit' : 'text';
         return rulesSubject(rt.gh, repo, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config, fs.read, fs.exists);
-      }
-      case 'message': {
-        const text = opts.text ?? ref;
-        const refs = await Promise.all(messageRefs(text, repo).map((r) => refDetail(rt.gh, r)));
-        return messageSubject(text, 'grade', refs);
       }
       default:
         return textSubject(opts.text ?? ref);
@@ -319,7 +309,7 @@ export const register: Register = (on, rawOptions) => {
       return undefined;
     };
     const ledgerPath = options.ledgerPath || (repoInfo ? `${home}/.local/state/fleet/${repoInfo.nameWithOwner.replace('/', '_')}/ledger.md` : undefined);
-    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, ledgerPath, held: [] };
+    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId, ledgerPath };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -506,48 +496,11 @@ export const register: Register = (on, rawOptions) => {
     }
   });
 
-  // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count.
-  // peer messages held since the last delivery ride along the same way
+  // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count
   on('prompt.submit', async (_$, e, next) => {
     const warnings = runtime?.log.takeWarnings() ?? [];
-    const held = takeHeld();
-    if (warnings.length === 0 && !held) return next(e);
-    return next({ ...e, context: [...(e.context ?? []), ...warnings, ...(held ? [held] : [])] });
-  });
-
-  function takeHeld(): string {
-    if (!runtime || runtime.held.length === 0) return '';
-    const digest = heldDigest(runtime.held);
-    runtime.held = [];
-    return digest;
-  }
-
-  // a peer message is judged before it is queued: nothing actionable is held into a digest, the rest arrives with its scores
-  on('session.receive', async (_$, e, next) => {
-    const rt = runtime;
-    if (!rt || !options.message || options.backend === 'off') return next(e);
-    if (e.origin.kind !== 'peer' && e.origin.kind !== 'peer-send-message') return next(e);
-    const pack = rt.packs['message'];
-    if (!pack) return next(e);
-    const from = /from-name="([^"]+)"/.exec(e.text)?.[1] ?? e.origin.kind;
-    const body = e.text.replace(/^<cross-session-message[^>]*>\s*/, '').replace(/\s*<\/cross-session-message>[\s\S]*$/, '');
-    const head = body.split('\n').find((l) => l.trim().length > 0) ?? '';
-    const refs = await Promise.all(messageRefs(body, rt.repo).map((r) => refDetail(rt.gh, r)));
-    const triage = await judgeMessage(pack, messageSubject(body, e.origin.kind, refs), rt.judge, rt.config);
-    const digest = `${from}: ${head.slice(0, 60)}`;
-    if (triage.error) {
-      record('message', 'fallback', { ok: false, reason: triage.error, digest });
-      return next(e);
-    }
-    if (triage.action === 'consume' && !options.shadow) {
-      record('message', 'consumed', { digest, answers: { label: triage.label } });
-      rt.held.push({ at: Date.now(), from, head, label: triage.label });
-      return { consumed: `sift: not actionable (${triage.label})` };
-    }
-    record('message', options.shadow && triage.action === 'consume' ? 'would-consume' : 'delivered', { digest, answers: { label: triage.label } });
-    const held = takeHeld();
-    const scores = `[sift message from ${from}] ${triage.label}${options.shadow && triage.action === 'consume' ? ' (shadow: would hold)' : ''}`;
-    return next({ ...e, text: [scores, e.text, held].filter(Boolean).join('\n') });
+    if (warnings.length === 0) return next(e);
+    return next({ ...e, context: [...(e.context ?? []), ...warnings] });
   });
 
   on('turn.complete', async ($, e, next) => {

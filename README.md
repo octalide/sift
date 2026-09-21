@@ -17,7 +17,6 @@ Everything sift does is built on that one call. Every module is a toggle, every 
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed and leaves a one-line note in their place with the omitted line range and how to get it back (re-read the file by range for Read, rerun the command for Bash). Nothing is kept on disk | on |
 | `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `mcp__sift__judge` answers raw typed questions | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
-| `message` | `session.receive` | judges every message from another session before it is queued: nothing actionable is held into a digest line that rides with the next delivery or prompt, the rest arrives with its scores on the first line | off |
 | `gateOutbound` | `tool.call` (pre) | checks text about to leave the session (a Discord message, a `gh pr`, `gh issue` or `gh release` create, comment or edit body) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
 
@@ -135,12 +134,6 @@ A release grade reads the checkout when the session is inside the repo being gra
 
 With `gateOutbound: true` the text a tool call is about to send is checked before the call runs: Discord `send_message`, `send_dm`, `edit_message`, `send_webhook_message`, `create_forum_post` content and embed text, and the body of `gh pr|issue|release create|comment|edit` in a Bash command: the `--body`/`-b` value, quoted or in a `$(cat <<'EOF' ... EOF)` heredoc, or the file named by `--body-file`/`-F`, read before the command runs. A body from stdin (`--body-file -`) or an unreadable file is denied without a judge call. The channel's hard limit is mechanical (2000 characters for Discord) and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`, each question naming what the text is (`The subject (the body of a new GitHub issue) complies with this rule: ...`) so a rule written for another artifact, a pull request rule against an issue body, is answered as not applying rather than broken: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
 
-## Messages
-
-With `message: true` every peer delivery (another session's `SendMessage`) goes through the `message` pack before it is queued. The pack asks `actionable`, `kind` (question, task, result, blocked, status, noise) and `urgency`, and when the text references a pull request or issue (`https://github.com/o/r/pull/18`, `o/r#18`, or `#18` against the session's repo) sift fetches the item (body, checks, diff excerpt) and asks two more: `measured`, whether the claims are backed by something run or observed, and `evidenced`, whether the item itself carries that evidence. A message in the violated `actionable` band is consumed and held; the next delivered message or prompt carries `held meanwhile (n): <from>: <first line> [scores]`. Everything else arrives as sent with `[sift message from <name>] actionable 0.91, kind result, urgency soon, measured 0.40, evidenced 0.20` above it. The judge being unavailable delivers untouched, and `shadow` delivers with `(shadow: would hold)`.
-
-The same pack is available by hand: `grade(pack: "message", subject: "x", text: "<message>")`.
-
 ## Packs
 
 A pack is data: a subject kind, a list of mechanical checks, and typed questions with thresholds. The built-in packs are in `src/packs/builtin.ts`. A repo overrides or adds one with `.sift/packs/<name>.json` in the same shape:
@@ -178,7 +171,7 @@ Subject kinds and the checks they support:
 | `commit` | `commit.format` |
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
-| `event`, `text`, `command`, `message` | none |
+| `event`, `text`, `command` | none |
 
 ## Watch
 

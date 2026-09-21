@@ -197,12 +197,6 @@
       "description": "Register sift_grade (packs: issue, pr, commit, release, rules) and sift_judge (raw typed questions) as tools.",
       "default": true
     },
-    "message": {
-      "type": "boolean",
-      "title": "Peer message triage",
-      "description": "Judge every message from another session with the message pack before it is queued. Not actionable: held into a digest line that rides with the next delivery or prompt. Otherwise delivered with its scores (actionable, kind, urgency, and for messages that reference a PR or issue, whether the claims are measured and the item carries the evidence) on the first line.",
-      "default": false
-    },
     "config": {
       "type": "string",
       "title": "Conventions",
