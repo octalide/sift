@@ -8,6 +8,7 @@ import { GitHubForge } from '../src/forge/github.ts';
 import { CONFIG_PATH, configLayers, defaultTarget, globalConfigPath, resolveConfig, type RepoConfig } from '../src/github/config.ts';
 import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
+import { ciSubject } from '../src/ci/log.ts';
 import { indexTree, treeSubject } from '../src/locate/tree.ts';
 import { checkoutSource, forgeSource, type RuleSource } from '../src/rules/discover.ts';
 import { digestOf, JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
@@ -238,6 +239,13 @@ export const register: Register = (on, rawOptions) => {
         const p = parsed('issue');
         return planSubject(rt.forge, p.repo ?? needRepo(), p.number, opts.text);
       }
+      case 'log': {
+        // job:<id> or run:<id> through the forge, a bare number is a run, text is the log itself
+        if (opts.text !== undefined) return ciSubject(rt.forge, repo, { text: opts.text });
+        const m = /^(job|run):(\d+)$|^#?(\d+)$/.exec(ref);
+        if (!m) throw new Error(`log subject: expected run:<id>, job:<id>, a run id, or the log in text, got ${ref}`);
+        return ciSubject(rt.forge, repo, m[1] === 'job' ? { job: m[2]! } : { run: m[2] ?? m[3]! });
+      }
       default:
         return textSubject(opts.text ?? ref);
     }
@@ -326,6 +334,7 @@ export const register: Register = (on, rawOptions) => {
           judge,
           pack: triagePack,
           issuePack: rt.packs['issue'],
+          ciPack: rt.packs['ci'],
           config,
           now: () => Date.now(),
           deliver: async (text) => {
@@ -370,14 +379,14 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number or URL, an issue number with text="issue" or an issue URL, a commit ref or range, or free text in text), locate (an issue number or URL, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number or URL, an issue number with text="issue" or an issue URL, a commit ref or range, or free text in text), locate (an issue number or URL, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open), ci (a failed job as job:<id>, a run id or run:<id> for its first failed job, or the log in text; the lines that explain the failure, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {
             pack: { type: 'string', description: 'pack name' },
             subject: { type: 'string', description: 'what the pack grades: an issue or PR number (N or #N) or URL, a commit ref or range, "release" or a version. See the pack list for what each accepts' },
             repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from the code host' },
-            text: { type: 'string', description: 'free text subject for the rules and locate packs, the plan for the plan pack, or "issue" to grade an issue number against the rules' },
+            text: { type: 'string', description: 'free text subject for the rules and locate packs, the plan for the plan pack, a job log for the ci pack, or "issue" to grade an issue number against the rules' },
             ref: { type: 'string', description: 'release pack: the branch or sha the release is cut from. Defaults to HEAD in a checkout, else the configured PR target branch, else the default branch' },
             top: { type: 'number', description: 'locate pack: how many paths to list per level, default 20' },
           },

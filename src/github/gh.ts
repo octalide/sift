@@ -24,9 +24,11 @@ export class Gh {
     private readonly cwd: CwdLike = async () => undefined,
   ) {}
 
-  async api(path: string, opts: { etag?: string; accept?: string; paginate?: boolean; method?: string; fields?: Record<string, string> } = {}): Promise<ApiResponse> {
+  async api(path: string, opts: { etag?: string; accept?: string; paginate?: boolean; method?: string; fields?: Record<string, string>; raw?: boolean } = {}): Promise<ApiResponse> {
     const argv = ['gh', 'api', '-i'];
     if (opts.method) argv.push('-X', opts.method);
+    // gh refuses a body with terminal escapes (a job log) unless told to pass it through
+    if (opts.raw) argv.push('--allow-escape-sequences');
     if (opts.paginate) argv.push('--paginate');
     if (opts.etag) argv.push('-H', `If-None-Match: ${opts.etag}`);
     if (opts.accept) argv.push('-H', `Accept: ${opts.accept}`);
@@ -63,8 +65,8 @@ export class Gh {
     return out;
   }
 
-  async text(path: string, accept: string): Promise<string> {
-    return (await this.api(path, { accept })).body;
+  async text(path: string, accept: string, opts: { raw?: boolean } = {}): Promise<string> {
+    return (await this.api(path, { accept, ...opts })).body;
   }
 
   async login(): Promise<string | undefined> {

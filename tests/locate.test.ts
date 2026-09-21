@@ -84,11 +84,11 @@ describe('locate pack', () => {
     expect(report.judged).toEqual([]);
     expect(report.ranked.map((r) => [r.step, r.total, r.kept, r.items.map((i) => i.label)])).toEqual([
       ['dirs', 3, 1, ['src/packs']],
-      ['files', 2, 2, ['src/packs/types.ts']],
+      ['files', 2, 1, ['src/packs/types.ts']],
     ]);
     expect(report.ranked[1]!.items[0]).toMatchObject({ id: 'files_2', band: 'satisfied', answer: { p: 0.8 }, instructions: 'The file src/packs/types.ts must be read or changed to implement this.' });
     expect(report.verdict).toBe('pass');
-    expect(formatReport(report).split('\n').slice(2)).toEqual(['  dirs: top 1 of 3, 1 not ruled out', '    1. [satisfied] src/packs = 0.90', '  files: top 1 of 2, 2 not ruled out', '    1. [satisfied] src/packs/types.ts = 0.80']);
+    expect(formatReport(report).split('\n').slice(2)).toEqual(['  dirs: top 1 of 3, 1 not ruled out', '    1. [satisfied] src/packs = 0.90', '  files: top 1 of 2, 1 not ruled out', '    1. [satisfied] src/packs/types.ts = 0.80']);
   });
 
   it('shows the pack default of twenty and ranks nothing under an empty index', async () => {
@@ -110,5 +110,7 @@ describe('locate pack', () => {
     expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: {} }] }, 'bad')).toThrow(/at least one question/);
     expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, by: 'zz' }] }, 'bad')).toThrow(/unknown question zz/);
     expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, list: 'some' }] }, 'bad')).toThrow(/each or top/);
+    expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, order: 'size' }] }, 'bad')).toThrow(/value or input/);
+    expect(() => validatePack({ subject: 'tree', rank: [{ from: 'files', questions: { q }, feed: '' }] }, 'bad')).toThrow(/feed must name/);
   });
 });

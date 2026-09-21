@@ -14,7 +14,7 @@ Everything sift does is built on that one call, directly or through `rank`, whic
 | module | hook | what it does | default |
 |---|---|---|---|
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed and leaves a one-line note in their place with the omitted line range and how to get it back (re-read the file by range for Read, rerun the command for Bash). Nothing is kept on disk | on |
-| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, locate, plan, or a repo-defined one), `mcp__sift__judge` answers raw typed questions and `mcp__sift__rank` asks the same questions of many items | on |
+| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, locate, plan, ci, or a repo-defined one), `mcp__sift__judge` answers raw typed questions and `mcp__sift__rank` asks the same questions of many items | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
 | `gateOutbound` | `tool.call` (pre) | checks text about to leave the session through a channel table (Discord messages and `gh pr|issue|release` bodies by default, more by config) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
@@ -64,6 +64,9 @@ grade(pack: "rules", subject: "x", text: "...") # free text against the rules
 grade(pack: "locate", subject: "17")           # the files to read or change for issue 17, top 20 per level
 grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free text
 grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17: covers it, adds nothing, decides nothing it leaves open
+grade(pack: "ci", subject: "job:106195824649")  # why a job failed: the lines that explain it, then own fault, environment, fixable here
+grade(pack: "ci", subject: "35554549814")       # a run id (or run:<id>) reads its first failed job
+grade(pack: "ci", subject: "x", text: "...")    # a log pasted as text
 ```
 
 The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. `rules` and `locate` take the same reference forms, a bare number naming a pull request for `rules` (an issue with `text: "issue"`) and an issue for `locate`, a commit ref or range for `rules`, or free text in `text`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
@@ -209,7 +212,9 @@ A noul's optional `criteria` is Jev's shape, `{ "true": "...", "false": "..." }`
 
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, and `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`).
 
-A pack may also carry `rank`, a list of steps run in order after the questions, each one `rank` over a subject list with the subject state as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by), `list` (`each` prints every item in order, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`), `fields` (the item fields the state carries beside its index, every field unless said; the rest only fill the questions, so a text that is already in the question is not sent twice) and `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out (a band other than violated), which makes steps hierarchical. The rules pack is one `each` step over the rule paragraphs, the pr pack one over the drifted files; locate is two `top` steps, directories then the files within those not ruled out, so each rank reads only what could matter.
+A pack may also carry `rank`, a list of steps run in order before the questions, each one `rank` over a subject list with the state so far as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by), `list` (`each` prints every item in order, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`), `order` (`input` shows a top list in input order instead of by value), `fields` (the item fields the state carries beside its index, every field unless said; the rest only fill the questions, so a text that is already in the question is not sent twice), `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out, which makes steps hierarchical, and `feed`, the state field the items the step did not rule out are placed under for the steps and questions after it. A step rules out an item whose band is violated, and a `top` step everything below the top it shows. The rules pack is one `each` step over the rule paragraphs, the pr pack one over the drifted files; locate is two `top` steps, directories then the files within those not ruled out, so each rank reads only what could matter; ci is one `top` step over a log's lines feeding `lines` to its questions.
+
+The `log` subject is a failing job's log: a job id (`job:<id>`), a run id (its first failed job) read through the forge, or the text itself. In code it is trimmed to the step the forge marks failed (the tail of the whole log when none is), stripped of timestamps, colours and group marks, and bounded at 300 lines. The pull request whose head the job ran on, when one is open, stands beside it with the files its diff touches, and `own_fault` is asked only then.
 
 The `tree` subject is a text (an issue's title and body, or free text) over an index of the checkout built in code from `git ls-files`: every directory with its file count and a sample of names, every file with its first non-empty lines and the exported or top-level symbol names a per-extension regex finds. `node_modules` and similar trees, lockfiles, binaries by extension, files with nul bytes and files over 200 kB never enter it.
 
@@ -223,11 +228,12 @@ Subject kinds and the checks they support:
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
 | `tree` | `tree.indexed` |
+| `log` | `log.trimmed` |
 | `event`, `text`, `command` | none |
 
 ## Watch
 
-With `watch: true` the plugin polls the session's repository (or `watchRepo`) with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops, your own writes defer (`watchIgnoreSelf`, keyed on the `gh` login), new PRs deliver, a new issue is checked against the issue pack and delivers with its findings when it fails one (own writes otherwise defer under `watchIgnoreSelf`), label churn defers. Everything else goes through the `triage` pack, and an event whose `actionable` lands in the violated band is deferred.
+With `watch: true` the plugin polls the session's repository (or `watchRepo`) with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit; a failure carries the `ci` pack's report on each failed check that has a log), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops, your own writes defer (`watchIgnoreSelf`, keyed on the `gh` login), new PRs deliver, a new issue is checked against the issue pack and delivers with its findings when it fails one (own writes otherwise defer under `watchIgnoreSelf`), label churn defers. Everything else goes through the `triage` pack, and an event whose `actionable` lands in the violated band is deferred.
 
 A delivery is one prompt:
 
@@ -244,6 +250,22 @@ A settled PR is one line with the aggregate verdict, so a steward waiting to gra
 [sift watch octalide/sift]
 ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks)
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
+```
+
+A failure carries the `ci` pack's report on each failed check, one job per check, read from its log through the forge, so the session that pushed the commit reads why it failed without opening the log:
+
+```
+[sift watch octalide/sift]
+ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test)
+  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
+  sift ci octalide/sift job 106195824649: PASS (judge: jev)
+    [info] log.trimmed: 212 of 212 lines read from the failing step Run npm test
+    lines: top 40 of 212, 40 not ruled out
+      1. [satisfied] 118: FAIL tests/watch.test.ts > watcher > delivers one settled verdict = 0.91
+      ...
+    [satisfied] own_fault = 0.88: The failure is caused by the change under test: ...
+    [violated] environment = 0.06: The failure is a flake, a network or runner problem, or an external service, ...
+    [satisfied] fixable_here = 0.93: The fix is inside this repository.
 ```
 
 The verdict counts every check run and commit status on the PR's head, so it waits for external checks too. Until the last one finishes the individual runs are held in the digest, named by PR. A head whose checks have not all finished within `watchStallHours` (default 1) is delivered once as `ci stalled`, in the same shape, naming the checks still pending, so no session waits on a check that never reports. Heads are tracked from the moment their PR is open, so a check that never starts stalls too. The head is not delivered as stalled again unless a new commit lands on it, and a stalled head that does finish later still delivers its `ci settled` line:

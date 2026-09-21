@@ -150,6 +150,14 @@ export const CHECKS: Record<string, Check> = {
     if (files === 0) return [warn('tree.indexed', skipped > 0 ? `no files indexed, ${skipped} skipped as ignored, binary or over the size bound` : 'no files indexed: not a checkout, or git ls-files is empty')];
     return [info('tree.indexed', `${files} files in ${dirs} directories indexed, ${skipped} skipped`)];
   },
+  'log.trimmed': (s) => {
+    const lines = ((s.facts['lines'] as unknown[] | undefined) ?? []).length;
+    const total = Number(s.facts['total_lines'] ?? 0);
+    const step = s.facts['step'];
+    if (lines === 0) return [warn('log.trimmed', 'the log is empty')];
+    const where = typeof step === 'string' ? `the failing step ${step}` : 'the whole log, no step marked failed';
+    return [info('log.trimmed', `${lines} of ${total} lines read from ${where}`)];
+  },
   'rules.present': (s, c) => {
     const docs = (s.facts['docs'] as string[] | undefined) ?? [];
     const candidates = Number(s.facts['candidates'] ?? 0);

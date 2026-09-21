@@ -19,7 +19,7 @@ export type PackQuestion = (Exclude<Question, { type: 'choice' }> | PackChoice) 
   inverted?: boolean;
 };
 
-export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'tree' | 'plan';
+export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'tree' | 'plan' | 'log';
 
 // one rank over a subject list: every item is asked the step's questions, the subject state as context.
 // {field} in a question takes the item's field, {subject} the subject's own label
@@ -33,14 +33,18 @@ export type RankStep = {
   by?: string;
   // hierarchy: keep only items whose field equals the field of an item the previous step did not rule out
   within?: { field: string; of: string };
-  // the item field naming it in the report, the item index when absent
+  // the item field naming it in the report, or a template over its fields ("{n}: {text}"); the item index when absent
   label?: string;
   // how the report lists the step: every item in order (each), or the best items by value (top)
   list?: 'each' | 'top';
-  // how many a top list shows
+  // how a top list is shown: by value, or in input order (a log's lines read in order)
+  order?: 'value' | 'input';
+  // how many a top list shows, and how many of the items not ruled out survive it
   top?: number;
   // the item fields the state carries beside k, every field when absent; the others only fill the questions
   fields?: string[];
+  // the state field the survivors are placed under, read by the steps after it and by the pack's questions
+  feed?: string;
 };
 
 export type Pack = {
@@ -48,8 +52,9 @@ export type Pack = {
   subject: SubjectKind;
   description: string;
   checks: string[];
+  // asked of the subject state once every rank step has run, with what the steps feed into it
   questions: Record<string, PackQuestion>;
-  // ranks over subject lists, run in order after the questions
+  // ranks over subject lists, run in order before the questions
   rank?: RankStep[];
 };
 

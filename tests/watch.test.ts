@@ -40,7 +40,8 @@ describe('item diffing', () => {
     expect(settleChecks([done, running])).toBeUndefined();
     expect(settleChecks([done, ext('pending')])).toBeUndefined();
     expect(settleChecks([done, { ...running, done: true, conclusion: 'success', ok: true }, ext('success')])).toEqual({ conclusion: 'success', total: 3, failed: [] });
-    expect(settleChecks([done, { ...running, done: true, conclusion: 'failure' }])).toEqual({ conclusion: 'failure', total: 2, failed: ['test'] });
+    expect(settleChecks([done, { ...running, done: true, conclusion: 'failure' }])).toEqual({ conclusion: 'failure', total: 2, failed: [{ name: 'test' }] });
+    expect(settleChecks([{ ...running, id: '7', done: true, conclusion: 'failure' }])!.failed).toEqual([{ name: 'test', id: '7' }]);
     expect(settleChecks([])).toEqual({ conclusion: 'success', total: 0, failed: [] });
     expect(pendingChecks([done, running, ext('pending')])).toEqual({ pending: ['test', 'ext'], total: 3 });
   });
@@ -199,6 +200,41 @@ describe('watcher', () => {
     expect(delivered[0]).toContain('https://x/pull/3 · ci settled on pr');
     expect(watcher.snapshot().settled).toEqual({ '3@abc1234def': 'success' });
     expect(watcher.snapshot().pending).toEqual({});
+  });
+
+  it('attaches the ci pack report on each failed check, one job per check, to a settled failure', async () => {
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      // tick 1: running, the pr not yet open. tick 2: both finished, test failed; the log read lists the open prs once more
+      runs: script(changed([run(10, 'build', false, null)]), changed([run(10, 'build', true, 'failure')], 'r2')),
+      pulls: script(same(), changed([pull()]), changed([pull()])),
+      checks: async () => [check('build', true), { ...check('test', true, 'failure'), id: '7' }, check('ext', true, 'error')],
+      jobLog: async (_r, id) => ({ job: `job ${id}`, run: '10', sha: 'abc1234def', url: `https://x/job/${id}`, steps: [{ name: 'Run npm test', ok: false, text: '2026-09-21T02:35:35.0000000Z FAIL tests/a.test.ts\n2026-09-21T02:35:36.0000000Z ##[error]Process completed with exit code 1.' }] }),
+      diff: async () => 'diff --git a/tests/a.test.ts b/tests/a.test.ts\n+x\n',
+    });
+    const judge: Judge = {
+      name: 'fake',
+      ask: async (_s, q: Questions) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k) => [k, { type: 'noul' as const, p: k === 'environment' ? 0.1 : 0.9 }])) }),
+    };
+    const delivered: string[] = [];
+    const watcher = new Watcher(
+      { forge, ...silent({ judge, ciPack: BUILTIN_PACKS['ci']! }), now: () => 1_000_000, deliver: async (t) => void delivered.push(t) },
+      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules },
+    );
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(delivered).toHaveLength(1);
+    const lines = delivered[0]!.split('\n');
+    expect(lines[1]).toBe('ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (3 checks, failed: test, ext)');
+    expect(lines[2]).toBe('  by me · https://x/pull/3 · ci settled on pr');
+    expect(lines[3]).toBe('  sift ci o/r job 7: PASS (judge: fake)');
+    expect(lines[4]).toBe('    [info] log.trimmed: 2 of 2 lines read from the failing step Run npm test');
+    expect(lines[5]).toBe('    lines: top 2 of 2, 2 not ruled out');
+    expect(lines[6]).toBe('      1. [satisfied] 1: FAIL tests/a.test.ts = 0.90');
+    expect(lines.slice(8, 11).map((l) => l.slice(0, 28))).toEqual(['    [satisfied] own_fault = ', '    [violated] environment =', '    [satisfied] fixable_here']);
+    expect(lines[11]).toBe('  ext: no log to read');
   });
 
   it('delivers a pr head whose checks stay unfinished past the stall interval as stalled, once, then its verdict when it settles', async () => {

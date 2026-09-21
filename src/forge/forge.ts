@@ -39,6 +39,8 @@ export type ReviewComment = { author: ForgeUser; path: string; body: string };
 // one check on a commit, whatever the forge calls it: a check run, a commit status, a pipeline job
 export type Check = {
   name: string;
+  // the forge's handle for the check's log when it keeps one (a job id); a plain status has none
+  id?: string;
   done: boolean;
   // the forge's own word for the outcome, null until done
   conclusion: string | null;
@@ -57,6 +59,15 @@ export type Run = Check & {
   url: string;
   updatedAt: string;
 };
+
+// one job of a ci run: what jobLog reads by id
+export type Job = Check & { id: string; run: string; sha: string; url: string };
+
+// one step of a job's log as the forge marks it; a forge that marks no steps hands the whole log as one step
+export type LogStep = { name: string; ok: boolean; text: string };
+
+// a job's log with the commit it ran on, so the pull request under test is found without another read
+export type JobLog = { job: string; run: string; sha: string; url: string; steps: LogStep[] };
 
 export type Commit = { sha: string; message: string; merge: boolean };
 
@@ -154,6 +165,10 @@ export interface Forge {
   runs(repo: string, token?: string): Promise<Conditional<Run[]>>;
   // the open pull request heads; without a token the read always answers changed
   pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>>;
+  // the jobs of a ci run
+  jobs(repo: string, run: string): Promise<Job[]>;
+  // a job's log split at the forge's own step marks
+  jobLog(repo: string, job: string): Promise<JobLog>;
 
   // the issue or pull request a url in the forge's own shape names, undefined for any other text
   parseUrl(url: string): ForgeLink | undefined;

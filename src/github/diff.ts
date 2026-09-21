@@ -72,3 +72,23 @@ export function driftOf(prDiff: string, baseDiff: string): Drift[] {
   const base = new Map(splitDiff(baseDiff).map((f) => [f.path, f.patch]));
   return splitDiff(prDiff).flatMap((f) => (base.has(f.path) ? [{ path: f.path, pr: f.patch, base: base.get(f.path)! }] : []));
 }
+
+export type DiffFile = { path: string; additions: number; deletions: number };
+
+// the files a unified diff touches with the lines added and removed in each, in diff order
+export function diffFiles(diff: string): DiffFile[] {
+  const out: DiffFile[] = [];
+  let current: DiffFile | undefined;
+  for (const line of diff.split('\n')) {
+    const header = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (header) {
+      current = { path: header[2]!, additions: 0, deletions: 0 };
+      out.push(current);
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith('+') && !line.startsWith('+++')) current.additions++;
+    else if (line.startsWith('-') && !line.startsWith('---')) current.deletions++;
+  }
+  return out;
+}
