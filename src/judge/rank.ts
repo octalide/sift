@@ -33,7 +33,8 @@ export const RANK_DEFAULTS = {
 export type Ranked<T extends RankItem> = { index: number; item: T; answers: Answers; value: number };
 
 export type RankResult<T extends RankItem> =
-  | { ok: true; items: Ranked<T>[]; sorted: Ranked<T>[]; requests: number; backend: string; usage?: Usage }
+  // dropped: answers under a key no item or question of the request owns
+  | { ok: true; items: Ranked<T>[]; sorted: Ranked<T>[]; requests: number; dropped: number; backend: string; usage?: Usage }
   | { ok: false; reason: JudgeFailure; message: string; backend: string; requests: number };
 
 // what an item looks like in the state: its index as k, a string under text, an object's own fields
@@ -168,15 +169,18 @@ export async function rank<T extends RankItem>(items: T[], questions: Questions,
   const results = await pool(requests, options.concurrency ?? RANK_DEFAULTS.concurrency, (r) => judge.ask(r.state, r.questions));
   const answers: Answers[] = items.map(() => ({}));
   let backend = judge.name;
+  let dropped = 0;
   for (const [i, result] of results.entries()) {
     backend = result.backend;
     if (!result.ok) return { ok: false, reason: result.reason, message: result.message, backend, requests: requests.length };
     for (const [key, answer] of Object.entries(result.answers)) {
       const owner = requests[i]!.owners(key);
-      if (owner) answers[owner.index]![owner.id] = answer;
+      const slot = owner && ids.includes(owner.id) ? answers[owner.index] : undefined;
+      if (owner && slot) slot[owner.id] = answer;
+      else dropped++;
     }
   }
   const ranked = items.map((item, index) => ({ index, item, answers: answers[index]!, value: valueOf(answers[index]![by], options.choice) }));
   const sorted = [...ranked].sort((a, b) => b.value - a.value || a.index - b.index);
-  return { ok: true, items: ranked, sorted, requests: requests.length, backend, usage: sumUsage(results.map((r) => r.usage)) };
+  return { ok: true, items: ranked, sorted, requests: requests.length, dropped, backend, usage: sumUsage(results.map((r) => r.usage)) };
 }

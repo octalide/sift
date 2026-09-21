@@ -11,7 +11,7 @@ import { localSource, remoteSource } from '../src/github/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { validatePack } from '../src/packs/load.ts';
-import { materialize, runChecks, runPack, verdictOf } from '../src/packs/run.ts';
+import { formatReport, materialize, runChecks, runPack, verdictOf } from '../src/packs/run.ts';
 import { fakeForge } from './fake-forge.ts';
 import type { Subject } from '../src/packs/types.ts';
 
@@ -430,6 +430,30 @@ describe('pack materialization', () => {
     expect(() => validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', criteria: 'prose' } } }, 'bad')).toThrow(/true, false/);
     expect(validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', criteria: { true: 'yes', false: 'no' } } } }, 'ok').name).toBe('ok');
   });
+  it('drops an answer to a question it did not ask and reports the count without touching the verdict', async () => {
+    // answers every question asked at 0.9 and one nobody asked, for the pack and for the rank step
+    const judge: Judge = {
+      name: 'fake',
+      ask: async (_state, questions) => ({
+        ok: true,
+        answers: { ...Object.fromEntries(Object.keys(questions).map((id) => [id, { type: 'noul', p: 0.9 }])), unasked: { type: 'noul', p: 0.9 } },
+        backend: 'fake',
+        latencyMs: 1,
+      }),
+    };
+    const s: Subject = { kind: 'pr', ref: 'p', state: {}, facts: { has_diff: true, has_drift: true, drift: [{ path: 'y.ts', pr: '+b', base: '+c' }] }, options: {} };
+    const report = await runPack(BUILTIN_PACKS['pr']!, s, judge, DEFAULT_CONFIG);
+    expect(report.judged.map((j) => j.id)).not.toContain('unasked');
+    expect(report.ranked[0]!.items).toHaveLength(1);
+    expect(report.dropped).toBe(2);
+    expect(report.judgeError).toBeUndefined();
+    expect(report.verdict).toBe('warn');
+    expect(formatReport(report)).toContain('judge answered 2 questions it was not asked, dropped');
+    const exact: Judge = { name: 'fake', ask: async (_state, questions) => ({ ok: true, answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: 'noul', p: 0.9 }])), backend: 'fake', latencyMs: 1 }) };
+    const clean = await runPack(BUILTIN_PACKS['pr']!, s, exact, DEFAULT_CONFIG);
+    expect(clean.dropped).toBeUndefined();
+  });
+
   it('reads a plan beside its issue and fails on an unasked decision', async () => {
     const forge = fakeForge({ issue: async (_r, n) => ({ ...(await fakeForge().issue('o/r', n)), title: 'plan pack', body: 'New pack `plan`.' }) });
     const s = await planSubject(forge, 'o/r', 61, 'add the pack');

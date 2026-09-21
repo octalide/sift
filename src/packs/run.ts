@@ -114,11 +114,11 @@ function labelOf(step: RankStep, item: Record<string, unknown>, index: number): 
   return typeof v === 'string' || typeof v === 'number' ? String(v) : String(index + 1);
 }
 
-type StepResult = { ranked: RankedStep; kept: Record<string, unknown>[]; backend: string } | { error: string; backend: string };
+type StepResult = { ranked: RankedStep; kept: Record<string, unknown>[]; dropped: number; backend: string } | { error: string; backend: string };
 
 async function runStep(s: Step, items: Record<string, unknown>[], subject: Subject, judgeBackend: Judge, top: number | undefined): Promise<StepResult> {
   const list = s.step.list ?? 'each';
-  if (items.length === 0) return { ranked: { step: s.step.from, list, total: 0, kept: 0, items: [] }, kept: [], backend: judgeBackend.name };
+  if (items.length === 0) return { ranked: { step: s.step.from, list, total: 0, kept: 0, items: [] }, kept: [], dropped: 0, backend: judgeBackend.name };
   const result = await rank(items, s.questions, judgeBackend, { mode: s.step.mode ?? 'batched', context: subject.state, by: s.by, fields: s.step.fields });
   if (!result.ok) return { backend: result.backend, error: `${result.reason}: ${result.message}` };
   const all = result.items.map((r) => {
@@ -128,7 +128,7 @@ async function runStep(s: Step, items: Record<string, unknown>[], subject: Subje
   });
   const kept = all.filter((r) => r.judged.band !== 'violated');
   const shown = list === 'top' ? [...all].sort((a, b) => b.value - a.value || a.judged.index - b.judged.index).slice(0, top ?? s.step.top ?? TOP_DEFAULT) : all;
-  return { ranked: { step: s.step.from, list, total: items.length, kept: kept.length, items: shown.map((r) => r.judged) }, kept: kept.map((r) => r.item), backend: result.backend };
+  return { ranked: { step: s.step.from, list, total: items.length, kept: kept.length, items: shown.map((r) => r.judged) }, kept: kept.map((r) => r.item), dropped: result.dropped, backend: result.backend };
 }
 
 export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge, config: RepoConfig, options: RunOptions = {}): Promise<Report> {
@@ -138,6 +138,8 @@ export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge,
   const ranked: RankedStep[] = [];
   let judgeError = subject.judgeError;
   let backend = judgeBackend.name;
+  // an answer to a question the request did not ask is dropped and counted, never indexed
+  let dropped = 0;
   // a pack with many questions goes out in several requests, the state repeated in each
   for (const batch of batchQuestions(questions, estimateTokensOf(subject.state), JEV_LIMITS.requestTokens)) {
     if (judgeError !== undefined) break;
@@ -147,7 +149,15 @@ export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge,
       judgeError = `${result.reason}: ${result.message}`;
       break;
     }
-    for (const [id, answer] of Object.entries(result.answers)) judged.push(judge(id, answer, meta[id]!, questions[id]!.instructions));
+    for (const [id, answer] of Object.entries(result.answers)) {
+      const m = meta[id];
+      const q = batch[id];
+      if (!m || !q) {
+        dropped++;
+        continue;
+      }
+      judged.push(judge(id, answer, m, q.instructions));
+    }
   }
   // each step is one batched rank over its list, the subject state as the context, narrowed by the step before it
   let kept: Record<string, unknown>[] = [];
@@ -161,6 +171,7 @@ export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge,
     }
     ranked.push(out.ranked);
     kept = out.kept;
+    dropped += out.dropped;
   }
   return {
     pack: pack.name,
@@ -171,6 +182,7 @@ export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge,
     verdict: verdictOf(mechanical, [...judged, ...ranked.flatMap((r) => r.items)], judgeError !== undefined),
     backend,
     judgeError,
+    ...(dropped > 0 ? { dropped } : {}),
   };
 }
 
@@ -193,5 +205,6 @@ export function formatReport(report: Report): string {
     for (const [i, j] of r.items.entries()) lines.push(`    ${i + 1}. [${j.band}] ${j.label} = ${value(j)}`);
   }
   if (report.judgeError) lines.push(`  judge unavailable: ${report.judgeError}`);
+  if (report.dropped) lines.push(`  judge answered ${report.dropped} question${report.dropped === 1 ? '' : 's'} it was not asked, dropped`);
   return lines.join('\n');
 }
