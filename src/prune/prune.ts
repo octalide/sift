@@ -18,7 +18,8 @@ export const PRUNE_DEFAULTS: PruneOptions = {
   maxChunks: 160,
 };
 
-export type Chunk = { k: number; from: number; to: number; text: string; protected: boolean };
+// from and to are source line numbers, continues marks a chunk that starts partway through a split line
+export type Chunk = { k: number; from: number; to: number; text: string; protected: boolean; continues: boolean };
 
 export type PruneContext = {
   tool: string;
@@ -41,15 +42,28 @@ export type PruneResult = {
 const DIAGNOSTIC = /\b(error|errors|warning|warn|fail|failed|failure|exception|traceback|panic|fatal|denied|not found|cannot|unexpected|assert)\b|✗|✘|FAIL|Error:/i;
 const MAX_LINE = 2000;
 
+// a line over MAX_LINE is split into pieces so no single line can swamp a judge request, each piece keeps its source line
+type Piece = { line: number; text: string; first: boolean };
+
+function pieces(text: string): Piece[] {
+  const out: Piece[] = [];
+  text.split('\n').forEach((l, i) => {
+    const parts = l.length > MAX_LINE ? (l.match(new RegExp(`.{1,${MAX_LINE}}`, 'g')) ?? [l]) : [l];
+    parts.forEach((p, j) => out.push({ line: i + 1, text: p, first: j === 0 }));
+  });
+  return out;
+}
+
 export function chunkText(text: string, chunkLines: number, maxChunks: number): Chunk[] {
-  const lines = text.split('\n').flatMap((l) => (l.length > MAX_LINE ? l.match(new RegExp(`.{1,${MAX_LINE}}`, 'g')) ?? [l] : [l]));
+  const all = pieces(text);
   let per = chunkLines;
-  if (Math.ceil(lines.length / per) > maxChunks) per = Math.ceil(lines.length / maxChunks);
+  if (Math.ceil(all.length / per) > maxChunks) per = Math.ceil(all.length / maxChunks);
   const chunks: Chunk[] = [];
-  for (let i = 0; i < lines.length; i += per) {
-    const slice = lines.slice(i, i + per);
-    const body = slice.join('\n');
-    chunks.push({ k: chunks.length, from: i + 1, to: i + slice.length, text: body, protected: DIAGNOSTIC.test(body) });
+  for (let i = 0; i < all.length; i += per) {
+    const slice = all.slice(i, i + per);
+    // pieces of one source line rejoin with no separator, a new source line starts on a new line
+    const body = slice.map((p, j) => (j > 0 && p.first ? '\n' : '') + p.text).join('');
+    chunks.push({ k: chunks.length, from: slice[0]!.line, to: slice[slice.length - 1]!.line, text: body, protected: DIAGNOSTIC.test(body), continues: !slice[0]!.first });
   }
   if (chunks.length > 0) {
     chunks[0]!.protected = true;
@@ -95,8 +109,12 @@ export function assemble(chunks: Chunk[], keep: (c: Chunk) => boolean, note: Omi
   };
   for (const c of chunks) {
     if (keep(c)) {
-      flush();
-      parts.push(c.text);
+      // a chunk that continues a split line rejoins its kept predecessor without a newline
+      if (c.continues && omitted.length === 0 && parts.length > 0) parts[parts.length - 1] += c.text;
+      else {
+        flush();
+        parts.push(c.text);
+      }
     } else {
       omitted.push(c);
     }
