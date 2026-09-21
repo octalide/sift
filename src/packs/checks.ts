@@ -109,7 +109,8 @@ export const CHECKS: Record<string, Check> = {
     const manifestBump = (s.facts['manifestBump'] as Bump | undefined) ?? 'none';
     const unparsed = ((s.facts['manifestsUnparsed'] as string[] | undefined) ?? []).map((p) => warn('release.bump', `${p} is not toml, json or yaml, its keys match nothing (use pattern)`));
     if (!s.facts['has_commits']) return [...unparsed, info('release.bump', 'no commits since the last tag')];
-    if (bump === 'none') return [...unparsed, warn('release.bump', 'nothing since the last tag calls for a release (no feat, fix, breaking change or manifest change)')];
+    const bumping = Object.entries(c.commits.bumps ?? {}).filter(([, b]) => b !== 'none').map(([t]) => t);
+    if (bump === 'none') return [...unparsed, warn('release.bump', `nothing since the last tag calls for a release (no ${[...bumping, 'breaking change', 'manifest change'].join(', ')})`)];
     const because = [
       commitBump !== 'none' ? `commits ${commitBump}` : '',
       ...manifests.map((m) => `${m.path} ${m.key} ${m.from ?? 'unset'} -> ${m.to ?? 'unset'} (${manifestBump})`),
