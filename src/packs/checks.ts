@@ -135,6 +135,13 @@ export const CHECKS: Record<string, Check> = {
     return s.facts['changelog_changed'] ? [] : [warn('release.changelog', `${c.release.changelog} is unchanged ${since}`)];
   },
   'release.commits': (s, c) => commitFindings('release.commits', (s.facts['commits'] as ParsedCommit[]) ?? [], c),
+  'tree.indexed': (s) => {
+    const files = Number(s.facts['total_files'] ?? 0);
+    const dirs = ((s.facts['dirs'] as unknown[] | undefined) ?? []).length;
+    const skipped = Number(s.facts['skipped_files'] ?? 0);
+    if (files === 0) return [warn('tree.indexed', skipped > 0 ? `no files indexed, ${skipped} skipped as ignored, binary or over the size bound` : 'no files indexed: not a checkout, or git ls-files is empty')];
+    return [info('tree.indexed', `${files} files in ${dirs} directories indexed, ${skipped} skipped`)];
+  },
   'rules.present': (s, c) => {
     if (!s.facts['has_rules']) return [info('rules.present', 'no rule documents found in the repo')];
     const total = Number(s.facts['total_rules'] ?? 0);

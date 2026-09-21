@@ -33,11 +33,15 @@ export type SiftRankResult<T> =
   | { ok: true; items: SiftRanked<T>[]; sorted: SiftRanked<T>[]; requests: number; backend: string }
   | { ok: false; reason: 'disabled' | 'unavailable' | 'rejected' | 'malformed'; message: string; backend: string; requests: number };
 
+export type SiftJudged = { id: string; answer: SiftAnswer; band: 'satisfied' | 'violated' | 'unclear'; severity: 'fail' | 'warn' | 'info'; instructions: string };
+
 export type SiftReport = {
   pack: string;
   subject: string;
   mechanical: { check: string; severity: 'fail' | 'warn' | 'info'; message: string }[];
-  judged: { id: string; answer: SiftAnswer; band: 'satisfied' | 'violated' | 'unclear'; severity: 'fail' | 'warn' | 'info'; instructions: string }[];
+  judged: SiftJudged[];
+  // one entry per rank step of the pack, its items in order (each) or the best by value (top)
+  ranked: { step: string; list: 'each' | 'top'; total: number; kept: number; items: (SiftJudged & { index: number; label: string; answers: Record<string, SiftAnswer> })[] }[];
   verdict: 'pass' | 'warn' | 'fail' | 'unknown';
   backend: string;
   judgeError?: string;
@@ -49,8 +53,8 @@ export type Sift = {
   // the same questions over many items: batched fills each request with items, isolated sends one request per item.
   // {k} in a question is the item index, {field} a field of an object item, {text} a string item
   rank: <T extends string | Record<string, unknown>>(items: T[], questions: Record<string, SiftQuestion>, options: SiftRankOptions) => Promise<SiftRankResult<T>>;
-  // run a pack over a subject: an issue or PR number, a commit range, "release", or text
-  grade: (pack: string, subject: string, options?: { repo?: string; text?: string; ref?: string }) => Promise<SiftReport>;
+  // run a pack over a subject: an issue or PR number, a commit range, "release", or text; top cuts a locate list
+  grade: (pack: string, subject: string, options?: { repo?: string; text?: string; ref?: string; top?: number }) => Promise<SiftReport>;
   // the backend name in use
   backend: () => string;
 };

@@ -313,7 +313,8 @@ describe('mechanical checks', () => {
     const report = await runPack(BUILTIN_PACKS['rules']!, subject, judge, resolveConfig({ rules: { maxRules: 900 } }));
     expect(asks.length).toBeGreaterThan(1);
     expect(asks.reduce((a, b) => a + b, 0)).toBe(900);
-    expect(report.judged).toHaveLength(900);
+    expect(report.judged).toEqual([]);
+    expect(report.ranked[0]!.items).toHaveLength(900);
     expect(report.mechanical).toEqual([]);
     const capped = runChecks(BUILTIN_PACKS['rules']!, { ...subject, facts: { ...subject.facts, total_rules: 900 } }, resolveConfig(undefined));
     expect(capped[0]!.message).toBe('200 of 900 rules used, raise rules.maxRules to judge the rest');
@@ -357,8 +358,8 @@ describe('pack materialization', () => {
     const rules: Subject = { kind: 'rules', ref: 'x', state: {}, facts: { rules: [{ text: 'no em dashes' }, { text: 'tests pass' }] }, options: {} };
     const expanded = materialize(BUILTIN_PACKS['rules']!, rules);
     expect(expanded.questions).toEqual({});
-    expect(expanded.expansion!.items).toHaveLength(2);
-    expect(expanded.expansion!.questions['rules']!.instructions).toBe('The subject complies with this rule: {text}');
+    expect(expanded.steps[0]!.items).toHaveLength(2);
+    expect(expanded.steps[0]!.questions['rules']!.instructions).toBe('The subject complies with this rule: {text}');
   });
 
   it('inverts bad-outcome nouls and grades the verdict', async () => {

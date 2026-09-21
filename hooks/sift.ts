@@ -5,6 +5,7 @@ import { CONFIG_PATH, configLayers, defaultTarget, globalConfigPath, resolveConf
 import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
+import { indexTree, treeSubject } from '../src/locate/tree.ts';
 import { digestOf, JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
 import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
 import type { Answer, Judge, Questions } from '../src/judge/types.ts';
@@ -13,7 +14,7 @@ import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
 import type { Pack, Report, Subject } from '../src/packs/types.ts';
 import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
-import { estimateTokens } from '../src/tokens.ts';
+import { estimateTokens, truncate } from '../src/tokens.ts';
 import { Watcher } from '../src/watch/watcher.ts';
 
 type Options = {
@@ -189,6 +190,20 @@ export const register: Register = (on, rawOptions) => {
         const kind = /^#?\d+$/.test(ref) ? (opts.text === 'issue' ? 'issue' : 'pr') : /^[0-9a-f]{7,40}$|\.\./.test(ref) ? 'commit' : 'text';
         return rulesSubject(rt.gh, repo, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config, fs.read, fs.exists);
       }
+      case 'tree': {
+        // an issue number with a repo is its title and body, anything else is the text itself
+        const isIssue = /^#?\d+$/.test(ref) && opts.text === undefined && repo !== undefined;
+        const issue = isIssue ? await rt.gh.json<{ title: string; body: string | null }>(`repos/${repo}/issues/${number()}`) : undefined;
+        const text = issue ? `${issue.title}\n\n${issue.body ?? ''}` : (opts.text ?? ref);
+        if (!rt.root) throw new Error('no checkout: the tree subject indexes the working directory');
+        const root = rt.root;
+        const index = await indexTree({
+          list: async () => (await rt.gh.git(['ls-files', '-z'])).split('\0'),
+          size: async (p) => (await statFile(`${root}/${p}`)).size,
+          read: (p) => readFile(`${root}/${p}`),
+        });
+        return treeSubject(text, issue ? `${repo}#${number()}` : truncate(text, 40), index);
+      }
       default:
         return textSubject(opts.text ?? ref);
     }
@@ -197,8 +212,9 @@ export const register: Register = (on, rawOptions) => {
   // file access via the engine, bound at session start
   let readFile: (p: string) => Promise<string> = async () => '';
   let existsFile: (p: string) => Promise<boolean> = async () => false;
+  let statFile: (p: string) => Promise<{ size: number }> = async () => ({ size: 0 });
 
-  type GradeOptions = { repo?: string; text?: string; ref?: string };
+  type GradeOptions = { repo?: string; text?: string; ref?: string; top?: number };
 
   async function defaultBranch(gh: Gh, repo: string): Promise<string> {
     return (await gh.json<{ default_branch: string }>(`repos/${repo}`)).default_branch;
@@ -208,7 +224,7 @@ export const register: Register = (on, rawOptions) => {
     const pack = rt.packs[packName];
     if (!pack) throw new Error(`unknown pack ${packName}`);
     const subject = await subjectFor(rt, packName, ref, opts);
-    const report = await runPack(pack, subject, rt.judge, rt.config);
+    const report = await runPack(pack, subject, rt.judge, rt.config, { top: opts?.top });
     record('grade', report.verdict, { digest: `${packName} ${subject.ref}` });
     return report;
   }
@@ -227,6 +243,7 @@ export const register: Register = (on, rawOptions) => {
   on('session.start', async ($, e, next) => {
     readFile = (p) => $.fs.read(p);
     existsFile = (p) => $.fs.exists(p);
+    statFile = (p) => $.fs.stat(p);
     const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) };
     const sessionId = await $.session.id();
     const log = new DecisionLog(store, sessionId);
@@ -312,15 +329,16 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs: issue (subject: issue number), pr (PR number), commit (sha or range like main..HEAD), release (subject: "release" or a proposed version like v1.4.0, ref: the branch it is cut from, repo: any repo, no checkout needed), rules (subject: PR number, issue number with text="issue", commit, or free text in text). Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs: issue (subject: issue number), pr (PR number), commit (sha or range like main..HEAD), release (subject: "release" or a proposed version like v1.4.0, ref: the branch it is cut from, repo: any repo, no checkout needed), rules (subject: PR number, issue number with text="issue", commit, or free text in text), locate (subject: issue number or free text in text, lists the files of the checkout to read or change for it, top: how many per level). Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {
             pack: { type: 'string', description: 'pack name' },
             subject: { type: 'string', description: 'issue or PR number, commit or range, "release", or a version' },
             repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from GitHub' },
-            text: { type: 'string', description: 'free text subject for the rules pack, or "issue" to grade an issue number against the rules' },
+            text: { type: 'string', description: 'free text subject for the rules and locate packs, or "issue" to grade an issue number against the rules' },
             ref: { type: 'string', description: 'release pack: the branch or sha the release is cut from. Defaults to HEAD in a checkout, else the configured PR target branch, else the default branch' },
+            top: { type: 'number', description: 'locate pack: how many paths to list per level, default 20' },
           },
           required: ['pack', 'subject'],
         },
@@ -377,9 +395,9 @@ export const register: Register = (on, rawOptions) => {
   });
 
   on('tool.call', { tool: 'mcp__sift__grade' }, async ($, e) => {
-    const input = e as unknown as { pack: string; subject: string; repo?: string; text?: string; ref?: string };
+    const input = e as unknown as { pack: string; subject: string; repo?: string; text?: string; ref?: string; top?: number };
     try {
-      const report = await grade(ready(), input.pack, String(input.subject), { repo: input.repo, text: input.text, ref: input.ref });
+      const report = await grade(ready(), input.pack, String(input.subject), { repo: input.repo, text: input.text, ref: input.ref, top: input.top });
       return { result: [{ type: 'text', text: formatReport(report) }] };
     } catch (error) {
       return { deny: `sift grade failed: ${messageOf(error)}` };
