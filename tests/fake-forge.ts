@@ -7,6 +7,7 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
   return {
     name: 'Fake',
     nouns: { issue: 'Fake issue', pr: 'pull request', release: 'Fake release' },
+    writes: [],
     checkout: async () => undefined,
     login: async () => undefined,
     defaultBranch: async () => 'main',
@@ -29,7 +30,6 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     items: async () => ({ changed: false, rate: {} }),
     runs: async () => ({ changed: false, rate: {} }),
     pulls: async () => ({ changed: true, rate: {}, value: [] }),
-    write: () => undefined,
     parseUrl: (url) => {
       const m = /^https:\/\/fake\/([^/]+\/[^/]+)\/(issue|pr)\/(\d+)$/.exec(url);
       return m ? { repo: m[1]!, kind: m[2] as 'issue' | 'pr', number: Number(m[3]) } : undefined;

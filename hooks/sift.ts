@@ -1,6 +1,7 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
-import { extractors, gateOutbound, outboundOf } from '../src/gate/outbound.ts';
+import { channelTable, defaultChannels, type Channel } from '../src/gate/channels.ts';
+import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
 import type { Forge } from '../src/forge/forge.ts';
 import { localGit, type Git } from '../src/forge/git.ts';
 import { GitHubForge } from '../src/forge/github.ts';
@@ -101,6 +102,8 @@ type Runtime = {
   root?: string;
   forge: Forge;
   git: Git;
+  // the outbound channel table: the defaults for the forge, then the config's entries over them
+  channels: Channel[];
   watcher?: Watcher;
   // builds and starts the watcher; returns the reason when it cannot
   startWatch: () => Promise<string | undefined>;
@@ -336,7 +339,7 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    runtime = { judge, log, config, packs, repo: checkout?.repo, root, forge, git, startWatch, sessionId };
+    runtime = { judge, log, config, packs, repo: checkout?.repo, root, forge, git, channels: channelTable(defaultChannels(forge), config.outbound.channels), startWatch, sessionId };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -443,11 +446,10 @@ export const register: Register = (on, rawOptions) => {
     if (e.tool.startsWith('mcp__sift__')) return next(e);
     const rt = runtime;
     if (!rt) return next(e);
-    const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, extractors(rt.forge)) : undefined;
+    const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, rt.channels) : undefined;
     if (outbound) {
       const rulesPack = rt.packs['rules'];
-      const artifact = outbound.kind && outbound.action ? { kind: outbound.kind, action: outbound.action } : undefined;
-      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, git: rt.git, repo: rt.repo, read: readFile, exists: existsFile }, { kind: 'text', ref: outbound.text, artifact }, rt.config) : undefined;
+      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, git: rt.git, repo: rt.repo, read: readFile, exists: existsFile }, { kind: 'text', ref: outbound.text, about: outbound.kind }, rt.config) : undefined;
       if (rulesPack && subject) {
         const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, rt.config);
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });

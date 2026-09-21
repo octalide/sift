@@ -92,8 +92,8 @@ export type Template = { kind: 'issue' | 'pr'; name: string; body: string };
 export type ForgeArtifact = 'issue' | 'pr' | 'release';
 export type ForgeAction = 'create' | 'comment' | 'edit';
 
-// a write the forge's cli is about to make: the body inline, or the file it will be read from
-export type ForgeWrite = { kind: ForgeArtifact; action: ForgeAction; body: { text: string } | { file: string } | undefined };
+// a write the forge's cli makes: a regex over the command, the flags carrying the body inline, the flags naming a file it is read from
+export type ForgeWrite = { kind: ForgeArtifact; action: ForgeAction; command: string; body: string[]; file: string[] };
 
 // an issue or pull request a url on the forge names, with the repo as the forge paths it
 export type ForgeLink = { repo: string; kind: 'issue' | 'pr'; number: number };
@@ -103,6 +103,8 @@ export interface Forge {
   readonly name: string;
   // how the forge names each artifact in prose, for the judge: "GitHub issue", "merge request"
   readonly nouns: Record<ForgeArtifact, string>;
+  // every artifact write the forge's cli makes from a shell command
+  readonly writes: ForgeWrite[];
 
   // the repository the working directory is a checkout of, when it has a remote on this forge
   checkout(): Promise<{ repo: string; defaultBranch: string } | undefined>;
@@ -146,8 +148,6 @@ export interface Forge {
   // the open pull request heads; without a token the read always answers changed
   pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>>;
 
-  // the artifact write a shell command makes through the forge's cli, undefined for any other command
-  write(command: string): ForgeWrite | undefined;
   // the issue or pull request a url in the forge's own shape names, undefined for any other text
   parseUrl(url: string): ForgeLink | undefined;
 }

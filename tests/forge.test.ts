@@ -86,12 +86,13 @@ describe('github forge', () => {
     expect(calls[0]).toContain('pullRequest(number: 7)');
   });
 
-  it('names the artifact write a gh command makes', () => {
-    const forge = github({});
-    expect(forge.write('gh pr create -t "t" -b "body"')).toEqual({ kind: 'pr', action: 'create', body: { text: 'body' } });
-    expect(forge.write('gh issue comment 3 --body-file x.md')).toEqual({ kind: 'issue', action: 'comment', body: { file: 'x.md' } });
-    expect(forge.write('gh pr create --fill')).toEqual({ kind: 'pr', action: 'create', body: undefined });
-    expect(forge.write('gh pr view 5')).toBeUndefined();
-    expect(forge.write('git commit -m x')).toBeUndefined();
+  it('lists the artifact writes gh makes with their body flags', () => {
+    const { writes } = github({});
+    expect(writes.map((w) => `${w.kind} ${w.action}`)).toEqual(['pr create', 'pr comment', 'pr edit', 'issue create', 'issue comment', 'issue edit', 'release create', 'release edit']);
+    const comment = writes.find((w) => w.kind === 'pr' && w.action === 'comment')!;
+    expect(comment).toMatchObject({ body: ['--body', '-b'], file: ['--body-file', '-F'] });
+    expect(new RegExp(comment.command).test('gh pr comment 3 -b x')).toBe(true);
+    expect(new RegExp(comment.command).test('gh pr view 5')).toBe(false);
+    expect(writes.find((w) => w.kind === 'release' && w.action === 'create')).toMatchObject({ body: ['--notes', '-n'], file: ['--notes-file', '-F'] });
   });
 });

@@ -1,6 +1,5 @@
 import { Gh, GhError, type ApiResponse } from '../github/gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
-import { shellWord } from '../shell.ts';
 import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgeUser, ForgeWrite, Issue, IssueSummary, PullHead, PullRequest, Rate, Review, ReviewComment, Run, Template, WatchItem } from './forge.ts';
 
 type GhUser = { login: string; type?: string };
@@ -69,26 +68,22 @@ export type RawItem = {
   m: boolean;
 };
 
-const GH_WRITE = /^\s*gh\s+(pr|issue|release)\s+(create|comment|edit)\b/;
 // the html and api urls of an issue or pull request; anything past the number (a comment anchor, /files) is ignored
 const GH_URL = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+\/[^/\s#?]+)\/(issues|pull)\/(\d+)(?:[/?#].*)?$/;
 const GH_API_URL = /^https?:\/\/api\.github\.com\/repos\/([^/\s]+\/[^/\s#?]+)\/(issues|pulls)\/(\d+)(?:[/?#].*)?$/;
 
-// the value after --body or -b: a quoted word, or a heredoc inside $(cat <<'EOF' ... EOF); else the path after --body-file or -F
-export function ghBody(command: string): ForgeWrite['body'] {
-  const flag = /(?:^|\s)(?:--body|-b)(?:=|\s+)/.exec(command);
-  if (flag) {
-    const rest = command.slice(flag.index + flag[0].length);
-    const heredoc = /^"?\$\(\s*cat\s+<<-?\s*['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\s*\1\s*\n?\s*\)/.exec(rest);
-    if (heredoc) return { text: heredoc[2]! };
-    const text = shellWord(rest);
-    return text === undefined ? undefined : { text };
-  }
-  const fileFlag = /(?:^|\s)(?:--body-file|-F)(?:=|\s+)/.exec(command);
-  if (!fileFlag) return undefined;
-  const file = shellWord(command.slice(fileFlag.index + fileFlag[0].length));
-  return file === undefined ? undefined : { file };
-}
+// gh pr and gh issue take --body and --body-file; gh release takes --notes and --notes-file, and has no comment
+const ghWrite = (kind: ForgeArtifact, action: ForgeAction, noun: string): ForgeWrite => ({
+  kind,
+  action,
+  command: String.raw`^\s*gh\s+${kind}\s+${action}\b`,
+  body: [`--${noun}`, `-${noun[0]}`],
+  file: [`--${noun}-file`, '-F'],
+});
+export const GH_WRITES: ForgeWrite[] = [
+  ...(['pr', 'issue'] as const).flatMap((kind) => (['create', 'comment', 'edit'] as const).map((action) => ghWrite(kind, action, 'body'))),
+  ...(['create', 'edit'] as const).map((action) => ghWrite('release', action, 'notes')),
+];
 
 const user = (u: GhUser): ForgeUser => ({ login: u.login, bot: u.type === 'Bot' || u.login.endsWith('[bot]') });
 
@@ -155,6 +150,7 @@ const TEMPLATE_ENTRY: Record<Template['kind'], RegExp> = { issue: /\.(md|yml|yam
 export class GitHubForge implements Forge {
   readonly name = 'GitHub';
   readonly nouns: Record<ForgeArtifact, string> = { issue: 'GitHub issue', pr: 'pull request', release: 'GitHub release' };
+  readonly writes = GH_WRITES;
   readonly gh: Gh;
 
   constructor(run: RunLike, cwd?: CwdLike) {
@@ -310,12 +306,6 @@ export class GitHubForge implements Forge {
     if (probe.status === 304) return { changed: false, rate: rate(probe) };
     const raw = JSON.parse(probe.body || '[]') as { number: number; title: string; head: { ref: string; sha: string }; html_url: string; user: GhUser }[];
     return { changed: true, token: probe.etag, rate: rate(probe), value: raw.map((p) => ({ number: p.number, title: p.title, branch: p.head.ref, sha: p.head.sha, url: p.html_url, user: p.user.login })) };
-  }
-
-  write(command: string): ForgeWrite | undefined {
-    const m = GH_WRITE.exec(command);
-    if (!m) return undefined;
-    return { kind: m[1] as ForgeArtifact, action: m[2] as ForgeAction, body: ghBody(command) };
   }
 
   parseUrl(url: string): ForgeLink | undefined {
