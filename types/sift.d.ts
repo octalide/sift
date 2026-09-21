@@ -13,6 +13,26 @@ export type SiftJudgement =
   | { ok: true; answers: Record<string, SiftAnswer>; backend: string; latencyMs: number }
   | { ok: false; reason: 'disabled' | 'unavailable' | 'rejected' | 'malformed'; message: string; backend: string };
 
+export type SiftRankMode = 'batched' | 'isolated';
+
+export type SiftRankOptions = {
+  mode: SiftRankMode;
+  // state every item is read against, placed beside the items
+  context?: Record<string, unknown>;
+  // the question the sorted view orders by, the first when absent; for a choice question, the key whose probability orders it
+  by?: string;
+  choice?: string;
+  maxStateTokens?: number;
+  maxRequestTokens?: number;
+  concurrency?: number;
+};
+
+export type SiftRanked<T> = { index: number; item: T; answers: Record<string, SiftAnswer>; value: number };
+
+export type SiftRankResult<T> =
+  | { ok: true; items: SiftRanked<T>[]; sorted: SiftRanked<T>[]; requests: number; backend: string }
+  | { ok: false; reason: 'disabled' | 'unavailable' | 'rejected' | 'malformed'; message: string; backend: string; requests: number };
+
 export type SiftReport = {
   pack: string;
   subject: string;
@@ -26,6 +46,9 @@ export type SiftReport = {
 export type Sift = {
   // typed questions over any state, answered by the configured backend
   judge: (state: unknown, questions: Record<string, SiftQuestion>) => Promise<SiftJudgement>;
+  // the same questions over many items: batched fills each request with items, isolated sends one request per item.
+  // {k} in a question is the item index, {field} a field of an object item, {text} a string item
+  rank: <T extends string | Record<string, unknown>>(items: T[], questions: Record<string, SiftQuestion>, options: SiftRankOptions) => Promise<SiftRankResult<T>>;
   // run a pack over a subject: an issue or PR number, a commit range, "release", or text
   grade: (pack: string, subject: string, options?: { repo?: string; text?: string; ref?: string }) => Promise<SiftReport>;
   // the backend name in use

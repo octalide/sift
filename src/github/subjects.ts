@@ -290,7 +290,7 @@ export async function rulesSubject(
   return {
     kind: 'rules',
     ref: `${target.kind}:${truncate(target.ref, 40)}`,
-    state: { subject, rules: rules.map((r, i) => ({ id: `r${i + 1}`, source: r.source, text: r.text })) },
+    state: { subject },
     facts: { rules, has_rules: rules.length > 0, total_rules: total, subject: about ? `The subject (${about})` : 'The subject' },
     options: {},
   };

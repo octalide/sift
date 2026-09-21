@@ -5,8 +5,9 @@ import { CONFIG_PATH, resolveConfig, type RepoConfig } from '../src/github/confi
 import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
-import { JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
-import type { Judge, Questions } from '../src/judge/types.ts';
+import { digestOf, JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
+import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
+import type { Answer, Judge, Questions } from '../src/judge/types.ts';
 import { DecisionLog, type Cost } from '../src/log.ts';
 import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
@@ -210,6 +211,7 @@ export const register: Register = (on, rawOptions) => {
     const built = await next(e);
     const sift = {
       judge: (state: unknown, questions: Questions) => ready().judge.ask(state, questions),
+      rank: <T extends RankItem>(items: T[], questions: Questions, opts: RankOptions) => rank(items, questions, ready().judge, opts),
       grade: (pack: string, subject: string, opts?: GradeOptions) => grade(ready(), pack, subject, opts),
       backend: () => (runtime ? runtime.judge.name : 'unbound'),
     };
@@ -323,6 +325,23 @@ export const register: Register = (on, rawOptions) => {
           required: ['state', 'questions'],
         },
       });
+      await $.tool.register({
+        name: 'rank',
+        description:
+          'Score many items with the same typed questions and get them back in input order with their answers, plus a view sorted by one question. questions has the judge shape; {k} in a question stands for the item index and {field} for a field of an object item ({text} for a string item). mode "batched" fills each request with as many items as fit, so items can see each other and it is cheapest; "isolated" sends one request per item so no item colours another. Use it for "which of these N" problems: relevance, triage, dedup, picking a best candidate.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            items: { type: 'array', description: 'the items to score: strings or objects' },
+            questions: { type: 'object', description: 'id -> question, asked of every item' },
+            mode: { type: 'string', enum: ['batched', 'isolated'], description: 'batched (default) or isolated' },
+            context: { type: 'object', description: 'state every item is read against, placed beside the items' },
+            by: { type: 'string', description: 'the question the sorted view orders by, the first when absent' },
+            choice: { type: 'string', description: 'for a choice question in by: the key whose probability orders the view' },
+          },
+          required: ['items', 'questions'],
+        },
+      });
     }
 
     await $.tool.register({
@@ -359,11 +378,18 @@ export const register: Register = (on, rawOptions) => {
     const result = await ready().judge.ask(input.state, input.questions);
     record('judge-tool', result.ok ? 'answered' : 'failed');
     const text = result.ok
-      ? Object.entries(result.answers)
-          .map(([id, a]) => `${id}: ${a.type === 'noul' ? a.p.toFixed(3) : a.type === 'choice' ? `${a.choice} (confidence ${a.confidence.toFixed(2)})` : `${a.legend} (confidence ${a.confidence.toFixed(2)})`}`)
-          .join('\n')
+      ? Object.entries(result.answers).map(([id, a]) => `${id}: ${answerLabel(a)}`).join('\n')
       : `judge unavailable: ${result.reason}: ${result.message}`;
     return result.ok ? { result: [{ type: 'text', text }] } : { deny: text };
+  });
+
+  on('tool.call', { tool: 'mcp__sift__rank' }, async ($, e) => {
+    const input = e as unknown as { items: RankItem[]; questions: Questions; mode?: RankOptions['mode']; context?: Record<string, unknown>; by?: string; choice?: string };
+    const result = await rank(input.items, input.questions, ready().judge, { mode: input.mode ?? 'batched', context: input.context, by: input.by, choice: input.choice });
+    record('rank-tool', result.ok ? 'ranked' : 'failed', { digest: `${input.items.length} items, ${result.requests} requests` });
+    if (!result.ok) return { deny: `rank unavailable: ${result.reason}: ${result.message}` };
+    const lines = result.sorted.map((r) => `${r.index}: ${r.value.toFixed(3)} ${Object.entries(r.answers).map(([id, a]) => `${id}=${answerLabel(a)}`).join(' ')} ${digestOf(r.item)}`);
+    return { result: [{ type: 'text', text: [`${result.items.length} items in ${result.requests} request${result.requests === 1 ? '' : 's'}, sorted by ${input.by ?? Object.keys(input.questions)[0]}`, ...lines].join('\n') }] };
   });
 
   // outbound gate before, prune after, on the same call
@@ -525,4 +551,8 @@ function pruneTools(options: Options): string[] {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function answerLabel(a: Answer): string {
+  return a.type === 'noul' ? a.p.toFixed(3) : a.type === 'choice' ? `${a.choice} (confidence ${a.confidence.toFixed(2)})` : `${a.legend} (confidence ${a.confidence.toFixed(2)})`;
 }

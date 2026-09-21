@@ -7,14 +7,14 @@ It asks one of two backends a set of typed questions about some state and gets b
 - **Jev** (TypeSafe's System One model) when `TYPESAFE_API_KEY` is set. Sub-second, cheap, calibrated.
 - **the session's small model** (`haiku` by default) otherwise, through the engine's own client. Slower and less calibrated, but it needs no extra account.
 
-Everything sift does is built on that one call. Every module is a toggle, every module logs what it decided, and every module falls back to the engine's normal behaviour when the judge is unavailable. Correctness never depends on the judge.
+Everything sift does is built on that one call, directly or through `rank`, which asks the same questions of many items at once. Every module is a toggle, every module logs what it decided, and every module falls back to the engine's normal behaviour when the judge is unavailable. Correctness never depends on the judge.
 
 ## Modules
 
 | module | hook | what it does | default |
 |---|---|---|---|
 | `prune` | `tool.call` (post) | scores long Bash and Read output in chunks before the model reads it, drops the chunks that are not needed and leaves a one-line note in their place with the omitted line range and how to get it back (re-read the file by range for Read, rerun the command for Bash). Nothing is kept on disk | on |
-| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one) and `mcp__sift__judge` answers raw typed questions | on |
+| `grade` | registered tools | `mcp__sift__grade` runs a pack (issue, pr, commit, release, rules, or a repo-defined one), `mcp__sift__judge` answers raw typed questions and `mcp__sift__rank` asks the same questions of many items | on |
 | `watch` | `clock` + `prompt.submit` | polls a GitHub repo for issues, PRs, comments, edits, labels and CI, settles what it can by rules, asks the judge about the rest, and delivers actionable events as prompts | off |
 | `gateOutbound` | `tool.call` (pre) | checks text about to leave the session (a Discord message, a `gh pr`, `gh issue` or `gh release` create, comment or edit body) against the channel's length limit and the repository rule documents, and denies a broken rule | off |
 | `classify` | `model.classify` | answers the engine's own small classifications from the judge | off |
@@ -50,7 +50,7 @@ claude --plugin-dir ./sift --settings '{"pluginConfigs":{"sift@inline":{"options
 
 ## Grading
 
-The tools are registered as `mcp__sift__grade` and `mcp__sift__judge`.
+The tools are registered as `mcp__sift__grade`, `mcp__sift__judge` and `mcp__sift__rank`.
 
 ```
 grade(pack: "pr", subject: "42")
@@ -77,7 +77,20 @@ A report has three parts: mechanical findings (labels, milestone, template secti
 }
 ```
 
-Other plugins can call the same thing through `$.sift.judge` and `$.sift.grade` (typed in `types/sift.d.ts`).
+`rank(items, questions, mode)` asks the same questions of every item in a list and returns the items in input order with their answers, plus a view sorted by one question (`by`, the first question when absent, a choice question by its `choice` key's probability). Items are strings or objects. In a question, `{k}` stands for the item's index, `{text}` for a string item and `{field}` for a field of an object item. `context` is state every item is read against.
+
+```json
+{
+  "items": ["progress 12%", "Error: boom at line 120", "progress 13%"],
+  "questions": { "needed": { "type": "noul", "instructions": "Line {k} ({text}) is needed to answer the user." } },
+  "mode": "batched",
+  "context": { "task": "why did the build fail?" }
+}
+```
+
+Two modes, both Jev shapes. `batched` fills each request with as many items as fit under the 32k state and 64k request limits and asks one question set per item, so items can see each other and a list costs as few requests as possible. `isolated` sends one request per item, run concurrently, so no item colours another. Prune is `rank` over output chunks and the rules pack is `rank` over the rule documents, so any pack or session that needs the relevant N of M is data over the same primitive.
+
+Other plugins can call the same thing through `$.sift.judge`, `$.sift.rank` and `$.sift.grade` (typed in `types/sift.d.ts`).
 
 ## Repo configuration
 
