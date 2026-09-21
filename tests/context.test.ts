@@ -47,7 +47,32 @@ describe('pruning', () => {
   it('splits over-long lines and caps chunk count', () => {
     const chunks = chunkText('x'.repeat(5000), 25, 160);
     expect(chunks).toHaveLength(1);
-    expect(chunks[0]!.to).toBe(3);
+    expect(chunks[0]!.to).toBe(1);
     expect(chunkText(Array(10_000).fill('l').join('\n'), 25, 160).length).toBeLessThanOrEqual(160);
+  });
+
+  it('bounds chunks by source line when a split line straddles a chunk boundary', async () => {
+    const long = 'y'.repeat(5000);
+    const text = [...Array(24).keys()].map((i) => `l${i}`).concat(long, [...Array(30).keys()].map((i) => `m${i}`)).join('\n');
+    const chunks = chunkText(text, 25, 160);
+    expect(chunks.map((c) => [c.from, c.to, c.continues])).toEqual([[1, 25, false], [25, 48, true], [49, 55, false]]);
+    expect(chunks[0]!.text.endsWith('\n' + 'y'.repeat(2000))).toBe(true);
+    expect(chunks[1]!.text.startsWith('y'.repeat(3000) + '\nm0')).toBe(true);
+    const result = await prune(text, { tool: 'Bash', input: {}, task: '' }, judgeBy(() => 1), { ...PRUNE_DEFAULTS, floorTokens: 10 });
+    expect(result.text).toBe(text);
+  });
+
+  it('notes real line numbers around a 5000-character line in Read output', async () => {
+    const long = 'z'.repeat(5000);
+    const text = [...Array(200).keys()].map((i) => (i === 120 ? long : `line ${i}`)).join('\n');
+    const context = { tool: 'Read', input: { file_path: '/src/a.ts', offset: 100, limit: 200 }, task: 'find the bug' };
+    const result = await prune(text, context, judgeBy((k) => (k === 'needed_6' ? 1 : 0)), { ...PRUNE_DEFAULTS, floorTokens: 10, chunkLines: 20 });
+    expect(result.chunks).toBe(11);
+    expect(result.text).toContain('[sift: lines 120-219 (100 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 120 limit 100]');
+    expect(result.text).toContain('[sift: lines 238-297 (60 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 238 limit 60]');
+    const lines = result.text.split('\n');
+    expect(lines).toHaveLength(42);
+    expect(lines[21]).toBe(long);
+    expect(lines[22]).toBe('line 121');
   });
 });
