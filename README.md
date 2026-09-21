@@ -77,7 +77,7 @@ A pack is data: a subject kind, a list of mechanical checks, typed questions wit
 | `issue` | an issue number or URL | is the issue well formed, correctly typed, scoped to this repo, implementable without a decision it does not make, and ready to work on |
 | `pr` | a PR number or URL, or a `base..head` range | does the PR do what its issue asks, nothing more, without workarounds, and is it safe to merge, drift against the base included |
 | `hunks` | the same as `pr` | which hunk of the diff is wrong: unrelated to the stated purpose, a workaround, or a behaviour change no test covers |
-| `plan` | an issue number, the plan in `text` | does the plan cover the issue, add nothing beyond it, and decide nothing the issue leaves open |
+| `plan` | an issue number, the plan in `text` | does the plan cover the issue, add nothing beyond it, and decide nothing the issue leaves open; a warn means the plan lists its decisions in the PR body |
 | `commit` | a ref or range | do the commits follow the repository's commit format and describe their diffs honestly |
 | `ci` | a job id, a run id, or a log in `text` | why the job failed: the lines that explain it, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository |
 | `rules` | a PR, an issue, a ref or range, or free text | does the subject comply with each rule the repository's rule documents state |
@@ -121,7 +121,7 @@ The `issue` pack asks whether the body is substantive, which type label fits, wh
 
 ### plan
 
-The `plan` pack reads an issue and a plan for it from `text` and asks three questions: `covers` (every point the issue asks for is met by a step, or the plan says why it is left out), `adds_nothing` (no step changes something the issue does not mention unless the change is needed to land one it does), and `decides_unasked` (no step picks between options the issue leaves open where the outcome differs by the pick: an interface, a name or format others depend on, an approach, a case the issue does not cover). A violated `covers` or `decides_unasked` fails the report.
+The `plan` pack reads an issue and a plan for it from `text` and asks three questions: `covers` (every point the issue asks for is met by a step, or the plan says why it is left out), `adds_nothing` (no step changes something the issue does not mention unless the change is needed to land one it does), and `decides_unasked` (no step settles something the issue leaves open that others will depend on: a new or changed public interface, a stored format, behaviour a caller outside the change depends on, a choice between two architectures; normalising an input, a collision or ordering rule inside one module, the wording of a message, or a test's shape are not decisions). A violated `covers` fails the report. A violated `adds_nothing` or `decides_unasked` warns: the plan goes ahead and lists its decisions in the PR body.
 
 ### ci
 
