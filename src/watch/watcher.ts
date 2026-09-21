@@ -1,11 +1,11 @@
 import type { RepoConfig } from '../github/config.ts';
-import { Gh, GhError } from '../github/gh.ts';
+import type { Forge, PullHead, Rate } from '../forge/forge.ts';
 import type { Judge } from '../judge/types.ts';
 import type { Finding, Pack } from '../packs/types.ts';
 import { runChecks } from '../packs/run.ts';
 import { issueSubject } from '../github/subjects.ts';
 import type { StoreLike } from '../log.ts';
-import { diffItems, diffRuns, formatEvent, initialState, ITEM_JQ, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type CheckRun, type CommitStatus, type Deferred, type PendingHead, type RawItem, type WatchEvent, type WatchState } from './poll.ts';
+import { diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
 
 export type WatchOptions = {
@@ -23,7 +23,7 @@ export type WatchOptions = {
 };
 
 export type WatchHost = {
-  gh: Gh;
+  forge: Forge;
   store: StoreLike;
   judge: Judge;
   pack: Pack;
@@ -40,13 +40,9 @@ export type WatchHost = {
 
 type Timer = { cancel: () => void };
 
-type Pull = Omit<PendingHead, 'since' | 'stalled'>;
+type Pull = PullHead;
 
 const headKey = (p: Pull): string => `${p.number}@${p.sha}`;
-
-type RawPull = { number: number; title: string; head: { ref: string; sha: string }; html_url: string; user: { login: string } };
-
-const toPulls = (raw: RawPull[]): Pull[] => raw.map((p) => ({ number: p.number, title: p.title, branch: p.head.ref, sha: p.head.sha, url: p.html_url, user: p.user.login }));
 
 // one fetch shared by the steps of a poll that need it
 function once<T>(fn: () => Promise<T>): () => Promise<T> {
@@ -74,7 +70,7 @@ export class Watcher {
     const stored = (await this.host.store.get(this.key)) as WatchState | undefined;
     if (stored && stored.version !== STATE_VERSION) this.host.log(`sift watch ${this.options.repo}: stored state is from an older version, reseeding`);
     this.state = stored && stored.version === STATE_VERSION ? stored : initialState();
-    if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.gh.login();
+    if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.forge.login();
     if (this.state.paused) {
       this.host.status(`watch paused (${this.options.repo})`);
       return;
@@ -169,47 +165,35 @@ export class Watcher {
   }
 
   private async pollItems(now: number): Promise<{ changed: boolean; events: WatchEvent[]; rateWait: number }> {
-    const probe = await this.host.gh.api(`repos/${this.options.repo}/issues?state=all&sort=updated&direction=desc&per_page=1`, {
-      etag: this.state.etags.issues,
-    });
-    const rateWait = this.rateWait(probe.remaining, probe.reset, now);
-    if (probe.status === 304) return { changed: false, events: [], rateWait };
     const stamp = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    // the seed window is fixed before the first read so the read and the cursor agree
     if (!this.state.seeded) {
       this.state.seededAt = stamp(now);
       this.state.cursor = stamp(now - this.options.seedWindowMs);
     }
-    const since = this.state.cursor;
-    const cursor = stamp(now);
-    const raw = await this.host.gh.pages<RawItem>(`repos/${this.options.repo}/issues?state=all&sort=updated&direction=asc&since=${since}`, ITEM_JQ);
-    const fresh = Object.fromEntries(raw.map((r) => [String(r.n), toItem(r)]));
+    const read = await this.host.forge.items(this.options.repo, this.state.cursor, this.state.etags.issues);
+    const rateWait = this.rateWait(read.rate, now);
+    if (!read.changed) return { changed: false, events: [], rateWait };
+    const fresh = Object.fromEntries(read.value.map((i) => [String(i.number), toItem(i)]));
     const events = this.state.seeded ? diffItems(this.state.items, fresh, now, this.state.seededAt) : [];
     this.state.items = { ...this.state.items, ...fresh };
-    this.state.cursor = cursor;
-    this.state.etags.issues = probe.etag;
+    this.state.cursor = stamp(now);
+    this.state.etags.issues = read.token;
     return { changed: true, events, rateWait };
   }
 
   private async pollRuns(now: number): Promise<{ changed: boolean; events: WatchEvent[]; rateWait: number }> {
-    let probe;
-    try {
-      probe = await this.host.gh.api(`repos/${this.options.repo}/actions/runs?per_page=30`, { etag: this.state.etags.runs });
-    } catch (error) {
-      // a repo without actions answers 404 or 403; that is not a failure
-      if (error instanceof GhError && /http 40[34]/.test(error.message)) return { changed: false, events: [], rateWait: 0 };
-      throw error;
-    }
-    const rateWait = this.rateWait(probe.remaining, probe.reset, now);
-    if (probe.status === 304) return { changed: false, events: [], rateWait };
-    const parsed = JSON.parse(probe.body || '{}') as { workflow_runs?: Parameters<typeof toRuns>[0] };
-    const fresh = toRuns(parsed.workflow_runs ?? []);
+    const read = await this.host.forge.runs(this.options.repo, this.state.etags.runs);
+    const rateWait = this.rateWait(read.rate, now);
+    if (!read.changed) return { changed: false, events: [], rateWait };
+    const fresh = toRuns(read.value);
     const events = this.state.seeded ? diffRuns(this.state.runs, fresh, now) : [];
     this.state.runs = trimRuns({ ...this.state.runs, ...fresh });
-    this.state.etags.runs = probe.etag;
+    this.state.etags.runs = read.token;
     return { changed: events.length > 0, events, rateWait };
   }
 
-  private rateWait(remaining: number | undefined, reset: number | undefined, now: number): number {
+  private rateWait({ remaining, reset }: Rate, now: number): number {
     if (remaining === undefined || remaining >= this.options.rateFloor) return 0;
     const wait = reset ? reset * 1000 - now + 5000 : this.options.maxIntervalMs;
     this.host.log(`sift watch ${this.options.repo}: ${remaining} api calls left, waiting ${Math.round(wait / 1000)}s`);
@@ -219,11 +203,11 @@ export class Watcher {
   // the open pr heads, fetched conditionally so an unchanged list costs nothing. a 200 carries every head to seed as pending
   private async pollPulls(now: number): Promise<{ pulls?: Pull[]; rateWait: number }> {
     if (this.options.rules.ci === 'none') return { rateWait: 0 };
-    const probe = await this.host.gh.api(`repos/${this.options.repo}/pulls?state=open&per_page=100`, { etag: this.state.etags.pulls });
-    const rateWait = this.rateWait(probe.remaining, probe.reset, now);
-    if (probe.status === 304) return { rateWait };
-    this.state.etags.pulls = probe.etag;
-    return { pulls: toPulls(JSON.parse(probe.body || '[]') as RawPull[]), rateWait };
+    const read = await this.host.forge.pulls(this.options.repo, this.state.etags.pulls);
+    const rateWait = this.rateWait(read.rate, now);
+    if (!read.changed) return { rateWait };
+    this.state.etags.pulls = read.token;
+    return { pulls: read.value, rateWait };
   }
 
   private async handle(events: WatchEvent[], fresh?: Pull[]): Promise<void> {
@@ -359,6 +343,7 @@ export class Watcher {
       changes: [`ci settled ${verdict.conclusion}`],
       at,
       conclusion: verdict.conclusion,
+      ok: verdict.conclusion === 'success',
       branch: pr.branch,
       settled: true,
       isNew: true,
@@ -391,18 +376,13 @@ export class Watcher {
   }
 
   private async openPulls(): Promise<Pull[]> {
-    return toPulls(await this.host.gh.json<RawPull[]>(`repos/${this.options.repo}/pulls?state=open&per_page=100`));
+    const read = await this.host.forge.pulls(this.options.repo);
+    return read.changed ? read.value : [];
   }
 
   private async settle(sha: string): Promise<{ verdict: ReturnType<typeof settleChecks>; pending: string[]; total: number }> {
-    const repo = this.options.repo;
-    const [checks, status] = await Promise.all([
-      this.host.gh.json<{ check_runs: CheckRun[] }>(`repos/${repo}/commits/${sha}/check-runs?per_page=100`),
-      this.host.gh.json<{ statuses: CommitStatus[] }>(`repos/${repo}/commits/${sha}/status`),
-    ]);
-    const runs = checks.check_runs ?? [];
-    const statuses = status.statuses ?? [];
-    return { verdict: settleChecks(runs, statuses), ...pendingChecks(runs, statuses) };
+    const checks = await this.host.forge.checks(this.options.repo, sha);
+    return { verdict: settleChecks(checks), ...pendingChecks(checks) };
   }
 
   // mechanical findings of the issue pack on a fresh issue: labels, template, parent, milestone. no judge, no cost beyond the fetch
@@ -410,7 +390,7 @@ export class Watcher {
     const pack = this.host.issuePack;
     if (!pack || e.number === undefined) return [];
     try {
-      const subject = await issueSubject(this.host.gh, this.options.repo, e.number, this.host.config);
+      const subject = await issueSubject(this.host.forge, this.options.repo, e.number, this.host.config);
       return runChecks(pack, subject, this.host.config).filter((f) => f.severity !== 'info');
     } catch (error) {
       this.host.log(`sift watch ${this.options.repo}: could not check issue #${e.number} (${error instanceof Error ? error.message : String(error)})`);
@@ -446,26 +426,20 @@ export class Watcher {
   // enough of the item for the triage pack: body, labels, the newest comment or review
   private async detail(e: WatchEvent): Promise<EventDetail> {
     if (e.kind === 'ci' || e.number === undefined) return {};
+    const { forge } = this.host;
     const repo = this.options.repo;
-    const item = await this.host.gh.json<{ body: string | null; labels: { name: string }[] }>(`repos/${repo}/issues/${e.number}`);
-    const detail: EventDetail = { body: item.body ?? '', labels: item.labels.map((l) => l.name) };
+    const item = await forge.issue(repo, e.number);
+    const detail: EventDetail = { body: item.body, labels: item.labels };
     if (e.changes.some((c) => c.startsWith('comments'))) {
-      const comments = await this.host.gh.json<{ user: { login: string }; body: string }[]>(
-        `repos/${repo}/issues/${e.number}/comments?per_page=1&direction=desc&sort=created`,
-      );
-      const c = comments[0];
-      if (c) detail.latestComment = { by: c.user.login, text: c.body };
+      const c = (await forge.comments(repo, e.kind, e.number, 1))[0];
+      if (c) detail.latestComment = { by: c.author.login, text: c.body };
     }
     if (e.kind === 'pr' && e.changes.some((c) => c.startsWith('activity'))) {
-      const reviews = await this.host.gh.json<{ user: { login: string }; state: string; body: string }[]>(`repos/${repo}/pulls/${e.number}/reviews?per_page=100`);
-      const r = reviews[reviews.length - 1];
-      if (r) detail.latestReview = { by: r.user.login, state: r.state, text: r.body };
+      const r = (await forge.reviews(repo, e.number, 1))[0];
+      if (r) detail.latestReview = { by: r.author.login, state: r.state, text: r.body };
       // a review made of inline comments alone has an empty body, the comments carry the ask
-      const inline = await this.host.gh.json<{ user: { login: string }; path: string; body: string }[]>(
-        `repos/${repo}/pulls/${e.number}/comments?per_page=1&direction=desc&sort=created`,
-      );
-      const c = inline[0];
-      if (c) detail.latestReviewComment = { by: c.user.login, path: c.path, text: c.body };
+      const c = (await forge.reviewComments(repo, e.number, 1))[0];
+      if (c) detail.latestReviewComment = { by: c.author.login, path: c.path, text: c.body };
     }
     return detail;
   }

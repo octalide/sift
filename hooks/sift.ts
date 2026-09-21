@@ -1,8 +1,10 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
-import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
+import { extractors, gateOutbound, outboundOf } from '../src/gate/outbound.ts';
+import type { Forge } from '../src/forge/forge.ts';
+import { localGit, type Git } from '../src/forge/git.ts';
+import { GitHubForge } from '../src/forge/github.ts';
 import { CONFIG_PATH, configLayers, defaultTarget, globalConfigPath, resolveConfig, type RepoConfig } from '../src/github/config.ts';
-import { Gh } from '../src/github/gh.ts';
 import { commitSubject, issueSubject, prSubject, releaseSubject, rulesSubject, textSubject } from '../src/github/subjects.ts';
 import { localSource, remoteSource } from '../src/github/source.ts';
 import { indexTree, treeSubject } from '../src/locate/tree.ts';
@@ -96,7 +98,8 @@ type Runtime = {
   packs: Record<string, Pack>;
   repo?: string;
   root?: string;
-  gh: Gh;
+  forge: Forge;
+  git: Git;
   watcher?: Watcher;
   // builds and starts the watcher; returns the reason when it cannot
   startWatch: () => Promise<string | undefined>;
@@ -164,41 +167,41 @@ export const register: Register = (on, rawOptions) => {
     if (!pack) throw new Error(`unknown pack ${packName} (have: ${Object.keys(rt.packs).join(', ')})`);
     const repo = opts.repo ?? rt.repo;
     const needRepo = () => {
-      if (!repo) throw new Error('no repository: pass repo as owner/name or run inside a checkout with a GitHub remote');
+      if (!repo) throw new Error(`no repository: pass repo as the ${rt.forge.name} path or run inside a checkout with a ${rt.forge.name} remote`);
       return repo;
     };
     const number = () => Number(ref.replace(/^#/, ''));
-    const fs = { read: (p: string) => rt.gh.git(['show', `HEAD:${p}`]).catch(() => readFile(p)), exists: (p: string) => existsFile(p) };
+    const fs = { read: (p: string) => rt.git(['show', `HEAD:${p}`]).catch(() => readFile(p)), exists: (p: string) => existsFile(p) };
     switch (pack.subject) {
       case 'issue':
-        return issueSubject(rt.gh, needRepo(), number(), rt.config);
+        return issueSubject(rt.forge, needRepo(), number(), rt.config);
       case 'pr':
-        return prSubject(rt.gh, needRepo(), number(), rt.config);
+        return prSubject(rt.forge, needRepo(), number(), rt.config);
       case 'commit':
-        return commitSubject(rt.gh, ref || 'HEAD', rt.config);
+        return commitSubject(rt.git, ref || 'HEAD', rt.config);
       case 'release': {
-        // the checkout serves its own repo; any other repo, or no checkout at all, is read from github
+        // the checkout serves its own repo; any other repo, or no checkout at all, is read from the forge
         const local = rt.repo !== undefined && (opts.repo === undefined || opts.repo === rt.repo);
         const source = local
-          ? localSource(rt.gh, opts.ref ?? 'HEAD', readFile, existsFile)
-          : remoteSource(rt.gh, needRepo(), opts.ref ?? defaultTarget(rt.config) ?? (await defaultBranch(rt.gh, needRepo())));
+          ? localSource(rt.git, opts.ref ?? 'HEAD', readFile, existsFile)
+          : remoteSource(rt.forge, needRepo(), opts.ref ?? defaultTarget(rt.config) ?? (await rt.forge.defaultBranch(needRepo())));
         const s = await releaseSubject(source, rt.config);
         if (ref && ref !== 'release') s.facts['proposed'] = ref;
         return s;
       }
       case 'rules': {
         const kind = /^#?\d+$/.test(ref) ? (opts.text === 'issue' ? 'issue' : 'pr') : /^[0-9a-f]{7,40}$|\.\./.test(ref) ? 'commit' : 'text';
-        return rulesSubject(rt.gh, repo, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config, fs.read, fs.exists);
+        return rulesSubject({ forge: rt.forge, git: rt.git, repo, read: fs.read, exists: fs.exists }, { kind, ref: kind === 'text' ? (opts.text ?? ref) : ref }, rt.config);
       }
       case 'tree': {
         // an issue number with a repo is its title and body, anything else is the text itself
         const isIssue = /^#?\d+$/.test(ref) && opts.text === undefined && repo !== undefined;
-        const issue = isIssue ? await rt.gh.json<{ title: string; body: string | null }>(`repos/${repo}/issues/${number()}`) : undefined;
-        const text = issue ? `${issue.title}\n\n${issue.body ?? ''}` : (opts.text ?? ref);
+        const issue = isIssue ? await rt.forge.issue(repo, number()) : undefined;
+        const text = issue ? `${issue.title}\n\n${issue.body}` : (opts.text ?? ref);
         if (!rt.root) throw new Error('no checkout: the tree subject indexes the working directory');
         const root = rt.root;
         const index = await indexTree({
-          list: async () => (await rt.gh.git(['ls-files', '-z'])).split('\0'),
+          list: async () => (await rt.git(['ls-files', '-z'])).split('\0'),
           size: async (p) => (await statFile(`${root}/${p}`)).size,
           read: (p) => readFile(`${root}/${p}`),
         });
@@ -215,10 +218,6 @@ export const register: Register = (on, rawOptions) => {
   let statFile: (p: string) => Promise<{ size: number }> = async () => ({ size: 0 });
 
   type GradeOptions = { repo?: string; text?: string; ref?: string; top?: number };
-
-  async function defaultBranch(gh: Gh, repo: string): Promise<string> {
-    return (await gh.json<{ default_branch: string }>(`repos/${repo}`)).default_branch;
-  }
 
   async function grade(rt: Runtime, packName: string, ref: string, opts?: GradeOptions): Promise<Report> {
     const pack = rt.packs[packName];
@@ -258,8 +257,10 @@ export const register: Register = (on, rawOptions) => {
     const judge = new LoggedJudge(inner, (d) => log.push({ ...d, module: 'judge', action: 'ask', shadow: false }));
     // the main working tree, never a worktree the session started in and may later remove
     const spawnCwd = async () => (await $.session.repo())?.root ?? (await $.session.cwd());
-    const gh = new Gh((argv, init) => $.process.run(argv, init), spawnCwd);
-    const repoInfo = await gh.repoInfo();
+    const run = (argv: readonly string[], init?: Parameters<typeof $.process.run>[1]) => $.process.run(argv, init);
+    const forge = new GitHubForge(run, spawnCwd);
+    const git = localGit(run, spawnCwd);
+    const checkout = await forge.checkout();
     const root = await spawnCwd();
     const globalPath = globalConfigPath({ XDG_CONFIG_HOME: await $.env.get('XDG_CONFIG_HOME'), HOME: await $.env.get('HOME') });
     const config = resolveConfig(
@@ -268,7 +269,7 @@ export const register: Register = (on, rawOptions) => {
         global: await readJson($, globalPath),
         repo: await readJson($, `${root}/${CONFIG_PATH}`),
       }),
-      repoInfo?.defaultBranch,
+      checkout?.defaultBranch,
     );
     const packs = await loadPacks({ read: (p) => $.fs.read(p), exists: (p) => $.fs.exists(p), list: (p) => $.fs.list(p) }, root);
     const startWatch = async (): Promise<string | undefined> => {
@@ -276,11 +277,11 @@ export const register: Register = (on, rawOptions) => {
       if (rt.watcher) return undefined;
       const repo = options.watchRepo || rt.repo;
       const triagePack = rt.packs['triage'];
-      if (!repo) return 'no repository to watch (set watchRepo or run in a checkout with a GitHub remote)';
+      if (!repo) return `no repository to watch (set watchRepo or run in a checkout with a ${forge.name} remote)`;
       if (!triagePack) return 'triage pack missing';
       const watcher = new Watcher(
         {
-          gh,
+          forge,
           store,
           judge,
           pack: triagePack,
@@ -322,7 +323,7 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    runtime = { judge, log, config, packs, repo: repoInfo?.nameWithOwner, root, gh, startWatch, sessionId };
+    runtime = { judge, log, config, packs, repo: checkout?.repo, root, forge, git, startWatch, sessionId };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -335,7 +336,7 @@ export const register: Register = (on, rawOptions) => {
           properties: {
             pack: { type: 'string', description: 'pack name' },
             subject: { type: 'string', description: 'issue or PR number, commit or range, "release", or a version' },
-            repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from GitHub' },
+            repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from the code host' },
             text: { type: 'string', description: 'free text subject for the rules and locate packs, or "issue" to grade an issue number against the rules' },
             ref: { type: 'string', description: 'release pack: the branch or sha the release is cut from. Defaults to HEAD in a checkout, else the configured PR target branch, else the default branch' },
             top: { type: 'number', description: 'locate pack: how many paths to list per level, default 20' },
@@ -428,11 +429,11 @@ export const register: Register = (on, rawOptions) => {
     if (e.tool.startsWith('mcp__sift__')) return next(e);
     const rt = runtime;
     if (!rt) return next(e);
-    const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
+    const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, extractors(rt.forge)) : undefined;
     if (outbound) {
       const rulesPack = rt.packs['rules'];
       const artifact = outbound.kind && outbound.action ? { kind: outbound.kind, action: outbound.action } : undefined;
-      const subject = rulesPack ? await rulesSubject(rt.gh, rt.repo, { kind: 'text', ref: outbound.text, artifact }, rt.config, readFile, existsFile) : undefined;
+      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, git: rt.git, repo: rt.repo, read: readFile, exists: existsFile }, { kind: 'text', ref: outbound.text, artifact }, rt.config) : undefined;
       if (rulesPack && subject) {
         const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, rt.config);
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });

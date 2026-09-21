@@ -69,7 +69,7 @@ export const CHECKS: Record<string, Check> = {
     const needs = c.issues.childLabels.some((l) => labels.includes(l));
     return needs && s.facts['parent'] === undefined ? [fail('issue.parent', 'labeled as a child but has no parent sub-issue link')] : [];
   },
-  'pr.linked': (s, c) => (c.prs.linkIssue && ((s.facts['linked'] as number[]) ?? []).length === 0 ? [fail('pr.linked', 'no Closes #n in the body')] : []),
+  'pr.linked': (s, c) => (c.prs.linkIssue && ((s.facts['linked'] as number[]) ?? []).length === 0 ? [fail('pr.linked', 'no linked issue: none related by the forge, no Closes #n in the body, no issue number in the branch name')] : []),
   'pr.target': (s, c) => {
     const targets = c.prs.targets;
     if (targets === undefined) return [];

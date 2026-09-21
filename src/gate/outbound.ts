@@ -2,16 +2,16 @@ import type { Judge } from '../judge/types.ts';
 import { runPack } from '../packs/run.ts';
 import type { Pack, Report, Subject } from '../packs/types.ts';
 import type { RepoConfig } from '../github/config.ts';
-import type { GhAction, GhArtifact } from '../github/subjects.ts';
+import type { Forge, ForgeAction, ForgeArtifact } from '../forge/forge.ts';
 
 // text a tool call is about to send somewhere people read, the hard limit of that channel, and which artifact it is;
 // denied names the reason the text could not be obtained at all, which the gate refuses without a judge call
-export type Outbound = { channel: string; text: string; maxChars?: number; kind?: GhArtifact; action?: GhAction; denied?: string };
+export type Outbound = { channel: string; text: string; maxChars?: number; kind?: ForgeArtifact; action?: ForgeAction; denied?: string };
 
 // what a call carries: the text itself, or the file it will be read from
-export type GhBody = { text: string } | { file: string };
-type Extracted = Pick<Outbound, 'kind' | 'action'> & GhBody;
-type Extractor = { channel: string; maxChars?: number; extract: (tool: string, input: Record<string, unknown>) => Extracted | undefined };
+export type Body = { text: string } | { file: string };
+type Extracted = Pick<Outbound, 'kind' | 'action'> & Body;
+export type Extractor = { channel: string; maxChars?: number; extract: (tool: string, input: Record<string, unknown>) => Extracted | undefined };
 export type ReadText = (path: string) => Promise<string>;
 
 const DISCORD_LIMIT = 2000;
@@ -25,75 +25,37 @@ const DISCORD_TOOLS: Record<string, string[]> = {
   mcp__discord__send_dm_embed: ['description', 'title'],
 };
 
-const GH_WRITE = /^\s*gh\s+(pr|issue|release)\s+(create|comment|edit)\b/;
-
-// the value after --body or -b: a quoted word, or a heredoc inside $(cat <<'EOF' ... EOF); else the path after --body-file or -F
-export function ghBody(command: string): GhBody | undefined {
-  const flag = /(?:^|\s)(?:--body|-b)(?:=|\s+)/.exec(command);
-  if (flag) {
-    const rest = command.slice(flag.index + flag[0].length);
-    const heredoc = /^"?\$\(\s*cat\s+<<-?\s*['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\s*\1\s*\n?\s*\)/.exec(rest);
-    if (heredoc) return { text: heredoc[2]! };
-    const text = shellWord(rest);
-    return text === undefined ? undefined : { text };
-  }
-  const fileFlag = /(?:^|\s)(?:--body-file|-F)(?:=|\s+)/.exec(command);
-  if (!fileFlag) return undefined;
-  const file = shellWord(command.slice(fileFlag.index + fileFlag[0].length));
-  return file === undefined ? undefined : { file };
-}
-
-// one shell word: single quotes verbatim, double quotes with backslash escapes, else up to whitespace
-export function shellWord(text: string): string | undefined {
-  if (text.length === 0) return undefined;
-  const q = text[0];
-  if (q === "'") {
-    const end = text.indexOf("'", 1);
-    return end < 0 ? text.slice(1) : text.slice(1, end);
-  }
-  if (q === '"') {
-    let out = '';
-    for (let i = 1; i < text.length; i++) {
-      const c = text[i]!;
-      if (c === '\\' && i + 1 < text.length && '$`"\\\n'.includes(text[i + 1]!)) {
-        out += text[++i];
-        continue;
-      }
-      if (c === '"') return out;
-      out += c;
-    }
-    return out;
-  }
-  return /^\S+/.exec(text)?.[0];
-}
-
-export const EXTRACTORS: Extractor[] = [
-  {
-    channel: 'discord',
-    maxChars: DISCORD_LIMIT,
-    extract: (tool, input) => {
-      const fields = DISCORD_TOOLS[tool];
-      if (!fields) return undefined;
-      const parts = fields.map((f) => input[f]).filter((v): v is string => typeof v === 'string' && v.length > 0);
-      return parts.length > 0 ? { text: parts.join('\n') } : undefined;
-    },
+export const DISCORD: Extractor = {
+  channel: 'discord',
+  maxChars: DISCORD_LIMIT,
+  extract: (tool, input) => {
+    const fields = DISCORD_TOOLS[tool];
+    if (!fields) return undefined;
+    const parts = fields.map((f) => input[f]).filter((v): v is string => typeof v === 'string' && v.length > 0);
+    return parts.length > 0 ? { text: parts.join('\n') } : undefined;
   },
-  {
-    channel: 'github',
+};
+
+// a bash command that writes an artifact through the forge's cli; the forge reads its own flags
+export function forgeExtractor(forge: Forge): Extractor {
+  return {
+    channel: forge.name.toLowerCase(),
     extract: (tool, input) => {
       if (tool !== 'Bash') return undefined;
-      const command = String(input['command'] ?? '');
-      const m = GH_WRITE.exec(command);
-      if (!m) return undefined;
-      const body = ghBody(command);
-      return body === undefined ? undefined : { ...body, kind: m[1] as GhArtifact, action: m[2] as GhAction };
+      const write = forge.write(String(input['command'] ?? ''));
+      if (!write || write.body === undefined) return undefined;
+      return { ...write.body, kind: write.kind, action: write.action };
     },
-  },
-];
+  };
+}
+
+export function extractors(forge?: Forge): Extractor[] {
+  return forge ? [DISCORD, forgeExtractor(forge)] : [DISCORD];
+}
 
 // a body named by file is read here so the gate judges exactly what the command will send
-export async function outboundOf(tool: string, input: Record<string, unknown>, read: ReadText, extractors = EXTRACTORS): Promise<Outbound | undefined> {
-  for (const x of extractors) {
+export async function outboundOf(tool: string, input: Record<string, unknown>, read: ReadText, through: Extractor[] = extractors()): Promise<Outbound | undefined> {
+  for (const x of through) {
     const got = x.extract(tool, input);
     if (got === undefined) continue;
     const { kind, action } = got;

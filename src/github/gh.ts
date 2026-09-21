@@ -1,7 +1,4 @@
-export type RunLike = (
-  argv: readonly string[],
-  init?: { cwd?: string; env?: Record<string, string>; stdin?: string; timeoutMs?: number },
-) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
+import type { CwdLike, RunLike } from '../process.ts';
 
 export type ApiResponse = {
   status: number;
@@ -19,9 +16,6 @@ export class GhError extends Error {
     super(message);
   }
 }
-
-// where a spawn runs, resolved per call so a directory removed after session start is never reused
-export type CwdLike = () => Promise<string | undefined>;
 
 // gh api over a process runner; conditional requests answer 304 with an empty body
 export class Gh {
@@ -71,12 +65,6 @@ export class Gh {
 
   async text(path: string, accept: string): Promise<string> {
     return (await this.api(path, { accept })).body;
-  }
-
-  async git(args: string[]): Promise<string> {
-    const result = await this.run(['git', ...args], { cwd: await this.cwd(), timeoutMs: 60_000 });
-    if (result.exitCode !== 0) throw new GhError(`git ${args.join(' ')}: ${result.stderr.trim()}`, result.exitCode);
-    return result.stdout;
   }
 
   async login(): Promise<string | undefined> {

@@ -1,12 +1,13 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
+import type { Check, Forge, ForgeAction, ForgeArtifact } from '../forge/forge.ts';
+import type { Git } from '../forge/git.ts';
 import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, type Bump, type ParsedCommit } from './commits.ts';
 import { compareVersions, parseTag, SEMVER_PATTERN, type Version } from './version.ts';
 import { manifestChanges, manifestFormat, type ManifestChange } from './manifest.ts';
 import { lineDiff } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
-import type { Gh } from './gh.ts';
 
 const BODY_CAP = 20_000;
 const DIFF_CAP = 60_000;
@@ -14,32 +15,6 @@ const COMMENT_CAP = 6_000;
 
 import type { ReadLike, ExistsLike } from './source.ts';
 export type { ReadLike, ExistsLike } from './source.ts';
-
-type GhUser = { login: string; type?: string };
-type GhLabel = { name: string };
-type GhIssue = {
-  number: number;
-  title: string;
-  body: string | null;
-  state: string;
-  user: GhUser;
-  labels: GhLabel[];
-  milestone: { title: string } | null;
-  html_url: string;
-  pull_request?: unknown;
-  author_association?: string;
-};
-type GhComment = { user: GhUser; body: string; created_at: string };
-type GhPull = GhIssue & {
-  base: { ref: string };
-  head: { ref: string; sha: string };
-  draft: boolean;
-  merged: boolean;
-  additions: number;
-  deletions: number;
-  changed_files: number;
-};
-type GhCheck = { name: string; status: string; conclusion: string | null };
 
 export function sectionsOf(markdown: string): Record<string, string> {
   const sections: Record<string, string> = {};
@@ -62,28 +37,28 @@ export function linkedIssues(text: string): number[] {
   return [...out];
 }
 
-async function comments(gh: Gh, repo: string, n: number, last = 5): Promise<GhComment[]> {
-  const all = await gh.json<GhComment[]>(`repos/${repo}/issues/${n}/comments?per_page=100`);
-  return all.slice(-last);
+// the issue a work branch is named after: feat/52, fix/52-short-title, 52-title
+export function branchIssue(branch: string): number | undefined {
+  const m = /(?:^|\/)(\d+)(?:[-_]|$)/.exec(branch);
+  return m ? Number(m[1]) : undefined;
 }
 
-export async function issueSubject(gh: Gh, repo: string, n: number, config: RepoConfig): Promise<Subject> {
-  const issue = await gh.json<GhIssue>(`repos/${repo}/issues/${n}`);
-  const [recent, open] = await Promise.all([
-    comments(gh, repo, n),
-    gh.json<GhIssue[]>(`repos/${repo}/issues?state=open&per_page=100`),
-  ]);
-  const body = issue.body ?? '';
+// the forge's own relation first, then closing keywords in the body, then an issue number in the branch name
+export function linkedOf(relation: number[], body: string, branch: string): number[] {
+  if (relation.length > 0) return relation;
+  const keywords = linkedIssues(body);
+  if (keywords.length > 0) return keywords;
+  const fromBranch = branchIssue(branch);
+  return fromBranch === undefined ? [] : [fromBranch];
+}
+
+export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig): Promise<Subject> {
+  const issue = await forge.issue(repo, n);
+  const [recent, open, parent] = await Promise.all([forge.comments(repo, 'issue', n, 5), forge.openIssues(repo), forge.parent(repo, n)]);
+  const body = issue.body;
   const sections = sectionsOf(body);
-  const labels = issue.labels.map((l) => l.name);
-  const others = open.filter((i) => i.number !== n && !i.pull_request);
-  let parent: number | undefined;
-  try {
-    const p = await gh.json<{ number: number } | null>(`repos/${repo}/issues/${n}/parent`);
-    parent = p?.number;
-  } catch {
-    parent = undefined;
-  }
+  const labels = issue.labels;
+  const others = open.filter((i) => i.number !== n);
   return {
     kind: 'issue',
     ref: `${repo}#${n}`,
@@ -93,11 +68,11 @@ export async function issueSubject(gh: Gh, repo: string, n: number, config: Repo
       title: issue.title,
       body: truncate(body, BODY_CAP),
       labels,
-      milestone: issue.milestone?.title ?? null,
-      author: issue.user.login,
-      association: issue.author_association ?? null,
+      milestone: issue.milestone ?? null,
+      author: issue.author.login,
+      association: issue.association ?? null,
       sections: Object.keys(sections),
-      recent_comments: recent.map((c) => ({ by: c.user.login, text: truncate(c.body, COMMENT_CAP) })),
+      recent_comments: recent.map((c) => ({ by: c.author.login, text: truncate(c.body, COMMENT_CAP) })),
       conventions: {
         template_sections: config.issues.templateSections,
         required_label_groups: config.issues.requiredLabelGroups,
@@ -105,7 +80,7 @@ export async function issueSubject(gh: Gh, repo: string, n: number, config: Repo
     },
     facts: {
       labels,
-      milestone: issue.milestone?.title,
+      milestone: issue.milestone,
       sections,
       parent,
       is_new: recent.length === 0,
@@ -118,26 +93,22 @@ export async function issueSubject(gh: Gh, repo: string, n: number, config: Repo
   };
 }
 
-export async function prSubject(gh: Gh, repo: string, n: number, config: RepoConfig): Promise<Subject> {
-  const pr = await gh.json<GhPull>(`repos/${repo}/pulls/${n}`);
-  const body = pr.body ?? '';
-  const linked = linkedIssues(body);
-  const [diff, recent, checks, log] = await Promise.all([
-    gh.text(`repos/${repo}/pulls/${n}`, 'application/vnd.github.diff').catch(() => ''),
-    comments(gh, repo, n),
-    gh
-      .json<{ check_runs: GhCheck[] }>(`repos/${repo}/commits/${pr.head.sha}/check-runs?per_page=100`)
-      .then((r) => r.check_runs)
-      .catch(() => [] as GhCheck[]),
-    gh
-      .json<{ sha: string; parents: { sha: string }[]; commit: { message: string } }[]>(`repos/${repo}/pulls/${n}/commits?per_page=100`)
-      .catch(() => []),
+export async function prSubject(forge: Forge, repo: string, n: number, config: RepoConfig): Promise<Subject> {
+  const pr = await forge.pull(repo, n);
+  const body = pr.body;
+  const [diff, recent, checks, log, relation] = await Promise.all([
+    forge.diff(repo, n).catch(() => ''),
+    forge.comments(repo, 'pr', n, 5),
+    forge.checks(repo, pr.head.sha).catch(() => [] as Check[]),
+    forge.pullCommits(repo, n).catch(() => []),
+    forge.closingIssues(repo, n).catch(() => [] as number[]),
   ]);
-  const issue = linked[0] ? await gh.json<GhIssue>(`repos/${repo}/issues/${linked[0]}`).catch(() => undefined) : undefined;
+  const linked = linkedOf(relation, body, pr.head.branch);
+  const issue = linked[0] ? await forge.issue(repo, linked[0]).catch(() => undefined) : undefined;
   // merge commits (a branch updated from its base) are history, not work the convention judges
-  const commits = log.filter((c) => c.parents.length < 2).map((c) => ({ sha: c.sha, message: c.commit.message }));
-  const failed = checks.filter((c) => c.status === 'completed' && c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
-  const pending = checks.filter((c) => c.status !== 'completed');
+  const commits = log.filter((c) => !c.merge).map((c) => ({ sha: c.sha, message: c.message }));
+  const failed = checks.filter((c) => c.done && !c.ok);
+  const pending = checks.filter((c) => !c.done);
   return {
     kind: 'pr',
     ref: `${repo}#${n}`,
@@ -146,21 +117,21 @@ export async function prSubject(gh: Gh, repo: string, n: number, config: RepoCon
       number: n,
       title: pr.title,
       body: truncate(body, BODY_CAP),
-      author: pr.user.login,
-      base: pr.base.ref,
-      head: pr.head.ref,
+      author: pr.author.login,
+      base: pr.base,
+      head: pr.head.branch,
       draft: pr.draft,
-      stats: { additions: pr.additions, deletions: pr.deletions, files: pr.changed_files },
-      linked_issue: issue ? { number: issue.number, title: issue.title, body: truncate(issue.body ?? '', BODY_CAP) } : null,
+      stats: pr.stats,
+      linked_issue: issue ? { number: issue.number, title: issue.title, body: truncate(issue.body, BODY_CAP) } : null,
       commits: commits.map((c) => c.message.split('\n')[0]),
       checks: { failed: failed.map((c) => c.name), pending: pending.map((c) => c.name), total: checks.length },
-      recent_comments: recent.map((c) => ({ by: c.user.login, text: truncate(c.body, COMMENT_CAP) })),
+      recent_comments: recent.map((c) => ({ by: c.author.login, text: truncate(c.body, COMMENT_CAP) })),
       diff: truncate(diff, DIFF_CAP, '\n[diff truncated]'),
     },
     facts: {
       linked,
-      base: pr.base.ref,
-      head: pr.head.ref,
+      base: pr.base,
+      head: pr.head.branch,
       sections: sectionsOf(body),
       checks_failed: failed.map((c) => c.name),
       checks_pending: pending.map((c) => c.name),
@@ -172,11 +143,11 @@ export async function prSubject(gh: Gh, repo: string, n: number, config: RepoCon
   };
 }
 
-export async function commitSubject(gh: Gh, range: string, config: RepoConfig): Promise<Subject> {
-  const raw = await gh.git(range.includes('..') ? ['log', LOG_FORMAT, '--no-merges', range] : ['log', LOG_FORMAT, '-1', range]);
+export async function commitSubject(git: Git, range: string, config: RepoConfig): Promise<Subject> {
+  const raw = await git(range.includes('..') ? ['log', LOG_FORMAT, '--no-merges', range] : ['log', LOG_FORMAT, '-1', range]);
   const commits = parseLog(raw, config.commits.format);
   const single = commits.length === 1 ? commits[0]! : undefined;
-  const diff = single ? truncate(await gh.git(['show', '--format=', '--stat', '-p', single.sha]).catch(() => ''), DIFF_CAP, '\n[diff truncated]') : undefined;
+  const diff = single ? truncate(await git(['show', '--format=', '--stat', '-p', single.sha]).catch(() => ''), DIFF_CAP, '\n[diff truncated]') : undefined;
   return {
     kind: 'commit',
     ref: range,
@@ -254,34 +225,30 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
   };
 }
 
-// the github artifact a body belongs to and what the call does to it
-export type GhArtifact = 'issue' | 'pr' | 'release';
-export type GhAction = 'create' | 'comment' | 'edit';
+export type { ForgeArtifact, ForgeAction } from '../forge/forge.ts';
 
-// free text the rules are read against, and when known, the github artifact it is about to become
-export type RulesTarget = { kind: 'pr' | 'issue' | 'commit'; ref: string } | { kind: 'text'; ref: string; artifact?: { kind: GhArtifact; action: GhAction } };
+// free text the rules are read against, and when known, the artifact it is about to become
+export type RulesTarget = { kind: 'pr' | 'issue' | 'commit'; ref: string } | { kind: 'text'; ref: string; artifact?: { kind: ForgeArtifact; action: ForgeAction } };
 
-const ARTIFACT_NOUN: Record<GhArtifact, string> = { issue: 'GitHub issue', pr: 'pull request', release: 'GitHub release' };
+// how an artifact is named when no forge is bound to name it
+const PLAIN_NOUNS: Record<ForgeArtifact, string> = { issue: 'issue', pr: 'pull request', release: 'release' };
 
 // what the text is, in the words the judge reads: "the body of a new GitHub issue"
-export function textAbout(artifact: { kind: GhArtifact; action: GhAction }): string {
-  const noun = ARTIFACT_NOUN[artifact.kind];
+export function textAbout(artifact: { kind: ForgeArtifact; action: ForgeAction }, nouns: Record<ForgeArtifact, string> = PLAIN_NOUNS): string {
+  const noun = nouns[artifact.kind];
   if (artifact.action === 'comment') return `a comment on a ${noun}`;
   if (artifact.action === 'edit') return `the edited ${artifact.kind === 'release' ? 'notes' : 'body'} of a ${noun}`;
   return `the ${artifact.kind === 'release' ? 'notes' : 'body'} of a new ${noun}`;
 }
 
-export async function rulesSubject(
-  gh: Gh | undefined,
-  repo: string | undefined,
-  target: RulesTarget,
-  config: RepoConfig,
-  read: ReadLike,
-  exists: ExistsLike,
-): Promise<Subject> {
+// the checkout the rules are read from, and the forge behind it when the session has one
+export type RulesHost = { forge?: Forge; git?: Git; repo?: string; read: ReadLike; exists: ExistsLike };
+
+export async function rulesSubject(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject> {
+  const { forge, git, repo, read, exists } = host;
   const rules: { source: string; text: string }[] = [];
   for (const doc of config.rules.docs) {
-    const text = await ruleDoc(doc, gh, read, exists);
+    const text = await ruleDoc(doc, forge, read, exists);
     if (text === undefined) continue;
     for (const rule of ruleParagraphs(text)) rules.push({ source: doc, text: rule });
   }
@@ -289,20 +256,20 @@ export async function rulesSubject(
   rules.splice(config.rules.maxRules);
   let subject: Record<string, unknown> = { kind: target.kind, ref: target.ref };
   let about: string | undefined;
-  if (gh && repo && target.kind === 'pr') {
-    const s = await prSubject(gh, repo, Number(target.ref.replace(/^#/, '')), config);
+  if (forge && repo && target.kind === 'pr') {
+    const s = await prSubject(forge, repo, Number(target.ref.replace(/^#/, '')), config);
     subject = { kind: 'pr', ...s.state };
     about = `pull request ${target.ref}`;
-  } else if (gh && repo && target.kind === 'issue') {
-    const s = await issueSubject(gh, repo, Number(target.ref.replace(/^#/, '')), config);
+  } else if (forge && repo && target.kind === 'issue') {
+    const s = await issueSubject(forge, repo, Number(target.ref.replace(/^#/, '')), config);
     subject = { kind: 'issue', ...s.state };
     about = `issue ${target.ref}`;
-  } else if (gh && target.kind === 'commit') {
-    const s = await commitSubject(gh, target.ref, config);
+  } else if (git && target.kind === 'commit') {
+    const s = await commitSubject(git, target.ref, config);
     subject = { kind: 'commit', ...s.state };
     about = `commit ${target.ref}`;
   } else if (target.kind === 'text') {
-    about = target.artifact ? textAbout(target.artifact) : undefined;
+    about = target.artifact ? textAbout(target.artifact, forge?.nouns) : undefined;
     subject = { kind: 'text', ...(target.artifact ? { artifact: target.artifact.kind, action: target.artifact.action, about } : {}), text: truncate(target.ref, BODY_CAP) };
   }
   return {
@@ -325,13 +292,13 @@ export function textSubject(text: string, context?: string): Subject {
 }
 
 // bullets and short paragraphs that read as rules, headings kept as context prefix
-// a rule doc is a path in the checkout or owner/repo:path[@ref] read from github; undefined when absent
-export async function ruleDoc(doc: string, gh: Gh | undefined, read: ReadLike, exists: ExistsLike): Promise<string | undefined> {
-  const remote = /^([\w.-]+\/[\w.-]+):([^@]+?)(?:@(.+))?$/.exec(doc);
+// a rule doc is a path in the checkout or repo:path[@ref] read from the forge; undefined when absent
+export async function ruleDoc(doc: string, forge: Forge | undefined, read: ReadLike, exists: ExistsLike): Promise<string | undefined> {
+  const remote = /^((?:[\w.-]+\/)+[\w.-]+):([^@]+?)(?:@(.+))?$/.exec(doc);
   if (!remote) return (await exists(doc)) ? read(doc) : undefined;
-  if (!gh) return undefined;
+  if (!forge) return undefined;
   const [, repo, path, ref] = remote;
-  return gh.text(`repos/${repo}/contents/${path}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`, 'application/vnd.github.raw+json').catch(() => undefined);
+  return forge.file(repo!, path!, ref);
 }
 
 // a markdown table row is one rule, its cells named by the header: "5.x: a; 6.0.0: b"

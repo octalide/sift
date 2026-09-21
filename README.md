@@ -125,6 +125,8 @@ A release grade reads the checkout when the session is inside the repo being gra
 "issues": { "requiredLabelGroups": [["bug", "enhancement", "documentation"]], "templateSections": ["Problem", "Fix"], "childLabels": ["task"], "milestone": false }
 ```
 
+`prs.linkIssue` requires a pull request to name its issue. The issue is found from the code host's own relation first (the issues a pull request closes), then from a closing keyword in the body (`Closes #N`), then from an issue number in the branch name (`feat/52`), and the first found is the one the judge reads the diff against. `prs.templateSections` works as `issues.templateSections` does.
+
 ### Conventions as regexes
 
 Every convention is a regex string with named groups. A preset stands for one of them: it expands to its regex when the config resolves, and an explicit pattern beside a preset wins. Existing configs written with presets alone resolve exactly as before.
