@@ -15,6 +15,7 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     openIssues: async () => [],
     parent: async () => undefined,
     comments: async () => [],
+    maintains: (a) => a === 'OWNER' || a === 'MEMBER' || a === 'COLLABORATOR',
     pull: async (_r, n) => pull(n),
     diff: async () => '',
     pullCommits: async () => [],

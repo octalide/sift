@@ -27,7 +27,7 @@ type GhPull = GhIssue & {
   deletions: number;
   changed_files: number;
 };
-type GhComment = { user: GhUser; body: string; created_at: string };
+type GhComment = { user: GhUser; body: string | null; created_at: string; author_association?: string };
 type GhCommit = { sha: string; parents: { sha: string }[]; commit: { message: string } };
 type GhCheckRun = { id: number; name: string; status: string; conclusion: string | null };
 type GhJob = { id: number; run_id: number; head_sha: string; name: string; status: string; conclusion: string | null; html_url: string };
@@ -51,6 +51,9 @@ type GhEntry = { name: string; path: string; type: string };
 const RAW = 'application/vnd.github.raw+json';
 const COMMIT_JQ = '[.[] | {sha, parents, commit: {message: .commit.message}}]';
 const PASSING = new Set(['success', 'skipped', 'neutral']);
+// the associations that maintain a repository; contributor, first-timer and none do not
+const MAINTAINING = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const COMMENT_JQ = '[.[] | {user: {login: .user.login, type: .user.type}, body, created_at, author_association}]';
 
 // the slim record the items poll produces server side, so a page of 100 stays small
 export const ITEM_JQ = '[.[] | {n: .number, t: .title, s: .state, u: .user.login, ut: .user.type, bl: ((.body // "") | length), bp: ((.body // "")[0:400]), c: .comments, l: ([.labels[].name] | sort | join(",")), up: .updated_at, cr: .created_at, url: .html_url, pr: (.pull_request != null), m: (.pull_request.merged_at != null)}]';
@@ -91,6 +94,8 @@ export const GH_WRITES: ForgeWrite[] = [
 ];
 
 const user = (u: GhUser): ForgeUser => ({ login: u.login, bot: u.type === 'Bot' || u.login.endsWith('[bot]') });
+
+const comment = (c: GhComment): Comment => ({ author: user(c.user), body: c.body ?? '', createdAt: c.created_at, association: c.author_association });
 
 const commit = (c: GhCommit): Commit => ({ sha: c.sha, message: c.commit.message, merge: c.parents.length > 1 });
 
@@ -256,11 +261,15 @@ export class GitHubForge implements Forge {
     }
   }
 
-  // issue and pull request comments share one endpoint on github
+  // issue and pull request comments share one endpoint on github. it lists oldest first and takes no sort
+  // or direction, so the newest are the tail of every page
   async comments(repo: string, _kind: 'issue' | 'pr', number: number, last?: number): Promise<Comment[]> {
-    const page = last === undefined ? 'per_page=100' : `per_page=${last}&direction=desc&sort=created`;
-    const got = await this.gh.json<GhComment[]>(`repos/${repo}/issues/${number}/comments?${page}`);
-    return (last === undefined ? got : [...got].reverse()).map((c) => ({ author: user(c.user), body: c.body, createdAt: c.created_at }));
+    const all = await this.gh.pages<GhComment>(`repos/${repo}/issues/${number}/comments`, COMMENT_JQ);
+    return (last === undefined ? all : all.slice(Math.max(0, all.length - last))).map(comment);
+  }
+
+  maintains(association: string | undefined): boolean {
+    return association !== undefined && MAINTAINING.has(association);
   }
 
   async pull(repo: string, number: number): Promise<PullRequest> {

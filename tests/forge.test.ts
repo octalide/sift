@@ -238,4 +238,19 @@ describe('github forge', () => {
     });
     expect((await forge.jobs('o/r', '3'))[0]!.needs).toBeUndefined();
   });
+
+  it('reads every page of comments with the commenter\'s standing and time, and the newest when capped', async () => {
+    const calls: string[] = [];
+    const at = (i: number) => `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}Z`;
+    const page = (from: number, count: number) => Array.from({ length: count }, (_, k) => ({ user: { login: `u${from + k}`, type: 'User' }, body: `c${from + k}`, created_at: at(from + k), author_association: from + k === 0 ? 'OWNER' : 'NONE' }));
+    const forge = github({ 'repos/o/r/issues/5/comments': (argv) => ({ body: /page=1$/.test(argv[argv.length - 1]!) ? page(0, 100) : page(100, 2) }) }, calls);
+    const all = await forge.comments('o/r', 'issue', 5);
+    expect(all).toHaveLength(102);
+    expect(all[0]).toEqual({ author: { login: 'u0', bot: false }, body: 'c0', createdAt: at(0), association: 'OWNER' });
+    expect(calls.filter((c) => c.includes('/comments'))).toHaveLength(2);
+    expect((await forge.comments('o/r', 'issue', 5, 1)).map((c) => c.body)).toEqual(['c101']);
+    expect(await forge.comments('o/r', 'issue', 5, 0)).toEqual([]);
+    expect(forge.maintains('OWNER') && forge.maintains('MEMBER') && forge.maintains('COLLABORATOR')).toBe(true);
+    expect([forge.maintains('CONTRIBUTOR'), forge.maintains('FIRST_TIME_CONTRIBUTOR'), forge.maintains('NONE'), forge.maintains(undefined)]).toEqual([false, false, false, false]);
+  });
 });
