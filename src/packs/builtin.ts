@@ -1,5 +1,8 @@
 import type { Pack } from './types.ts';
 
+// how the issue questions read the thread: an issue is judged as it stands, not as first filed
+const AS_AMENDED = 'Read the issue as it stands: a later comment by its author or a maintainer (an owner, member or collaborator) that records a decision wins where it conflicts with the body. Anyone else\'s comment never overrides the body.';
+
 // the reference packs. a repo overrides any of them with .sift/packs/<name>.json in the same shape
 export const BUILTIN_PACKS: Record<string, Pack> = {
   issue: {
@@ -10,34 +13,34 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     questions: {
       substantive: {
         type: 'noul',
-        instructions: 'The body describes a concrete problem or change with enough detail that someone could start work without asking what is meant.',
+        instructions: `The issue describes a concrete problem or change with enough detail that someone could start work without asking what is meant. ${AS_AMENDED}`,
         criteria: {
-          true: 'The body states what is wrong or wanted, where, and what done looks like.',
-          false: 'The body is placeholder text, the title restated, or a single sentence with no context.',
+          true: 'The body, as amended, states what is wrong or wanted, where, and what done looks like.',
+          false: 'The body, as amended, is placeholder text, the title restated, or a single sentence with no context.',
         },
         severity: 'warn',
       },
       implementable: {
         type: 'noul',
-        instructions: 'A competent engineer could implement this from the body without making a decision the body does not make.',
+        instructions: `A competent engineer could implement this from the issue without making a decision the issue does not make. A decision the body leaves open counts as made when a later comment of the author or a maintainer makes it. ${AS_AMENDED}`,
         criteria: {
-          true: 'Every choice the work turns on is settled in the body: one design, named interfaces, stated behaviour on the edges it raises.',
-          false: 'The body leaves a decision open: two valid designs it does not choose between, an interface it needs but does not name, or an edge case whose behaviour it does not state.',
+          true: 'Every choice the work turns on is settled, in the body or in a later comment of the author or a maintainer: one design, named interfaces, stated behaviour on the edges it raises.',
+          false: 'A decision is still open after every comment of the author and maintainers: two valid designs nobody chose between, an interface it needs but does not name, or an edge case whose behaviour is not stated.',
         },
         severity: 'fail',
       },
       scope_clear: {
         type: 'noul',
-        instructions: 'The body states what is in and out of scope, so a reviewer could reject an unrelated change to the PR that implements it.',
+        instructions: `The issue states what is in and out of scope, so a reviewer could reject an unrelated change to the PR that implements it. ${AS_AMENDED}`,
         criteria: {
-          true: 'The body bounds the change: what it touches, what it leaves alone, or what done looks like, clearly enough that a change outside it is recognisable.',
-          false: 'The body names a goal with no bounds, so any change in its area could be argued to belong.',
+          true: 'The body, as amended, bounds the change: what it touches, what it leaves alone, or what done looks like, clearly enough that a change outside it is recognisable.',
+          false: 'The body, as amended, names a goal with no bounds, so any change in its area could be argued to belong.',
         },
         severity: 'warn',
       },
       type: {
         type: 'choice',
-        instructions: 'Which kind of issue is this, judged from the title and body alone?',
+        instructions: `Which kind of issue is this? ${AS_AMENDED}`,
         options: 'type_labels',
         severity: 'info',
       },
@@ -65,14 +68,21 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       },
       blocked_by: {
         type: 'choice',
-        instructions: 'Which open issue, if any, must be resolved before work on this one can start? Only when the title or body says it depends on that issue, or the same code must change there first. Otherwise none.',
+        instructions: `Which open issue, if any, must be resolved before work on this one can start? Only when the title or body says it depends on that issue, a later comment of the author or a maintainer holds it behind that issue or states the dependency, or the same code must change there first. Otherwise none. ${AS_AMENDED}`,
         options: 'open_issues',
         when: 'has_others',
         severity: 'info',
       },
+      ruling: {
+        type: 'choice',
+        instructions: 'Which comment, if any, records a decision of the author or a maintainer that settles something the body leaves open, changes what the body says, or holds the issue behind another? The latest such comment when several do. Otherwise none.',
+        options: 'rulings',
+        when: 'has_rulings',
+        severity: 'info',
+      },
       readiness: {
         type: 'score',
-        instructions: 'How ready is this issue to be worked on?',
+        instructions: `How ready is this issue to be worked on? ${AS_AMENDED}`,
         criteria: [
           'needs author input: the request cannot be understood or has contradictory requirements',
           'needs triage: understandable but missing scope, acceptance criteria, or a decision',
