@@ -62,8 +62,8 @@ describe('grade subject', () => {
 
   it('yields a reference, a commit or text for a mixed subject and refuses only what can be nothing', () => {
     expect(parseSubject('mixed', '42', forge)).toEqual({ kind: 'mixed', subject: { kind: 'issue', number: 42 } });
-    expect(parseSubject('mixed', ' #42 ', forge, undefined, 'pr')).toEqual({ kind: 'mixed', subject: { kind: 'pr', number: 42 } });
-    expect(parseSubject('mixed', 'https://fake/o/r/issue/80', forge, undefined, 'pr')).toEqual({ kind: 'mixed', subject: { kind: 'issue', number: 80, repo: 'o/r' } });
+    expect(parseSubject('mixed', ' #42 ', forge)).toEqual({ kind: 'mixed', subject: { kind: 'issue', number: 42 } });
+    expect(parseSubject('mixed', 'https://fake/o/r/issue/80', forge)).toEqual({ kind: 'mixed', subject: { kind: 'issue', number: 80, repo: 'o/r' } });
     expect(parseSubject('mixed', 'https://fake/o/r/pr/3', forge, 'o/r')).toEqual({ kind: 'mixed', subject: { kind: 'pr', number: 3, repo: 'o/r' } });
     expect(parseSubject('mixed', 'abc1234', forge)).toEqual({ kind: 'mixed', subject: { kind: 'commit', ref: 'abc1234' } });
     expect(parseSubject('mixed', 'main..HEAD', forge)).toEqual({ kind: 'mixed', subject: { kind: 'commit', ref: 'main..HEAD' } });
@@ -74,6 +74,26 @@ describe('grade subject', () => {
     expect(refused('mixed', 'https://elsewhere.example/o/r/issues/3')).toContain('a URL Fake does not serve as an issue or a pull request');
     expect(refused('mixed', 'https://fake/o/r/issue/3', 'x/y')).toContain('names o/r but repo is x/y');
     expect(expectedSubject('mixed', forge)).toBe('an issue or pull request number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text');
+  });
+
+  it('reads an issue or free text for the rules and refuses a pull request or a commit, naming what it takes', () => {
+    expect(parseSubject('rules', '42', forge)).toEqual({ kind: 'rules', subject: { kind: 'issue', number: 42 } });
+    expect(parseSubject('rules', ' #42 ', forge)).toEqual({ kind: 'rules', subject: { kind: 'issue', number: 42 } });
+    expect(parseSubject('rules', 'https://fake/o/r/issue/80', forge)).toEqual({ kind: 'rules', subject: { kind: 'issue', number: 80, repo: 'o/r' } });
+    expect(parseSubject('rules', 'the watcher misses body edits', forge)).toEqual({ kind: 'rules', subject: { kind: 'text', text: 'the watcher misses body edits' } });
+    const takes = 'an issue number (N or #N), a Fake issue URL, or free text (in text)';
+    expect(expectedSubject('rules', forge)).toBe(takes);
+    for (const [ref, why] of [
+      ['https://fake/o/r/pr/3', 'subject is a pull request URL, and a pull request is not read against the rules'],
+      ['abc1234', 'subject is a commit ref or range, and a commit is not read against the rules'],
+      ['main..HEAD', 'subject is a commit ref or range, and a commit is not read against the rules'],
+      ['https://elsewhere.example/o/r/issues/3', 'subject is a URL Fake does not serve as an issue'],
+    ] as const) {
+      const message = refused('rules', ref);
+      expect(message).toContain(`rules pack: ${why}`);
+      expect(message).toContain(`expected ${takes}`);
+    }
+    expect(refused('rules', 'https://fake/o/r/issue/3', 'x/y')).toContain('names o/r but repo is x/y');
   });
 
   it('accepts a tag or "release" for a release and refuses what cannot be one', () => {

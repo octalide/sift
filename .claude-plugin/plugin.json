@@ -158,7 +158,7 @@
     "grade": {
       "type": "boolean",
       "title": "Grading tools",
-      "description": "Register the grade (packs: issue, pr, hunks, plan, commit, ci, rules, release, locate, and any under .sift/packs), judge (typed questions over one state) and rank (the same questions over many items) tools.",
+      "description": "Register the grade (packs: issue, pr, plan, commit, ci, rules, release, locate, and any under .sift/packs), judge (typed questions over one state) and rank (the same questions over many items) tools.",
       "default": true
     },
     "config": {

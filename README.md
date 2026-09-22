@@ -75,12 +75,11 @@ A pack is data: a subject kind, a list of mechanical checks, typed questions wit
 | pack | subject | what it answers |
 |---|---|---|
 | `issue` | an issue number or URL | is the issue well formed, correctly typed, scoped to this repo, implementable without a decision it does not make, and ready to work on |
-| `pr` | a PR number or URL, or a `base..head` range | does the PR do what its issue asks, nothing more, without workarounds, and is it safe to merge, drift against the base included |
-| `hunks` | the same as `pr` | which hunk of the diff is wrong: unrelated to the stated purpose, a workaround, or a behaviour change no test covers |
+| `pr` | a PR number or URL, or a `base..head` range | is the PR linked, targeted, named, templated, committed and checked as the repository requires, and has the base moved under it. Mechanical only, no judge call |
 | `plan` | an issue number, the plan in `text` | does the plan cover the issue, add nothing beyond it, and decide nothing the issue leaves open; a warn means the plan lists its decisions in the PR body |
-| `commit` | a ref or range | do the commits follow the repository's commit format and describe their diffs honestly |
+| `commit` | a ref or range | do the commit messages follow the repository's commit format. Mechanical only, no judge call |
 | `ci` | a job id, a run id, or a log in `text` | why the job failed: the lines that explain it, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository |
-| `rules` | a PR, an issue, a ref or range, or free text | does the subject comply with each rule the repository's rule documents state |
+| `rules` | an issue number or URL, or free text | does the subject comply with each rule the repository's rule documents state |
 | `release` | a proposed version, or `release` | are the commits since the last tag safe to ship as described, and do the version bump and changelog agree with them |
 | `triage` | a repository event | does this event need the session to act on it now, what kind is it, how urgent |
 | `locate` | an issue number or URL, or free text in `text` | which files of the checkout must be read or changed to implement it |
@@ -88,32 +87,27 @@ A pack is data: a subject kind, a list of mechanical checks, typed questions wit
 ```
 grade(pack: "pr", subject: "42")               # or "#42", or the PR's URL
 grade(pack: "pr", subject: "dev..HEAD")        # the PR this branch would open, graded before it exists
-grade(pack: "hunks", subject: "42")            # which hunk of PR 42 is wrong, a range works too
 grade(pack: "issue", subject: "17")            # or "#17", or an issue URL, which may name another repo
 grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17
 grade(pack: "commit", subject: "main..HEAD")
 grade(pack: "ci", subject: "job:106195824649")  # a failed job by id
 grade(pack: "ci", subject: "35554549814")       # a run id (or run:<id>) reads its first failed job
 grade(pack: "ci", subject: "x", text: "...")    # a log pasted as text
-grade(pack: "rules", subject: "42")            # a PR against the repo's rule documents
-grade(pack: "rules", subject: "x", text: "...") # free text against the rules
+grade(pack: "rules", subject: "17")            # issue 17 against the repo's rule documents
+grade(pack: "rules", subject: "x", text: "...") # free text against the rules, a commit message or PR body before it is written
 grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
 grade(pack: "release", subject: "v1.4.0", repo: "o/r", ref: "dev")  # any repo, no checkout needed
 grade(pack: "locate", subject: "17")           # the files to read or change for issue 17, top 20 per level
 grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free text
 ```
 
-The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. `rules` and `locate` take the same reference forms, a bare number naming a pull request for `rules` (an issue with `text: "issue"`) and an issue for `locate`, a commit ref or range for `rules`, or free text in `text`. `ci` takes `job:<id>`, `run:<id>`, a bare run id, or the log in `text`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
+The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. `locate` takes the same reference forms, a bare number naming an issue, or free text in `text`. `rules` takes an issue number or URL, or free text in `text`, and refuses a pull request or a commit with the forms it takes named: sift judges no diff. `ci` takes `job:<id>`, `run:<id>`, a bare run id, or the log in `text`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
 
 A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, drift, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable). A pack with rank steps adds one list per step. A question the judge left unanswered is reported in the unclear band without an answer, and an answer under an id no question asked for is dropped and counted.
 
 ### pr
 
-A PR grade reads the base branch as well: `pr.drift` warns with the files the PR touches that also changed on the base since the branch point (the merge base to the base head), and `drift_collides` is asked of each such file with the PR's patch and the base's patch side by side, so a conflict in meaning is caught where the lines alone would merge clean. A `base..head` subject grades the same way from the checkout before the PR exists: the diff, commits and drift come from `git`, the issue from the head branch name (a `(?<issue>)` group in `branches.pattern` names it, otherwise the number segment of `feat/52` or `52-title`), and the checks only a forge can answer (`pr.linked`, `pr.target`, `pr.ci`, `pr.template`) skip rather than fail.
-
-### hunks
-
-The `hunks` pack takes the same subjects as `pr` and answers which change is wrong rather than whether one is: the diff is split into hunks and each is judged alone (one request per hunk, so no hunk colours another) against the PR's stated purpose (title, body, linked issue, commits) and the map of the whole change (every hunk's file and header). Three questions per hunk: `unrelated` (it does not serve the stated purpose), `workaround` (it patches a symptom), `untested` (it changes behaviour and no hunk of the diff touches a test of it). The report lists the hunks ruled out, by file and header, with the probability of each question that ruled them out. No mechanical checks. A shadow run over this repository's own merged PRs (#65) found the same things the `pr` pack's whole-diff questions did, localized to the hunk, at three to twenty times the tokens. Grade the `pr` pack first and reach for `hunks` when it warns.
+The `pr` pack is mechanical: it runs its checks and asks the judge nothing. The diff is read only to find drift and never reaches a judge. `pr.drift` warns with the files the PR touches that also changed on the base since the branch point (the merge base to the base head). It reports that the base moved, not whether the two patches collide. A `base..head` subject grades the same way from the checkout before the PR exists: the commits and drift come from `git`, the issue from the head branch name (a `(?<issue>)` group in `branches.pattern` names it, otherwise the number segment of `feat/52` or `52-title`), and the checks only a forge can answer (`pr.linked`, `pr.target`, `pr.ci`, `pr.template`) skip rather than fail.
 
 ### issue
 
@@ -153,9 +147,9 @@ The built-in packs are in `src/packs/builtin.ts`. A repo overrides or adds one w
   "description": "House rules for pull requests",
   "checks": ["pr.linked", "pr.target", "pr.commits"],
   "questions": {
-    "workaround": {
+    "unexplained": {
       "type": "noul",
-      "instructions": "The diff patches a symptom rather than its cause.",
+      "instructions": "The body does not say why the change is needed.",
       "inverted": true,
       "severity": "fail",
       "lo": 0.3,
@@ -167,7 +161,7 @@ The built-in packs are in `src/packs/builtin.ts`. A repo overrides or adds one w
 
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, and `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`). A pack with more questions than one request holds goes out in several, the subject repeated in each.
 
-A pack may also carry `rank`, a list of steps run in order before the questions, each one `rank` over a subject list with the state so far as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by, or a template over its fields), `list` (`each` prints every item in order with every question of the step, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`, `violated` only the items ruled out with the questions that ruled them out), `order` (`input` shows a top list in input order instead of by value), `fields` (the item fields the state carries beside its index, every field unless said. The rest only fill the questions, so a text that is already in the question is not sent twice), `context` (the state fields the items are read against, the whole state unless said. An isolated step repeats them in every request, so a step over many items names the few it needs), `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out, which makes steps hierarchical, and `feed`, the state field the items the step did not rule out are placed under for the steps and questions after it. Every question of a step is judged for every item, and `by` only orders. A step rules out an item that any of its questions bands violated, and a `top` step everything below the top it shows. The rules pack is one `each` step over the rule paragraphs, the pr pack one over the drifted files, the hunks pack one isolated `violated` step over the diff's hunks, locate two `top` steps, ci one `top` step over a log's lines feeding `lines` to its questions.
+A pack may also carry `rank`, a list of steps run in order before the questions, each one `rank` over a subject list with the state so far as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by, or a template over its fields), `list` (`each` prints every item in order with every question of the step, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`, `violated` only the items ruled out with the questions that ruled them out), `order` (`input` shows a top list in input order instead of by value), `fields` (the item fields the state carries beside its index, every field unless said. The rest only fill the questions, so a text that is already in the question is not sent twice), `context` (the state fields the items are read against, the whole state unless said. An isolated step repeats them in every request, so a step over many items names the few it needs), `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out, which makes steps hierarchical, and `feed`, the state field the items the step did not rule out are placed under for the steps and questions after it. Every question of a step is judged for every item, and `by` only orders. A step rules out an item that any of its questions bands violated, and a `top` step everything below the top it shows. The rules pack is one `each` step over the rule paragraphs, locate two `top` steps, ci one `top` step over a log's lines feeding `lines` to its questions.
 
 Subject kinds and the checks they support:
 
@@ -213,13 +207,13 @@ Three layers apply in order, each field by field over the last: the defaults, a 
 "issues": { "requiredLabelGroups": [["bug", "enhancement", "documentation"]], "templateSections": ["Problem", "Fix"], "childLabels": ["task"], "milestone": false }
 ```
 
-`prs.linkIssue` requires a pull request to name its issue. The issue is found from the code host's own relation first (the issues a pull request closes), then from a closing keyword in the body (`Closes #N`), then from an issue number in the branch name (`feat/52`), and the first found is the one the judge reads the diff against. `prs.templateSections` works as `issues.templateSections` does. `branches.pattern` is matched against a work branch name. `prs.targets` is either a list of branch names a PR may target or a regex the base branch must match. `prs.target: "dev"` from older configs reads as `targets: ["dev"]`. `branches.protected` lists the branches whose CI runs the watch delivers on failure, the default branch when unset.
+`prs.linkIssue` requires a pull request to name its issue. The issue is found from the code host's own relation first (the issues a pull request closes), then from a closing keyword in the body (`Closes #N`), then from an issue number in the branch name (`feat/52`), and the first found is the linked issue. `prs.templateSections` works as `issues.templateSections` does. `branches.pattern` is matched against a work branch name. `prs.targets` is either a list of branch names a PR may target or a regex the base branch must match. `prs.target: "dev"` from older configs reads as `targets: ["dev"]`. `branches.protected` lists the branches whose CI runs the watch delivers on failure, the default branch when unset.
 
 ### Conventions as regexes
 
 Every convention is a regex string with named groups. A preset stands for one of them: it expands to its regex when the config resolves, and an explicit pattern beside a preset wins. An invalid regex in any of these fields fails config resolution with the field named.
 
-`commits.format` is matched against the subject line and names the groups `type`, `scope`, `breaking` (any match marks the commit breaking, as a `BREAKING CHANGE:` footer does) and `description`. The preset `commits.convention: "conventional"` is `^(?<type>\w+)(?:\((?<scope>[^)]*)\))?(?<breaking>!)?:\s+(?<description>.+)$`. `none`, the default, runs no format check unless `format` is set. `commits.types` lists the values the `type` group may take, and a format without a `type` group skips that check. The same list is the choice set for the commit pack's `type_matches` question, so the judge names the type the diff warrants in the repository's own vocabulary. `commits.forbidTrailers` lists trailers a commit message may not carry.
+`commits.format` is matched against the subject line and names the groups `type`, `scope`, `breaking` (any match marks the commit breaking, as a `BREAKING CHANGE:` footer does) and `description`. The preset `commits.convention: "conventional"` is `^(?<type>\w+)(?:\((?<scope>[^)]*)\))?(?<breaking>!)?:\s+(?<description>.+)$`. `none`, the default, runs no format check unless `format` is set. `commits.types` lists the values the `type` group may take, and a format without a `type` group skips that check. The same list is the `commit_types` option set a repo pack's choice question can name. `commits.forbidTrailers` lists trailers a commit message may not carry.
 
 `commits.bumps` maps a type to the release bump it calls for, `major`, `minor`, `patch` or `none`: a type not in the map calls for none, and a breaking commit calls for the breaking bump whatever its type. Left unset, the `conventional` preset fills it with `{ "feat": "minor", "fix": "patch", "perf": "patch" }`, as does a config with no `format` at all, since its commits parse with the conventional header. A custom `format` starts from an empty map, so only breaking changes and manifests call for a release until the map names its types.
 
@@ -412,6 +406,12 @@ CI runs the same three commands on every pull request and reports them through a
 
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
 - The prune module estimates tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT).
+
+## Changes in 0.11.0
+
+This release drops judged review of diffs and is breaking. The judged diff questions caught nothing the repositories' own checks did not, raised false positives, and often could not run from another repository's worktree.
+
+Removed: the `hunks` pack. The `pr` pack's judged questions (`addresses_issue`, `scope_creep`, `workaround`, `contract_change`, `tests_cover`, `risk`) and its `drift_collides` rank step: `pr` now runs its mechanical checks and asks the judge nothing, and `pr.drift` reports that the base moved under the PR without judging whether the patches collide. The `commit` pack's judged questions (`type_matches`, `describes_change`, `breaking_missed`): `commit` runs `commit.format` alone. Pull requests and commits as `rules` subjects: `rules` takes an issue or free text and refuses a pull request or a commit with the forms it takes named. A bare number now names an issue for `rules`, where it named a pull request. The `diff`, `changes` and `hunks` fields of a `pr` subject and the `diff` and `has_diff` fields of a `commit` subject, so a repo pack can no longer judge a diff either. `drift` on a `pr` subject is a list of paths.
 
 ## Changes in 0.10.0
 
