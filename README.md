@@ -290,14 +290,28 @@ With `classify: true` the engine's own `model.classify` calls (a text and a list
 
 ## Watch
 
-With `watch: true` the plugin polls the session's repository (or `watchRepo`) through the forge with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops (`watchIgnoreBots`), your own writes defer (`watchIgnoreSelf`, keyed on the forge login), new PRs deliver, a new issue is checked against the issue pack and delivers with its findings when it fails one (own writes otherwise defer under `watchIgnoreSelf`), label churn defers. Everything else goes through the `triage` pack (`watchTriage`), and an event whose `actionable` lands in the violated band is deferred.
+The watch is a set of subscriptions, added and removed at runtime with the `watch` tool, any number at once and across repositories. Each one names a repository and a scope, carries its own filter, and may name the agent it belongs to and when it ends:
 
-A delivery is one prompt:
+```
+{ id, repo, scope, filter, for?, until? }
+scope  = repo | pr <n> | branch <name> | run <id> | tag <glob>
+filter = { items, ci: settled | failures | all | none, stall }
+for    = the agent it belongs to, by the name SendMessage reaches it by, set when a subagent subscribes
+until  = settled | merged | closed | <iso time>
+```
+
+`repo` covers the whole repository, `pr <n>` one pull request across every head it moves to (its item events, the runs on its heads and its verdicts), `branch <name>` the runs of one branch, `run <id>` one run, and `tag <glob>` the runs on tags matching the glob (`*` any run of characters, `?` one). `items` (default on) takes issue and pull request events in scope, `stall` (default on) takes `ci stalled`, and `ci` defaults to `watchCi`. A subscription with `until` is removed on its own: `settled` once its verdict (a completed run, outside a `pr` scope) is delivered, `merged` or `closed` once its pull request is, a time once it passes. A subscription made from a subagent belongs to it and is removed once the session's agent list reports that agent finished (or no longer lists it), so a dead agent's subscriptions stop polling. The subscriptions live in the plugin store under the session, so a resumed session gets them back.
+
+There is one poller per repository, started with its first subscription and stopped with its last. It polls through the forge with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. N repositories cost N probe sets per interval, and the rate floor is per token: once any poller reads the remaining calls below it, every poller waits for the window to refill. Every change is one event, and each event is matched against the repository's subscriptions, scope first, then filter. An event no subscription takes is dropped, one several take is delivered once, naming each. A `run` subscription reads its run by id each poll until it completes, so a run that pages out of the newest runs on a busy repository still delivers, and a run already complete when it is subscribed to delivers on the next poll.
+
+With `watch: true` each repository in `watchRepos` (the session's own when empty) is subscribed whole at boot with the configured filter. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops (`watchIgnoreBots`), your own writes defer (`watchIgnoreSelf`, keyed on the forge login), new PRs deliver, a new issue is checked against the issue pack and delivers with its findings when it fails one (own writes otherwise defer under `watchIgnoreSelf`), label churn defers. Everything else goes through the `triage` pack (`watchTriage`), and an event whose `actionable` lands in the violated band is deferred.
+
+A delivery is one prompt, each event ending with the subscriptions it matched:
 
 ```
 [sift watch octalide/sift]
 issue #41 comments 2->3: watcher misses review comments
-  by alice · https://github.com/octalide/sift/issues/41 · actionable 0.93, kind question, urgency now
+  by alice · https://github.com/octalide/sift/issues/41 · actionable 0.93, kind question, urgency now · s1
 deferred meanwhile: 2 housekeeping, 1 ci success
 ```
 
@@ -306,7 +320,7 @@ A settled PR is one line with the aggregate verdict, so a steward waiting to gra
 ```
 [sift watch octalide/sift]
 ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks) · now: open, head unchanged
-  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
+  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
 ```
 
 A failure carries the `ci` pack's report on each failed check, one job per check, read from its log through the forge, so the session that pushed the commit reads why it failed without opening the log:
@@ -314,7 +328,7 @@ A failure carries the `ci` pack's report on each failed check, one job per check
 ```
 [sift watch octalide/sift]
 ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test) · now: open, head unchanged
-  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
+  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
   sift ci octalide/sift job 106195824649: PASS (judge: jev)
     [info] log.trimmed: 212 of 212 lines read from the failing step Run npm test
     lines: top 40 of 212, 40 not ruled out
@@ -330,20 +344,20 @@ The verdict counts every check run and commit status on the PR's head, so it wai
 ```
 [sift watch octalide/sift]
 ci stalled: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (1 of 3 checks pending: deploy-preview) · now: open, head unchanged
-  by octalide · https://github.com/octalide/sift/pull/14 · ci stalled on pr
+  by octalide · https://github.com/octalide/sift/pull/14 · ci stalled on pr · s1
 ```
 
-CI news that a newer result has made old is dropped rather than delivered late. Each CI event reports on a subject, `pr:<n>` when it ran on a head of that PR (the current head or one it has since moved from) and `branch:<name>` otherwise, and a run is keyed by its subject and its workflow, so a docs run is superseded only by a newer docs run. When a run completes, every held or undelivered event of an older run with the same key is dropped, as is an earlier completion of the same run when it completes again, and a settled verdict on a PR head drops everything held for the PR's older heads and the runs held for that head. Each drop is logged as `drop: superseded by ...`. The forge does not say whether a run's ref is a branch or a tag, so a tag push keys as `branch:<tag>`. An event that ages out is read again first: a run held on a PR head that has since moved is dropped, a head whose checks have all finished since delivers its `ci settled` line in place of the runs held for it (one checks read per head), and a run on a branch with a newer completed run of its workflow is dropped (one run listing per branch). Only what survives is delivered.
+CI news that a newer result has made old is dropped rather than delivered late. Each CI event reports on a subject, `pr:<n>` when it ran on a head of that PR (the current head or one it has since moved from) and `branch:<name>` otherwise, and a run is keyed by its subject and its workflow, so a docs run is superseded only by a newer docs run. When a run completes, every held or undelivered event of an older run with the same key is dropped, as is an earlier completion of the same run when it completes again, and a settled verdict on a PR head drops everything held for the PR's older heads and the runs held for that head. Each drop is logged as `drop: superseded by ...`. A run on a tag reports on `tag:<name>`: the forge says whether a run's ref is a tag (GitHub, whose runs name the ref alone, by one tag lookup per ref name, remembered for the session). An event that ages out is read again first: a run held on a PR head that has since moved is dropped, a head whose checks have all finished since delivers its `ci settled` line in place of the runs held for it (one checks read per head), and a run on a branch with a newer completed run of its workflow is dropped (one run listing per branch). Only what survives is delivered.
 
 Every CI line ends with where its subject stands at delivery rather than at the event: `now: open, head unchanged`, `now: open, head @<sha> (moved)`, `now: merged`, `now: closed` (or `not open` when the watch never saw the PR's state) for a PR, and the newest completed run of the event's workflow for a branch, `now: dev @9f8e7d6, docs success`. It is read from the open PR heads and the item cache the poll already holds, so it costs no request:
 
 ```
 [sift watch octalide/sift]
 ci failure: docs on dev @1a2b3c4 (push) · now: dev @1a2b3c4, docs failure
-  by octalide · https://github.com/octalide/sift/actions/runs/17 · ci failure on watched branch
+  by octalide · https://github.com/octalide/sift/actions/runs/17 · ci failure on watched branch · s1
 ```
 
-`watchCi` sets what CI reaches you: `failures` (the default) delivers each open PR once when every check on its head has finished, pass or fail, and failed runs on protected branches, `all` delivers every completed run as well, `none` delivers no CI. Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` that is not superseded is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache, open PR heads and deferred list live in the plugin store, so a restart picks up where it left off.
+A subscription's `ci` sets what CI reaches it: `failures` (the default, from `watchCi`) delivers each open PR once when every check on its head has finished, pass or fail, and failed runs (on a `repo` subscription, only those on protected branches or branches matching the work pattern), `settled` delivers the verdicts and, on a `branch`, `tag` or `run` subscription, every completed run, `all` delivers every completed run as well, `none` delivers no CI. A `run` subscription takes its run's completion under any of them but `none`, and nothing newer supersedes it. Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` that is not superseded is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache, open PR heads and deferred list live in the plugin store, so a restart picks up where it left off.
 
 ## Tools and command
 
@@ -354,12 +368,20 @@ The tools are registered under the plugin's name, so the model sees `mcp__sift__
 | `grade` | `pack`, `subject`, optional `repo`, `text`, `ref`, `top` | the pack's report as text |
 | `judge` | `state`, `questions` | the answers |
 | `rank` | `items`, `questions`, optional `mode`, `context`, `by`, `choice`, `fields` | the items with their answers, and the sorted view |
-| `watch` | `action`: `status`, `start`, `poll`, `pause`, `resume`, `reset`, `deferred`; `for`: on a `start` from a subagent, the PR it waits on, its number or head branch | the watch's state |
+| `watch` | `action`: `subscribe`, `unsubscribe`, `list`, `start`, `status`, `poll`, `pause`, `resume`, `reset`, `deferred`; `repo`, `scope`, `items`, `ci`, `stall`, `until` on `subscribe`; `id` on `unsubscribe`; `for` on `start`; `repo` narrows `poll`, `pause`, `resume`, `reset` and `deferred` | the subscription made, the list, or the pollers' state |
 | `status` | nothing | backend (for jev, where its key came from, the key's last four characters, a shadowed key and a rejected key), modules, whether the watch runs, decision counts |
 
-`grade`, `judge` and `rank` are registered when the `grade` option is on, `watch` and `status` always. `watch start` arms the watch in a session that came up without the `watch` option, `poll` polls once now, `reset` forgets the cursor and reseeds. Deliveries are prompts to the session's main loop, whichever loop armed the watch: a `watch start` from a subagent records that agent's name, says so in the tool result (deliveries reach the agent only when the session relays them), and every delivery header names it (`[sift watch o/r for issue-113]`) so the relay is one `SendMessage`. A later `watch start` replaces the name, one from the main loop clears it. Several subagents waiting on one watch each pass `for`, the PR number or head branch they wait on, and the watch keeps the set of `{ agent, ref }` pairs beside the name: a `ci settled` or `ci stalled` line whose PR number or head branch matches a pair is written as `for issue-113: ci settled success: pr #113 ...`, naming the agent whose PR it is. Once the set holds any pair, a ci event that matches none names no agent, neither on its line nor in the header, so a verdict for a PR nobody armed for is never relayed to an unrelated agent. Only a watch armed without any `for` falls back to the agent that armed last. Deliveries of issue and PR events keep the header name either way. A `start` from the main loop clears the set with the name. One ref names one agent: a later `start` for the same PR replaces the entry, the newest arm winning as the name does. A leading `#` on a PR number is stripped when the ref is stored, so `#42` and `42` are the same PR. Nothing else about agent names or branch conventions is inferred. A session that will act on repository events calls `status` at start to learn whether they will arrive as prompts.
+`grade`, `judge` and `rank` are registered when the `grade` option is on, `watch` and `status` always. `watch subscribe` adds a subscription and returns its id (the same subscription again returns the one already there), `unsubscribe` removes one, and `list` and `status` show every subscription with its scope, filter, owner and until. `start` subscribes to the session's repository with the configured filter, or to one pull request when `for` names it (a number, `#` optional) or one branch (anything else). `poll` polls once now, `reset` forgets a repository's cursor and reseeds.
 
-`/sift` prints status and per-module decision counts (the same text as the `status` tool), a judge line naming the backend and, for jev, where its key came from and the key's last four characters (never the key), any other source holding a different key as set but shadowed, and whether jev has rejected the key, with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, and `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watch as the tool does.
+```
+s1 octalide/sift repo · items, ci failures, stall
+s2 briar-systems/mach run 17736210453 · items, ci settled, stall · for issue-131 · until settled
+s3 briar-systems/mach-http tag v* · items, ci settled, stall
+```
+
+Deliveries are prompts to the session's main loop, whichever loop subscribed. A subscription made from a subagent records that agent, by the name SendMessage reaches it by, and the tool result says so (deliveries reach the agent only when the session relays them). Each delivered event names the agents whose subscriptions it matched (`for issue-113: ci settled success: pr #113 ...`), and the header names an agent when every subscription in the delivery is that agent's (`[sift watch o/r for issue-113]`), so the relay is one `SendMessage`. An event matching no agent's subscription names no agent. Nothing about agent names or branch conventions is inferred. A session that will act on repository events calls `status` at start to learn whether they will arrive as prompts.
+
+`/sift` prints status and per-module decision counts (the same text as the `status` tool), a judge line naming the backend and, for jev, where its key came from and the key's last four characters (never the key), any other source holding a different key as set but shadowed, and whether jev has rejected the key, with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, and `/sift watch status|list|start|poll|pause|resume|reset|deferred [repo]`, `/sift watch subscribe <repo> [scope]` and `/sift watch unsubscribe <id>` control the watch as the tool does.
 
 ## Options
 
@@ -378,14 +400,14 @@ Every option, with its default. The same descriptions are in `.claude-plugin/plu
 | `pruneChunkLines` | `25` | lines per scored chunk |
 | `pruneKeepThreshold` | `0.5` | minimum probability that a chunk is needed. Below it the chunk is replaced by an omission note |
 | `pruneTools` | `Bash,Read` | comma separated tool names whose output is pruned. Bash and Read are supported |
-| `watch` | `false` | poll a repository for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts |
-| `watchRepo` | empty | `owner/name`. Empty watches the session's own repository |
+| `watch` | `false` | subscribe to the repositories in `watchRepos` at boot: poll them for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts |
+| `watchRepos` | empty | comma separated `owner/name` list, each subscribed whole at boot. Empty subscribes the session's own repository |
 | `watchMinInterval` | `60` | seconds between polls while the repository is changing |
 | `watchMaxInterval` | `300` | seconds between polls once it is idle. Idle polls are conditional requests and cost no API quota |
 | `watchDelivery` | `prompt` | `prompt` submits each actionable event as a user turn, `log` only writes transcript lines |
 | `watchIgnoreSelf` | `true` | events authored by the login this session runs as are deferred, not delivered |
 | `watchIgnoreBots` | `true` | events authored by bot accounts are dropped |
-| `watchCi` | `failures` | `failures` delivers each open PR once when every check on its head has finished and failed runs on protected branches, `all` every completed run as well, `none` no CI |
+| `watchCi` | `failures` | the `ci` filter of a subscription that sets none: `settled` delivers each open PR once when every check on its head has finished and every completed run on a branch, tag or run subscription, `failures` the verdicts and failed runs (on a whole repository, those on protected or work pattern branches), `all` every completed run as well, `none` no CI |
 | `watchTriage` | `true` | run the triage pack on issue and PR events. Off delivers everything the rules do not defer |
 | `watchDeferMaxAgeHours` | `24` | a deferred event older than this is delivered on its own so nothing waits forever, unless a newer result has superseded it |
 | `watchStallHours` | `1` | a PR head whose checks have not all finished within this many hours is delivered once as `ci stalled`, naming the pending checks |
@@ -422,6 +444,8 @@ CI runs the same three commands on every pull request and reports them through a
 This release drops judged review of diffs and is breaking. The judged diff questions caught nothing the repositories' own checks did not, raised false positives, and often could not run from another repository's worktree.
 
 Removed: the `hunks` pack. The `pr` pack's judged questions (`addresses_issue`, `scope_creep`, `workaround`, `contract_change`, `tests_cover`, `risk`) and its `drift_collides` rank step: `pr` now runs its mechanical checks and asks the judge nothing, and `pr.drift` reports that the base moved under the PR without judging whether the patches collide. The `commit` pack's judged questions (`type_matches`, `describes_change`, `breaking_missed`): `commit` runs `commit.format` alone. Pull requests and commits as `rules` subjects: `rules` takes an issue or free text and refuses a pull request or a commit with the forms it takes named. A bare number now names an issue for `rules`, where it named a pull request. The `diff`, `changes` and `hunks` fields of a `pr` subject and the `diff` and `has_diff` fields of a `commit` subject, so a repo pack can no longer judge a diff either. `drift` on a `pr` subject is a list of paths.
+
+Changed: the watch is a set of subscriptions, several repositories at once, each scoped to the whole repository, one PR, one branch, one run or tag pushes matching a glob, with its own filter (`items`, `ci`, `stall`) and an optional `until`, added and removed at runtime with `watch subscribe`, `unsubscribe` and `list`. One poller runs per repository, from its first subscription to its last, and the rate floor holds every poller on the token. A `run` subscription reads its run by id, so a run paged out of the newest 30 still delivers. A subscription made from a subagent belongs to it and goes when the agent finishes, and each delivered event names the subscriptions and agents it matched. `watch start` subscribes to the session's repository, or to one PR or branch when `for` names it. The `watchRepo` option is replaced by `watchRepos`, a list subscribed at boot, and `watchCi` gains `settled`. The armed name and the per-PR `{ agent, ref }` set are gone: ownership is the subscription's. A run on a tag keys as `tag:<name>`, not `branch:<tag>`. The `Forge` interface gains `run` (one run by id) and `Run.tag`. The stored watch state changes shape again, so the first poll after the upgrade reseeds.
 
 Fixed: the watch drops superseded CI news. A newer completed run of the same workflow on the same PR or branch drops the older ones still held or about to be delivered, and a settled verdict on a PR head drops what was held for its older heads. An event that ages out is read again first (the PR's head and checks, or the branch's runs), so a failure since fixed or a run on a head that has since moved is no longer delivered hours late. Every CI delivery line ends with `now:`, the PR's state (open with its head unchanged or moved, merged, closed) or the branch's newest result of that workflow. The `Forge` interface gains `branchRuns`, the newest runs on one branch. The stored watch state changes shape, so the first poll after the upgrade reseeds and a backlog held by an older version is dropped.
 
