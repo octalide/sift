@@ -13,8 +13,9 @@ import { failureText, type Answer, type KeyOrigin, type Questions } from '../src
 import { DecisionLog, type Cost } from '../src/log.ts';
 import { formatReport } from '../src/packs/run.ts';
 import type { Report } from '../src/packs/types.ts';
-import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
-import { estimateTokens } from '../src/tokens.ts';
+import { pruneCall } from '../src/prune/call.ts';
+import { PRUNE_TOOL, PruneLoops } from '../src/prune/loops.ts';
+import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
@@ -124,15 +125,6 @@ async function apiKeyOf($: EngineInterface, options: Options): Promise<ApiKey | 
   return resolveApiKey({ option: options.apiKey, env: () => $.env.get('TYPESAFE_API_KEY'), settings: () => $.settings.read() });
 }
 
-async function lastUserText($: EngineInterface): Promise<string> {
-  const messages = await $.session.messages();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.role === 'user' && m.text.trim().length > 0) return m.text;
-  }
-  return '';
-}
-
 const WATCH_ACTIONS = ['status', 'list', 'start', 'subscribe', 'unsubscribe', 'poll', 'pause', 'resume', 'reset', 'deferred'] as const;
 
 type WatchInput = SubscribeInput & { action?: string; id?: string };
@@ -162,6 +154,9 @@ export const register: Register = (on, rawOptions) => {
 
   // where each subagent was spawned; its grades default there
   const spawnDirs = new SpawnDirs();
+
+  // each loop's task, what prune already dropped for it, and whether it is turned off there
+  const pruneLoops = new PruneLoops();
 
   // file access via the engine, bound at session start
   let readFile: (p: string) => Promise<string> = async () => '';
@@ -348,7 +343,22 @@ export const register: Register = (on, rawOptions) => {
         },
       },
     });
-    await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred]' });
+    if (options.prune) {
+      await $.tool.register({
+        name: 'prune',
+        description:
+          'Turn sift\'s pruning of long Bash and Read output off or on for the calling loop alone (this subagent, or the main loop). off lasts until the loop\'s next task (a subagent\'s whole run), or for the next calls outputs prune would otherwise judge; on turns it back on. Call off before reading a document in full when every line matters. For one Bash command, end it with # sift: full instead. A Read with offset or limit, a repeat of a Read or command that was pruned, and a Read of a path your task names are never pruned.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['off', 'on'] },
+            calls: { type: 'number', description: 'off only: how many outputs over the floor stay whole, default until the loop\'s next task' },
+          },
+          required: ['action'],
+        },
+      });
+    }
+    await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred]' });
 
     if (watches) {
       await mailbox.load();
@@ -390,32 +400,15 @@ export const register: Register = (on, rawOptions) => {
         }
       }
       const r = await next(e);
-      if (!options.prune || !pruneTools(options).includes(e.tool) || r.deny !== undefined || r.isError) return r;
-      const text = e.tool === 'Bash' ? (r.result as { stdout?: string } | undefined)?.stdout : e.tool === 'Read' ? (r.result as { type?: string; file?: { content?: string } } | undefined)?.file?.content : undefined;
-      if (typeof text !== 'string' || estimateTokens(text) < options.pruneFloorTokens) return r;
-      const input = e as unknown as Record<string, unknown>;
-      const pruned = await prune(
-        text,
-        { tool: e.tool, input, task: await lastUserText($) },
+      if (!options.prune) return r;
+      return pruneCall(
+        { tool: e.tool, input: e as unknown as Record<string, unknown>, agentId: e.agentId },
+        r,
+        pruneLoops,
         rt.judge,
-        { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold },
+        { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold, tools: pruneTools(options), shadow: options.shadow },
+        { record: (action, extra) => record('prune', action, extra), toast: (text) => $.ui.toast(text) },
       );
-      if (pruned.error) {
-        record('prune', 'fallback', { ok: false, reason: pruned.error, digest: e.tool });
-        return r;
-      }
-      if (pruned.skipped || pruned.dropped === 0) {
-        record('prune', 'none', { digest: `${e.tool}: ${pruned.skipped ?? 'nothing dropped'}` });
-        return r;
-      }
-      const before = estimateTokens(text);
-      const after = estimateTokens(pruned.text);
-      record('prune', options.shadow ? 'would-prune' : 'pruned', { digest: `${e.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens`, tokensRemoved: before - after, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
-      $.ui.toast(`sift${options.shadow ? ' (shadow)' : ''}: ${e.tool} output ${pruned.dropped}/${pruned.chunks} chunks dropped, ~${before - after} tokens`);
-      if (options.shadow) return r;
-      if (e.tool === 'Bash') return { result: { ...(r.result as Record<string, unknown>), stdout: pruned.text } };
-      const read = r.result as { file: Record<string, unknown> } & Record<string, unknown>;
-      return { result: { ...read, file: { ...read.file, content: pruned.text } } };
     };
     const r = await answer();
     const mailbox = runtime?.mailbox;
@@ -438,6 +431,7 @@ export const register: Register = (on, rawOptions) => {
   on('agent.spawn', async (_$, e, next) => {
     const r = await next(e);
     spawnDirs.spawned(r.agentId, e.cwd, e.parentAgentId);
+    pruneLoops.spawned(r.agentId, e.prompt);
     return r;
   });
 
@@ -460,8 +454,10 @@ export const register: Register = (on, rawOptions) => {
     return { result: [{ type: 'text', text: [`${result.items.length} items in ${result.requests} request${result.requests === 1 ? '' : 's'}, sorted by ${input.by ?? Object.keys(input.questions)[0]}`, ...lines].join('\n') }] };
   });
 
+  // a person's prompt is the main loop's task for prune, save /sift itself, which controls sift and is no task.
   // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count
   on('prompt.submit', async (_$, e, next) => {
+    if (!/^\/sift(\s|$)/.test(e.text.trim())) pruneLoops.submitted(e.origin.kind, e.text);
     const warnings = runtime?.log.takeWarnings() ?? [];
     if (warnings.length === 0) return next(e);
     return next({ ...e, context: [...(e.context ?? []), ...warnings] });
@@ -578,6 +574,14 @@ export const register: Register = (on, rawOptions) => {
     return { result: [{ type: 'text', text: await watchControl(rt, { ...input, action }, e.agentId) }] };
   });
 
+  on('tool.call', { tool: PRUNE_TOOL }, async ($, e) => {
+    const input = e as unknown as { action?: string; calls?: number };
+    if (input.action !== 'off' && input.action !== 'on') return { deny: `prune takes action off or on, not ${String(input.action)}` };
+    const text = pruneLoops.control(e.agentId, input.action, input.calls);
+    record('prune', `turned-${input.action}`, { digest: `${e.agentId ?? 'main'}: ${text}` });
+    return { result: [{ type: 'text', text }] };
+  });
+
   on('tool.call', { tool: 'mcp__sift__status' }, async () => {
     const rt = runtime;
     return { result: [{ type: 'text', text: rt ? await statusText(rt) : 'sift is not bound yet' }] };
@@ -596,13 +600,20 @@ export const register: Register = (on, rawOptions) => {
       await rt.log.clear();
       return { text: 'decision log cleared' };
     }
+    if (head === 'prune') {
+      const [action, n] = rest;
+      if (action !== 'off' && action !== 'on') return { text: 'usage: /sift prune off [n] | on' };
+      const text = pruneLoops.control(undefined, action, n === undefined ? undefined : Number(n));
+      record('prune', `turned-${action}`, { digest: `main: ${text}` });
+      return { text };
+    }
     if (head === 'watch') {
       const [action = 'status', ...args] = rest;
       const input: WatchInput = action === 'subscribe' ? { action, repo: args[0], scope: args.slice(1).join(' ') || undefined } : action === 'unsubscribe' ? { action, id: args[0] } : { action, repo: args[0] };
       if (!(WATCH_ACTIONS as readonly string[]).includes(action)) return { text: `unknown watch action ${action}` };
       return { text: await watchControl(rt, input) };
     }
-    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred [repo]` };
+    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift prune off [n]|on, /sift watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred [repo]` };
   });
 };
 

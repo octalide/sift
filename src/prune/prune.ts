@@ -1,6 +1,7 @@
 import { rank } from '../judge/rank.ts';
 import { failureText, type Judge, type Questions } from '../judge/types.ts';
 import { estimateTokens, JEV_LIMITS, truncate } from '../tokens.ts';
+import { PRUNE_TOOL } from './loops.ts';
 
 export type PruneOptions = {
   floorTokens: number;
@@ -24,7 +25,7 @@ export type Chunk = { k: number; from: number; to: number; text: string; protect
 export type PruneContext = {
   tool: string;
   input: Record<string, unknown>;
-  // the newest user text, what the model is working on
+  // the calling loop's task: a subagent's spawn prompt, or the main loop's newest prompt from a person
   task: string;
 };
 
@@ -84,7 +85,7 @@ const NEEDED: Questions = {
   },
 };
 
-// the one-line stub left where a run of chunks was dropped: the range and the call that gets it back
+// the one-line stub left where a run of chunks was dropped: the range, the call that gets it back, and the opt-out
 export type OmissionNote = (from: number, to: number) => string;
 
 export function omissionNote(context: PruneContext): OmissionNote {
@@ -93,9 +94,9 @@ export function omissionNote(context: PruneContext): OmissionNote {
     // output lines map to file lines through the call's offset, so the note is in file lines
     const base = Math.max(1, Number(context.input['offset']) || 1);
     const path = String(context.input['file_path'] ?? 'the file');
-    return (from, to) => stub(base + from - 1, base + to - 1, `re-read ${path} with offset ${base + from - 1} limit ${to - from + 1}`);
+    return (from, to) => stub(base + from - 1, base + to - 1, `re-read ${path} with offset ${base + from - 1} limit ${to - from + 1}, or call ${PRUNE_TOOL} off to read files whole`);
   }
-  if (context.tool === 'Bash') return (from, to) => stub(from, to, 'rerun the command for the full output');
+  if (context.tool === 'Bash') return (from, to) => stub(from, to, 'rerun the command for the full output, or end a command with # sift: full to keep its output whole');
   return (from, to) => stub(from, to, 'rerun the tool call for the full output');
 }
 
