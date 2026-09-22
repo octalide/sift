@@ -32,7 +32,8 @@ export type WatchEvent = {
   conclusion?: string | null;
   ok?: boolean;
   branch?: string;
-  // ci only: what the event reports on, `pr:<n>` when it ran on a head of that pr, else `branch:<name>`, and the commit
+  // ci only: what the event reports on, `pr:<n>` when it ran on a head of that pr, `tag:<name>` when its ref is a tag,
+  // else `branch:<name>`, and the commit
   subject?: string;
   sha?: string;
   // ci run only: the run and its workflow; a newer completed run of the same workflow on the same subject supersedes it
@@ -42,6 +43,8 @@ export type WatchEvent = {
   settled?: boolean;
   // checks on the head of an open pr did not all finish within the stall interval; number is the pr
   stalled?: boolean;
+  // ci run on the head of an open pr: the head's checks still running, or its verdict already out
+  head?: 'pending' | 'settled';
   // settled only: the checks that failed, with the job id of each whose log the forge keeps
   failed?: FailedCheck[];
   // settled failure only: the ci pack's report on each failed check with a log, attached at delivery
@@ -53,7 +56,7 @@ export type WatchEvent = {
 };
 
 // bump when the stored shape changes; a store from an older version is reseeded
-export const STATE_VERSION = 8;
+export const STATE_VERSION = 9;
 
 export type WatchState = {
   version: number;
@@ -76,22 +79,20 @@ export type WatchState = {
   deferred: Deferred[];
   paused: boolean;
   login?: string;
-  // the name of the subagent whose watch start armed the watch; absent when the main loop did
-  armedBy?: string;
-  // the agents that armed the watch for a pr, by its number or head branch, so each ci verdict names the agent whose pr it is
-  armedFor?: ArmedFor[];
+  // the runs a run subscription waits on, read by id each poll until their completion is out
+  awaited: string[];
   interval: number;
   lastPoll?: number;
   lastDelivery?: number;
   failures: number;
 };
 
-export type ArmedFor = { agent: string; ref: string };
-
 export type Deferred = {
   event: WatchEvent;
   reason: string;
   label?: string;
+  // the subscriptions that hold it
+  subs: string[];
 };
 
 export type PendingHead = {
@@ -120,6 +121,7 @@ export function initialState(): WatchState {
     heads: {},
     etags: {},
     deferred: [],
+    awaited: [],
     paused: false,
     interval: 0,
     failures: 0,
@@ -227,9 +229,9 @@ export function recordHeads(heads: Record<string, number>, pulls: PullHead[], ke
   return Object.fromEntries(keys.map((k) => [k, out[k]!]));
 }
 
-// what a run reports on: the pr whose head it ran on, current or past, else its branch. the forge's run does not say
-// whether its ref is a branch or a tag, so a tag push keys as `branch:<tag>`
-export function runSubject(run: { sha?: string; branch?: string }, heads: Record<string, number>): string {
+// what a run reports on: a tag when its ref is one, else the pr whose head it ran on, current or past, else its branch
+export function runSubject(run: { sha?: string; branch?: string; tag?: boolean }, heads: Record<string, number>): string {
+  if (run.tag) return `tag:${run.branch ?? ''}`;
   const pr = run.sha === undefined ? undefined : heads[run.sha];
   return pr === undefined ? `branch:${run.branch ?? ''}` : `pr:${pr}`;
 }
@@ -284,19 +286,4 @@ export function currentState(e: WatchEvent, state: Pick<WatchState, 'pulls' | 'i
   const latest = newerRun([...Object.values(state.runs), ...extra], (r) => r.name === e.workflow && runSubject(r, state.heads) === e.subject, e.run);
   const [sha, conclusion] = latest ? [latest.sha, latest.conclusion] : [e.sha ?? '', e.conclusion];
   return `${e.branch} @${sha.slice(0, 7)}, ${e.workflow} ${conclusion ?? 'unknown'}`;
-}
-
-// the agent a ci verdict is for: the one armed for the pr's number or head branch. once any agent is armed for a pr,
-// a verdict matching none is for nobody; only a watch armed without refs falls back to whoever armed it last
-export function armedAgent(e: WatchEvent, state: Pick<WatchState, 'armedBy' | 'armedFor'>): string | undefined {
-  if (e.kind !== 'ci' || !(e.settled || e.stalled)) return undefined;
-  if (!state.armedFor?.length) return state.armedBy;
-  return state.armedFor.find((a) => a.ref === String(e.number) || a.ref === e.branch)?.agent;
-}
-
-// the agent a delivery's header names: whoever armed the watch last, unless the delivery carries a ci event that
-// names no agent while agents are armed for prs, which would otherwise be relayed to an agent it has nothing to do with
-export function deliveryAgent(events: WatchEvent[], state: Pick<WatchState, 'armedBy' | 'armedFor'>): string | undefined {
-  if (!state.armedFor?.length) return state.armedBy;
-  return events.some((e) => e.kind === 'ci' && !armedAgent(e, state)) ? undefined : state.armedBy;
 }

@@ -34,6 +34,7 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     items: async () => ({ changed: false, rate: {} }),
     runs: async () => ({ changed: false, rate: {} }),
     branchRuns: async () => [],
+    run: async (_r, id) => ({ id, name: 'ci', branch: 'main', sha: 'abc1234def', tag: false, event: 'push', done: false, conclusion: null, ok: false, actor: 'alice', url: `https://x/runs/${id}`, updatedAt: '1' }),
     pulls: async () => ({ changed: true, rate: {}, value: [] }),
     parseUrl: (url) => {
       const m = /^https:\/\/fake\/([^/]+\/[^/]+)\/(issue|pr)\/(\d+)$/.exec(url);
