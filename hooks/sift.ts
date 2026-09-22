@@ -175,7 +175,7 @@ export const register: Register = (on, rawOptions) => {
       return repo;
     };
     // the subject is parsed, and a bad one refused, before any forge request; a url names its own repo
-    const parsed = <K extends ParsedKind>(kind: K, bare?: 'issue' | 'pr') => parseSubject(kind, ref, rt.forge, opts.repo, bare);
+    const parsed = <K extends ParsedKind>(kind: K) => parseSubject(kind, ref, rt.forge, opts.repo);
     switch (pack.subject) {
       case 'issue': {
         const p = parsed('issue');
@@ -201,12 +201,11 @@ export const register: Register = (on, rawOptions) => {
         return s;
       }
       case 'rules': {
-        // a bare number is a pull request unless text says it is an issue; a text subject is the text itself
-        const p = parsed('mixed', opts.text === 'issue' ? 'issue' : 'pr').subject;
-        const host = { forge: rt.forge, git: rt.git, repo, source: ruleSource(rt, opts.repo), judge: rt.judge, store: rt.store };
+        // an issue by number or url, or free text: text when given, else the subject itself
+        const p = parsed('rules').subject;
+        const host = { forge: rt.forge, repo, source: ruleSource(rt, opts.repo), judge: rt.judge, store: rt.store };
         if (p.kind === 'text') return rulesSubject(host, { kind: 'text', ref: opts.text ?? p.text }, rt.config);
-        if (p.kind === 'commit') return rulesSubject(host, p, rt.config);
-        return rulesSubject({ ...host, repo: p.repo ?? needRepo() }, { kind: p.kind, number: p.number }, rt.config);
+        return rulesSubject({ ...host, repo: p.repo ?? needRepo() }, { kind: 'issue', number: p.number }, rt.config);
       }
       case 'tree': {
         // text is the subject when given; otherwise an issue or pull request is its title and body, anything else the text itself
@@ -376,14 +375,14 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'grade',
         description:
-          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists), hunks (the same subjects as pr; judges each hunk of the diff alone against the stated purpose and lists the hunks that are unrelated to it, workarounds, or behaviour changes no test covers), commit (a ref such as a sha, branch or tag, or a range like main..HEAD), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (a PR number or URL, an issue number with text="issue" or an issue URL, a commit ref or range, or free text in text), locate (an issue number or URL, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open), ci (a failed job as job:<id>, a run id or run:<id> for its first failed job, or the log in text; the lines that explain the failure, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
+          'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists; mechanical checks only: link, target, branch, CI, template, commit format, drift), commit (a ref such as a sha, branch or tag, or a range like main..HEAD; the commit format check only), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (an issue number or URL, or free text in text; a PR or commit is refused), locate (an issue number or URL, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open), ci (a failed job as job:<id>, a run id or run:<id> for its first failed job, or the log in text; the lines that explain the failure, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. Repo-defined packs under .sift/packs are available by name.',
         inputSchema: {
           type: 'object',
           properties: {
             pack: { type: 'string', description: 'pack name' },
             subject: { type: 'string', description: 'what the pack grades: an issue or PR number (N or #N) or URL, a commit ref or range, "release" or a version. See the pack list for what each accepts' },
             repo: { type: 'string', description: 'owner/name, defaults to the current repository. A release grade for another repo, or from a directory that is not a checkout, reads that repo from the code host' },
-            text: { type: 'string', description: 'free text subject for the rules and locate packs, the plan for the plan pack, a job log for the ci pack, or "issue" to grade an issue number against the rules' },
+            text: { type: 'string', description: 'free text subject for the rules and locate packs, the plan for the plan pack, or a job log for the ci pack' },
             ref: { type: 'string', description: 'release pack: the branch or sha the release is cut from. Defaults to HEAD in a checkout, else the configured PR target branch, else the default branch' },
             top: { type: 'number', description: 'locate pack: how many paths to list per level, default 20' },
           },
@@ -486,7 +485,7 @@ export const register: Register = (on, rawOptions) => {
     const outbound = options.gateOutbound ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, rt.channels) : undefined;
     if (outbound) {
       const rulesPack = rt.packs['rules'];
-      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, git: rt.git, repo: rt.repo, source: ruleSource(rt, undefined), judge: rt.judge, store: rt.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, rt.config) : undefined;
+      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, repo: rt.repo, source: ruleSource(rt, undefined), judge: rt.judge, store: rt.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, rt.config) : undefined;
       if (rulesPack && subject) {
         const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, rt.config);
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });

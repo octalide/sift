@@ -85,155 +85,16 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
   pr: {
     name: 'pr',
     subject: 'pr',
-    description: 'Does this PR do what its issue asks, nothing more, without workarounds, and is it safe to merge?',
+    description: 'Is this PR linked, targeted, named, templated, committed and checked as the repository requires, and has its base moved under it?',
     checks: ['pr.linked', 'pr.target', 'pr.branch', 'pr.ci', 'pr.template', 'pr.commits', 'pr.drift'],
-    questions: {
-      addresses_issue: {
-        type: 'noul',
-        instructions: 'The diff implements what the linked issue asks for.',
-        criteria: {
-          true: 'The diff does what the issue asks, or explains what it leaves out.',
-          false: 'The diff solves a different problem, or only part of the issue with no explanation.',
-        },
-        when: 'has_issue',
-        severity: 'fail',
-      },
-      scope_creep: {
-        type: 'noul',
-        instructions: 'The diff changes files or behaviour unrelated to the stated purpose of the PR.',
-        criteria: {
-          true: 'The diff carries unrelated refactors, formatting sweeps, or drive-by fixes in other subsystems.',
-          false: 'Every change serves the stated purpose, including small changes needed to make the main change compile.',
-        },
-        inverted: true,
-        severity: 'warn',
-      },
-      workaround: {
-        type: 'noul',
-        instructions: 'The diff patches a symptom rather than its cause: a defensive fallback, a swallowed error, a special case added where a general fix was needed, or a TODO left in place of the fix.',
-        inverted: true,
-        severity: 'warn',
-      },
-      contract_change: {
-        type: 'noul',
-        instructions: 'The diff changes a public interface, file format, CLI surface, or protocol that code outside this repository could depend on.',
-        inverted: true,
-        severity: 'info',
-      },
-      tests_cover: {
-        type: 'noul',
-        instructions: 'The behaviour the diff adds or changes is exercised by tests in the same diff or by existing tests it visibly updates.',
-        when: 'has_diff',
-        severity: 'info',
-      },
-      risk: {
-        type: 'score',
-        instructions: 'How likely is this PR to break something that works today?',
-        criteria: [
-          'low: additive or isolated, easy to revert',
-          'medium: touches shared code paths or state',
-          'high: changes core logic, data formats, or concurrency, or is very large',
-        ],
-        severity: 'info',
-      },
-    },
-    // each file the base also changed since the branch point, the two patches side by side
-    rank: [
-      {
-        from: 'drift',
-        label: 'path',
-        list: 'each',
-        questions: {
-          drift_collides: {
-            type: 'noul',
-            instructions: 'The pull request\'s patch to {path} and the base branch\'s patch to it conflict in meaning: merging both would leave the file wrong even where the lines do not overlap.',
-            criteria: {
-              true: 'One side changes what the other relies on: a renamed or removed symbol the other still uses, the same behaviour changed two ways, a contract one side extends and the other rewrites.',
-              false: 'The two patches touch independent parts of the file, or make the same change, and both stand after a merge.',
-            },
-            inverted: true,
-            severity: 'warn',
-          },
-        },
-      },
-    ],
-  },
-  hunks: {
-    name: 'hunks',
-    subject: 'pr',
-    description: 'Which hunk of this PR is wrong: unrelated to its stated purpose, a workaround, or a behaviour change no test covers?',
-    checks: [],
     questions: {},
-    // one request per hunk, so no hunk colours another: the hunk is read against the stated purpose and the map of the whole change
-    rank: [
-      {
-        from: 'hunks',
-        mode: 'isolated',
-        list: 'violated',
-        label: '{file} {header}',
-        context: ['title', 'body', 'linked_issue', 'commits', 'changes'],
-        questions: {
-          unrelated: {
-            type: 'noul',
-            instructions: 'The hunk {header} of {file} does not serve the stated purpose of the pull request.',
-            criteria: {
-              true: 'The hunk is an unrelated refactor, a formatting sweep, or a drive-by fix in another subsystem that the title, body, linked issue and commits do not call for.',
-              false: 'The hunk does part of what the pull request says it does, or is the small change needed to make that compile, build or read right.',
-            },
-            inverted: true,
-            severity: 'warn',
-          },
-          workaround: {
-            type: 'noul',
-            instructions: 'The hunk {header} of {file} patches a symptom rather than its cause: a defensive fallback, a swallowed error, a special case added where a general fix was needed, or a TODO left in place of the fix.',
-            inverted: true,
-            severity: 'warn',
-          },
-          untested: {
-            type: 'noul',
-            instructions: 'The hunk {header} of {file} changes behaviour and no hunk of the diff adds or changes a test for it.',
-            criteria: {
-              true: 'The hunk changes what the code does and none of the hunks listed under changes, judged by their file and header, touches a test of that behaviour.',
-              false: 'The hunk changes no behaviour (a comment, a type, a rename, documentation, a test itself), or a hunk under changes visibly tests what it changes.',
-            },
-            inverted: true,
-            severity: 'warn',
-          },
-        },
-      },
-    ],
   },
   commit: {
     name: 'commit',
     subject: 'commit',
-    description: 'Do these commit messages follow the repository\'s commit format and describe their diffs honestly?',
+    description: 'Do these commit messages follow the repository\'s commit format?',
     checks: ['commit.format'],
-    questions: {
-      type_matches: {
-        type: 'choice',
-        instructions: 'Which type from the repository\'s commit format does the diff actually warrant?',
-        options: 'commit_types',
-        when: 'has_diff',
-        severity: 'info',
-      },
-      describes_change: {
-        type: 'noul',
-        instructions: 'The commit subject line accurately describes what the diff does.',
-        criteria: {
-          true: 'The subject names the change the diff makes, at the scale the diff makes it.',
-          false: 'The subject names a different change, is vague (update, fix stuff, wip), or claims more than the diff does.',
-        },
-        when: 'has_diff',
-        severity: 'warn',
-      },
-      breaking_missed: {
-        type: 'noul',
-        instructions: 'The diff removes or changes a public interface in a way that breaks existing callers, yet the message does not mark it as breaking.',
-        when: 'has_diff',
-        inverted: true,
-        severity: 'fail',
-      },
-    },
+    questions: {},
   },
   release: {
     name: 'release',
