@@ -32,6 +32,12 @@ export type WatchEvent = {
   conclusion?: string | null;
   ok?: boolean;
   branch?: string;
+  // ci only: what the event reports on, `pr:<n>` when it ran on a head of that pr, else `branch:<name>`, and the commit
+  subject?: string;
+  sha?: string;
+  // ci run only: the run and its workflow; a newer completed run of the same workflow on the same subject supersedes it
+  run?: string;
+  workflow?: string;
   // every check on the head of an open pr completed; number is the pr
   settled?: boolean;
   // checks on the head of an open pr did not all finish within the stall interval; number is the pr
@@ -47,7 +53,7 @@ export type WatchEvent = {
 };
 
 // bump when the stored shape changes; a store from an older version is reseeded
-export const STATE_VERSION = 7;
+export const STATE_VERSION = 8;
 
 export type WatchState = {
   version: number;
@@ -64,6 +70,8 @@ export type WatchState = {
   unchecked: Record<string, true>;
   // the open pr heads as of the last 200 on the pulls probe; a 304 leaves it in place
   pulls: PullHead[];
+  // sha -> pr number of every open pr head seen, newest last, so a run on a head that has since moved still keys to its pr
+  heads: Record<string, number>;
   etags: { issues?: string; runs?: string; pulls?: string };
   deferred: Deferred[];
   paused: boolean;
@@ -109,6 +117,7 @@ export function initialState(): WatchState {
     pending: {},
     unchecked: {},
     pulls: [],
+    heads: {},
     etags: {},
     deferred: [],
     paused: false,
@@ -189,6 +198,9 @@ export function diffRuns(old: Record<string, Run>, fresh: Record<string, Run>, n
       conclusion: v.conclusion,
       ok: v.ok,
       branch: v.branch,
+      sha: v.sha,
+      run: id,
+      workflow: v.name,
       isNew: true,
     });
   }
@@ -202,6 +214,34 @@ export function trimRuns(runs: Record<string, Run>, keep = 200): Record<string, 
     .sort((a, b) => a - b)
     .slice(-keep);
   return Object.fromEntries(ids.map((id) => [String(id), runs[String(id)]!]));
+}
+
+// the pr heads just listed, added to the known heads as the newest, the oldest trimmed so the store stays small
+export function recordHeads(heads: Record<string, number>, pulls: PullHead[], keep = 500): Record<string, number> {
+  const out = { ...heads };
+  for (const p of pulls) {
+    delete out[p.sha];
+    out[p.sha] = p.number;
+  }
+  const keys = Object.keys(out).slice(-keep);
+  return Object.fromEntries(keys.map((k) => [k, out[k]!]));
+}
+
+// what a run reports on: the pr whose head it ran on, current or past, else its branch. the forge's run does not say
+// whether its ref is a branch or a tag, so a tag push keys as `branch:<tag>`
+export function runSubject(run: { sha?: string; branch?: string }, heads: Record<string, number>): string {
+  const pr = run.sha === undefined ? undefined : heads[run.sha];
+  return pr === undefined ? `branch:${run.branch ?? ''}` : `pr:${pr}`;
+}
+
+// the newest completed run of a workflow on a subject, newer than the given run id
+export function newerRun(runs: Iterable<Run>, match: (r: Run) => boolean, than: string | undefined): Run | undefined {
+  let best: Run | undefined;
+  for (const r of runs) {
+    if (!r.done || !match(r) || Number(r.id) <= Number(than ?? -1)) continue;
+    if (!best || Number(r.id) > Number(best.id)) best = r;
+  }
+  return best;
 }
 
 // keep the newest settled heads so the store stays small
@@ -229,6 +269,21 @@ export function formatEvent(e: WatchEvent): string {
   if (e.kind === 'ci' && e.stalled) return `ci stalled: pr #${e.number} ${e.title}`;
   const head = e.kind === 'ci' ? `ci ${e.conclusion ?? 'unknown'}: ${e.title}` : `${e.kind} #${e.number} ${e.changes.join(', ')}: ${e.title}`;
   return head;
+}
+
+// where a ci event's subject stands at delivery, from what the poll already holds: a pr's state and whether its head
+// moved, or the newest completed run of the event's workflow on its branch subject, the extra runs counted beside the stored ones
+export function currentState(e: WatchEvent, state: Pick<WatchState, 'pulls' | 'items' | 'runs' | 'heads'>, extra: Run[] = []): string {
+  const pr = /^pr:(\d+)$/.exec(e.subject ?? '');
+  if (pr) {
+    const open = state.pulls.find((p) => p.number === Number(pr[1]));
+    if (open) return open.sha === e.sha ? 'open, head unchanged' : `open, head @${open.sha.slice(0, 7)} (moved)`;
+    const item = state.items[pr[1]!];
+    return item?.merged ? 'merged' : item ? 'closed' : 'not open';
+  }
+  const latest = newerRun([...Object.values(state.runs), ...extra], (r) => r.name === e.workflow && runSubject(r, state.heads) === e.subject, e.run);
+  const [sha, conclusion] = latest ? [latest.sha, latest.conclusion] : [e.sha ?? '', e.conclusion];
+  return `${e.branch} @${sha.slice(0, 7)}, ${e.workflow} ${conclusion ?? 'unknown'}`;
 }
 
 // the agent a ci verdict is for: the one armed for the pr's number or head branch. once any agent is armed for a pr,

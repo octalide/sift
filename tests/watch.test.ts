@@ -227,7 +227,7 @@ describe('watcher', () => {
     await watcher.tick();
     expect(delivered).toHaveLength(1);
     const lines = delivered[0]!.split('\n');
-    expect(lines[1]).toBe('ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (3 checks, failed: test, ext)');
+    expect(lines[1]).toBe('ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (3 checks, failed: test, ext) · now: open, head unchanged');
     expect(lines[2]).toBe('  by me · https://x/pull/3 · ci settled on pr');
     expect(lines[3]).toBe('  sift ci o/r job 7: PASS (judge: fake)');
     expect(lines[4]).toBe('    [info] log.trimmed: 2 of 2 lines read from the failing step Run npm test');
@@ -409,9 +409,9 @@ describe('watcher', () => {
     // a match by pr number
     let out = await armed([['issue-3', '3']]);
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
-    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
     // pr 4 matches no entry of a non-empty set and names no agent, on its line or in the header
-    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build) · now: open, head unchanged');
     expect(out.lines[0]).toBe('[sift watch o/r]');
 
     // a miss: armed for a pr that is not settling, neither line nor the header names the stale agent
@@ -424,21 +424,21 @@ describe('watcher', () => {
     out = await armed([['issue-5', undefined]]);
     expect(out.state.armedFor).toBeUndefined();
     expect(out.lines[0]).toBe('[sift watch o/r for issue-5]');
-    expect(out.lines).toContain('for issue-5: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).toContain('for issue-5: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('for issue-5: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
+    expect(out.lines).toContain('for issue-5: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build) · now: open, head unchanged');
 
     // two agents on two prs in one poll, one by number and one by head branch, each line names its own agent
     out = await armed([['issue-3', '3'], ['issue-4', 'feat/4'], ['issue-4', 'feat/4']]);
     expect(out.state.armedBy).toBe('issue-4');
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }, { agent: 'issue-4', ref: 'feat/4' }]);
     expect(out.lines[0]).toBe('[sift watch o/r for issue-4]');
-    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).toContain('for issue-4: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
+    expect(out.lines).toContain('for issue-4: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build) · now: open, head unchanged');
 
     // a leading # on a pr number is stripped when the ref is stored, so #3 names pr 3
     out = await armed([['issue-3', '#3']]);
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
-    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
     expect(armRef('#3')).toBe('3');
     expect(armRef('3')).toBe('3');
     expect(armRef('feat/3')).toBe('feat/3');
@@ -447,22 +447,22 @@ describe('watcher', () => {
     // one ref names one agent: a later arm for the same pr replaces the entry, the newest wins
     out = await armed([['issue-3', '3'], ['issue-3b', '#3']]);
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3b', ref: '3' }]);
-    expect(out.lines).toContain('for issue-3b: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).not.toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-3b: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
+    expect(out.lines).not.toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
 
     // a start without a ref keeps the set and replaces the name, which an unmatched verdict still does not take
     out = await armed([['issue-3', '3'], ['issue-5', undefined]]);
     expect(out.state.armedBy).toBe('issue-5');
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
     expect(out.lines[0]).toBe('[sift watch o/r]');
-    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
+    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build) · now: open, head unchanged');
     // a main-loop start clears both
     out = await armed([['issue-3', '3'], [undefined, undefined]]);
     expect(out.state.armedBy).toBeUndefined();
     expect(out.state.armedFor).toBeUndefined();
     expect(out.lines[0]).toBe('[sift watch o/r]');
-    expect(out.lines).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
   });
 
   it('keeps the last armer on a delivery of non-ci events whatever the set holds, and drops it for an unmatched ci event', () => {
