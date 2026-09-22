@@ -3,7 +3,7 @@ import type { Check, Conditional, Run, WatchItem } from '../src/forge/forge.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
-import { diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
+import { armedAgent, deliveryAgent, diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { armedNotice, armingAgent, armRef, Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -378,7 +378,7 @@ describe('watcher', () => {
     expect(delivered[0]!.split('\n')[0]).toBe('[sift watch o/r]');
   });
 
-  it('names the agent armed for a pr on its ci verdict line, and the last armer on a verdict no agent is armed for', async () => {
+  it('names the agent armed for a pr on its ci verdict line, and no agent on a verdict none is armed for', async () => {
     const options = { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules };
     // two prs, 3 on feat/3 and 4 on feat/4, whose checks all finish in the second tick
     const twoPulls = () => {
@@ -409,14 +409,23 @@ describe('watcher', () => {
     // a match by pr number
     let out = await armed([['issue-3', '3']]);
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
-    expect(out.lines[0]).toBe('[sift watch o/r for issue-3]');
     expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    // pr 4 matches no entry and falls back to the last armer
-    expect(out.lines).toContain('for issue-3: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    // pr 4 matches no entry of a non-empty set and names no agent, on its line or in the header
+    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines[0]).toBe('[sift watch o/r]');
 
-    // a miss: armed for a pr that is not settling, both lines fall back
+    // a miss: armed for a pr that is not settling, neither line nor the header names the stale agent
     out = await armed([['issue-9', '9']]);
-    expect(out.lines.filter((l) => l.startsWith('for issue-9: ci settled'))).toHaveLength(2);
+    expect(out.lines[0]).toBe('[sift watch o/r]');
+    expect(out.lines.filter((l) => l.startsWith('ci settled'))).toHaveLength(2);
+    expect(out.lines.some((l) => l.includes('issue-9'))).toBe(false);
+
+    // an empty set: armed without a ref, every verdict and the header fall back to the last armer
+    out = await armed([['issue-5', undefined]]);
+    expect(out.state.armedFor).toBeUndefined();
+    expect(out.lines[0]).toBe('[sift watch o/r for issue-5]');
+    expect(out.lines).toContain('for issue-5: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-5: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
 
     // two agents on two prs in one poll, one by number and one by head branch, each line names its own agent
     out = await armed([['issue-3', '3'], ['issue-4', 'feat/4'], ['issue-4', 'feat/4']]);
@@ -441,17 +450,43 @@ describe('watcher', () => {
     expect(out.lines).toContain('for issue-3b: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
     expect(out.lines).not.toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
 
-    // a start without a ref keeps the set and replaces the name; a main-loop start clears both
+    // a start without a ref keeps the set and replaces the name, which an unmatched verdict still does not take
     out = await armed([['issue-3', '3'], ['issue-5', undefined]]);
     expect(out.state.armedBy).toBe('issue-5');
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
+    expect(out.lines[0]).toBe('[sift watch o/r]');
     expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).toContain('for issue-5: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    // a main-loop start clears both
     out = await armed([['issue-3', '3'], [undefined, undefined]]);
     expect(out.state.armedBy).toBeUndefined();
     expect(out.state.armedFor).toBeUndefined();
     expect(out.lines[0]).toBe('[sift watch o/r]');
     expect(out.lines).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+  });
+
+  it('keeps the last armer on a delivery of non-ci events whatever the set holds, and drops it for an unmatched ci event', () => {
+    const base = { id: 'x', title: 't', user: 'u', bot: false, url: 'https://x', changes: [], at: 0, isNew: true };
+    const issue: WatchEvent = { ...base, kind: 'issue', number: 7 };
+    const verdict = (number: number, branch: string): WatchEvent => ({ ...base, kind: 'ci', number, branch, settled: true, conclusion: 'success', ok: true });
+    const run: WatchEvent = { ...base, kind: 'ci', branch: 'dev', conclusion: 'success', ok: true };
+    const set = { armedBy: 'issue-9', armedFor: [{ agent: 'issue-3', ref: '3' }] };
+    const empty = { armedBy: 'issue-9' };
+
+    expect(armedAgent(issue, set)).toBeUndefined();
+    expect(deliveryAgent([issue], set)).toBe('issue-9');
+    expect(deliveryAgent([issue], empty)).toBe('issue-9');
+
+    expect(armedAgent(verdict(3, 'feat/3'), set)).toBe('issue-3');
+    expect(armedAgent(verdict(4, 'feat/4'), set)).toBeUndefined();
+    expect(armedAgent(verdict(4, 'feat/4'), empty)).toBe('issue-9');
+    expect(armedAgent(verdict(4, 'feat/4'), { armedBy: 'issue-9', armedFor: [] })).toBe('issue-9');
+
+    expect(deliveryAgent([verdict(3, 'feat/3')], set)).toBe('issue-9');
+    expect(deliveryAgent([verdict(4, 'feat/4')], set)).toBeUndefined();
+    expect(deliveryAgent([issue, verdict(4, 'feat/4')], set)).toBeUndefined();
+    expect(deliveryAgent([run], set)).toBeUndefined();
+    expect(deliveryAgent([run, verdict(4, 'feat/4')], empty)).toBe('issue-9');
   });
 
   it('tells a subagent that armed the watch where deliveries go, by the name SendMessage reaches it by', () => {

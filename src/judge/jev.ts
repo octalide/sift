@@ -1,4 +1,4 @@
-import type { Answer, Answers, Judge, Judgement, Questions, Usage } from './types.ts';
+import type { Answer, Answers, Judge, Judgement, KeySource, Questions, Usage } from './types.ts';
 import { estimateTokens } from '../tokens.ts';
 
 export type FetchLike = (
@@ -10,6 +10,7 @@ export type JevConfig = {
   apiKey: string;
   model: string;
   baseUrl: string;
+  keySource?: KeySource;
 };
 
 export const JEV_DEFAULTS = {
@@ -137,7 +138,9 @@ export class JevJudge implements Judge {
       return { ok: false, reason: 'rejected', message: response.text.slice(0, 300), backend: this.name, usage };
     }
     if (!response.ok) {
-      return { ok: false, reason: 'unavailable', message: `http ${response.status}: ${response.text.slice(0, 300)}`, backend: this.name, status: response.status, usage };
+      // an authentication refusal names where the key came from, since the key that was sent may not be the one in view
+      const keySource = response.status === 401 || response.status === 403 ? this.config.keySource : undefined;
+      return { ok: false, reason: 'unavailable', message: `http ${response.status}: ${response.text.slice(0, 300)}`, backend: this.name, status: response.status, keySource, usage };
     }
     const answers = parseResponse(response.text, questions);
     if (typeof answers === 'string') {

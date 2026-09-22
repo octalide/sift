@@ -1,5 +1,5 @@
 import { rank } from '../judge/rank.ts';
-import type { Judge, Questions } from '../judge/types.ts';
+import { failureText, type Judge, type Questions } from '../judge/types.ts';
 import { estimateTokens, JEV_LIMITS, truncate } from '../tokens.ts';
 
 export type PruneOptions = {
@@ -136,7 +136,7 @@ export async function prune(text: string, context: PruneContext, judge: Judge, o
     judge,
     { mode: 'batched', context: { tool: context.tool, input: context.input, task: truncate(context.task, 2000) }, maxRequestTokens: options.maxRequestTokens },
   );
-  if (!ranked.ok) return { ...none('judge failed'), skipped: undefined, error: `${ranked.reason}: ${ranked.message}` };
+  if (!ranked.ok) return { ...none('judge failed'), skipped: undefined, error: failureText(ranked) };
   const scores: Record<number, number> = {};
   for (const r of ranked.items) if (!chunks[r.index]!.protected) scores[r.index] = r.value;
   const keep = (c: Chunk) => c.protected || (scores[c.k] ?? 1) >= options.keepThreshold;

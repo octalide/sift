@@ -1,6 +1,6 @@
 import { bandOf } from '../judge/bands.ts';
 import { entryOf, fill, fillQuestion, rank } from '../judge/rank.ts';
-import { DEFAULT_THRESHOLDS, type Answer, type Judge, type Questions, type Question } from '../judge/types.ts';
+import { DEFAULT_THRESHOLDS, failureText, type Answer, type Judge, type Questions, type Question } from '../judge/types.ts';
 import type { RepoConfig } from '../repo/config.ts';
 import { CHECKS } from './checks.ts';
 import type { Finding, Judged, Pack, PackQuestion, RankedItem, RankedStep, RankStep, Report, Subject, Verdict } from './types.ts';
@@ -131,7 +131,7 @@ async function runStep(s: Step, items: Record<string, unknown>[], state: Record<
   const list = s.step.list ?? 'each';
   if (items.length === 0) return { ranked: { step: s.step.from, list, total: 0, kept: 0, items: [] }, kept: [], dropped: 0, backend: judgeBackend.name };
   const result = await rank(items, s.questions, judgeBackend, { mode: s.step.mode ?? 'batched', context: contextOf(state, s.step.context), by: s.by, fields: s.step.fields });
-  if (!result.ok) return { backend: result.backend, error: `${result.reason}: ${result.message}` };
+  if (!result.ok) return { backend: result.backend, error: failureText(result) };
   // a question the judge left unanswered for an item is unclear and counted as dropped, never thrown on
   let missing = 0;
   const all = result.items.map((r) => {
@@ -187,7 +187,7 @@ export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge,
     const result = await judgeBackend.ask(state, batch);
     backend = result.backend;
     if (!result.ok) {
-      judgeError = `${result.reason}: ${result.message}`;
+      judgeError = failureText(result);
       break;
     }
     for (const [id, answer] of Object.entries(result.answers)) {
