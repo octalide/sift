@@ -189,8 +189,65 @@ describe('prune opt-out', () => {
     const loops = new PruneLoops();
     loops.submitted('composer', 'review');
     const r = await pruneCall(read({ file_path: '/src/a.ts' }), readOut(), loops, dropping(), OPTIONS, sink());
-    expect(content(r)).toContain('re-read /src/a.ts with offset 21 limit 160, or call mcp__sift__prune off to read files whole]');
+    expect(content(r)).toContain('re-read /src/a.ts with offset 21 limit 180, or call mcp__sift__prune off to read files whole]');
     const b = await pruneCall(bash('make'), bashOut(), loops, dropping(), OPTIONS, sink());
     expect(stdout(b)).toContain('rerun the command for the full output, or end a command with # sift: full to keep its output whole]');
+  });
+});
+
+// drops exactly the chunks named, keeps every other
+function droppingChunks(drop: number[]): Judge {
+  return {
+    name: 'fake',
+    ask: async (_state, questions: Questions) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(questions).map((k) => [k, { type: 'noul' as const, p: drop.includes(Number(k.slice(k.lastIndexOf('_') + 1))) ? 0 : 1 }])) }),
+  };
+}
+
+describe('prune Read only at its tail', () => {
+  const numbered = [...Array(200).keys()].map((i) => `file line ${i + 1}`).join('\n');
+  const numberedOut = () => ({ result: { type: 'text', file: { filePath: '/src/a.ts', content: numbered, numLines: 200, startLine: 1, totalLines: 200 } } });
+  const file = (r: { result?: unknown }) => (r.result as { file: { content: string; numLines: number; startLine: number } }).file;
+  const loops = () => {
+    const l = new PruneLoops();
+    l.submitted('composer', 'review');
+    return l;
+  };
+  // every line the engine will number as startLine + i must be that file line, the trailing note aside
+  const numberedTrue = (r: { result?: unknown }) => {
+    const f = file(r);
+    f.content.split('\n').forEach((l, i) => {
+      if (!l.startsWith('[sift:')) expect(l).toBe(`file line ${f.startLine + i}`);
+    });
+  };
+
+  it('passes a Read whose low chunk sits in the middle whole, since a gap would misnumber the lines after it', async () => {
+    const s = sink();
+    const r = await pruneCall(read({ file_path: '/src/a.ts' }), numberedOut(), loops(), droppingChunks([4]), OPTIONS, s);
+    expect(file(r).content).toBe(numbered);
+    expect(file(r).numLines).toBe(200);
+    numberedTrue(r);
+    expect(s.decisions[0]).toEqual({ action: 'none', extra: { digest: 'Read: gap would misnumber lines' } });
+  });
+
+  it('prunes a low tail to the kept prefix and a trailing note, with numLines the lines returned', async () => {
+    const r = await pruneCall(read({ file_path: '/src/a.ts' }), numberedOut(), loops(), droppingChunks([8, 9]), OPTIONS, sink());
+    const lines = file(r).content.split('\n');
+    expect(lines).toHaveLength(161);
+    expect(file(r).numLines).toBe(161);
+    expect(lines[160]).toContain('[sift: lines 161-200 (40 lines) omitted');
+    numberedTrue(r);
+  });
+
+  it('keeps a low middle chunk in front of a kept one and omits only the run after the last kept chunk', async () => {
+    const r = await pruneCall(read({ file_path: '/src/a.ts' }), numberedOut(), loops(), droppingChunks([3, 7, 8, 9]), OPTIONS, sink());
+    const lines = file(r).content.split('\n');
+    expect(lines).toHaveLength(141);
+    expect(lines.filter((l) => l.startsWith('[sift:'))).toEqual([expect.stringContaining('lines 141-200 (60 lines)')]);
+    numberedTrue(r);
+  });
+
+  it('still omits a Bash output in the middle, which has no gutter', async () => {
+    const r = await pruneCall(bash('make'), bashOut(), loops(), droppingChunks([4]), OPTIONS, sink());
+    expect(stdout(r)).toContain('[sift: lines 81-100 (20 lines) omitted');
   });
 });

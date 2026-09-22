@@ -40,6 +40,10 @@ export type PruneResult = {
   error?: string;
 };
 
+// tools whose output may lose lines only at its end: the engine numbers a Read's content from its one startLine
+// and has no way to show a gap, so an omission in front of kept lines would misnumber every line after it
+const TAIL_ONLY = new Set(['Read']);
+
 const DIAGNOSTIC = /\b(error|errors|warning|warn|fail|failed|failure|exception|traceback|panic|fatal|denied|not found|cannot|unexpected|assert)\b|✗|✘|FAIL|Error:/i;
 const MAX_LINE = 2000;
 
@@ -55,7 +59,7 @@ function pieces(text: string): Piece[] {
   return out;
 }
 
-export function chunkText(text: string, chunkLines: number, maxChunks: number): Chunk[] {
+export function chunkText(text: string, chunkLines: number, maxChunks: number, protectLast = true): Chunk[] {
   const all = pieces(text);
   let per = chunkLines;
   if (Math.ceil(all.length / per) > maxChunks) per = Math.ceil(all.length / maxChunks);
@@ -68,7 +72,7 @@ export function chunkText(text: string, chunkLines: number, maxChunks: number): 
   }
   if (chunks.length > 0) {
     chunks[0]!.protected = true;
-    chunks[chunks.length - 1]!.protected = true;
+    if (protectLast) chunks[chunks.length - 1]!.protected = true;
   }
   return chunks;
 }
@@ -127,7 +131,8 @@ export function assemble(chunks: Chunk[], keep: (c: Chunk) => boolean, note: Omi
 export async function prune(text: string, context: PruneContext, judge: Judge, options: PruneOptions): Promise<PruneResult> {
   const none = (skipped: string): PruneResult => ({ text, chunks: 0, kept: 0, dropped: 0, scores: {}, requests: 0, skipped });
   if (estimateTokens(text) < options.floorTokens) return none('under floor');
-  const chunks = chunkText(text, options.chunkLines, options.maxChunks);
+  const tailOnly = TAIL_ONLY.has(context.tool);
+  const chunks = chunkText(text, options.chunkLines, options.maxChunks, !tailOnly);
   const judged = chunks.filter((c) => !c.protected);
   if (judged.length === 0) return none('every chunk protected');
   // every chunk rides in the state so the judge reads the whole output, protected ones are asked about and ignored
@@ -140,7 +145,11 @@ export async function prune(text: string, context: PruneContext, judge: Judge, o
   if (!ranked.ok) return { ...none('judge failed'), skipped: undefined, error: failureText(ranked) };
   const scores: Record<number, number> = {};
   for (const r of ranked.items) if (!chunks[r.index]!.protected) scores[r.index] = r.value;
-  const keep = (c: Chunk) => c.protected || (scores[c.k] ?? 1) >= options.keepThreshold;
+  const needed = (c: Chunk) => c.protected || (scores[c.k] ?? 1) >= options.keepThreshold;
+  // a tail-only tool keeps everything up to its last needed chunk and omits only what follows it
+  const last = chunks.findLastIndex(needed);
+  const keep = tailOnly ? (c: Chunk) => c.k <= last : needed;
+  if (tailOnly && last === chunks.length - 1 && chunks.some((c) => !needed(c))) return { ...none('gap would misnumber lines'), chunks: chunks.length, kept: chunks.length, scores, requests: ranked.requests };
   const kept = chunks.filter(keep).length;
   return {
     text: assemble(chunks, keep, omissionNote(context)),
