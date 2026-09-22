@@ -25,7 +25,7 @@ function outputOf(tool: string, result: unknown): string | undefined {
 function withOutput(tool: string, result: unknown, text: string): { result: Record<string, unknown> } {
   if (tool === 'Bash') return { result: { ...(result as Record<string, unknown>), stdout: text } };
   const read = result as { file: Record<string, unknown> } & Record<string, unknown>;
-  return { result: { ...read, file: { ...read.file, content: text } } };
+  return { result: { ...read, file: { ...read.file, content: text, numLines: text.split('\n').length } } };
 }
 
 // the post-call prune step: the floor, then the loop's back-offs with no judge call, then the judge

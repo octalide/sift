@@ -271,6 +271,8 @@ Output over `pruneFloorTokens` (estimated) from the tools in `pruneTools` is spl
 
 For a Read the range is in file lines (the call's offset is applied), so the re-read named by the note lands on the omitted text. A judge failure passes the output through untouched.
 
+A Read is pruned only at its tail. The engine numbers a Read's content consecutively from its one `startLine` and cannot show a gap, so a note in front of kept lines would shift every line after it off its file line. A Read keeps every chunk up to its last needed one, the single note goes last, and `numLines` is the number of lines returned. A Read whose low chunks all sit in front of a needed one passes whole, logged as `prune none` with `gap would misnumber lines`. Bash output has no line numbers and is pruned anywhere.
+
 The task is the calling loop's own. In a subagent it is the prompt the subagent was spawned with, recorded by the `agent.spawn` hook under its agentId. In the main loop it is the newest prompt a person submitted (origin `composer`, `bridge` or `sdk`); a plugin's prompt such as a watch delivery, a task notification, a peer session's message and `/sift` itself leave it as it was. A loop with no recorded task (a subagent spawned before the plugin loaded) is not pruned.
 
 Before any judge call, prune backs off mechanically, at no cost, and passes the output untouched when:
@@ -488,6 +490,8 @@ Fixed: the watch drops superseded CI news. A newer completed run of the same wor
 Added: `grade` takes `cwd` and reads the checkout of that directory, or of the directory the calling subagent was spawned in, instead of always the session's main working tree: its HEAD, working tree, repository, conventions and packs. A `commit`, `pr` range or `locate` grade whose `repo` is not its checkout's repository is refused, where `commit` ignored `repo` and `locate` read the session's checkout. A grade of an issue, PR, plan or ci log in another repository applies that repository's conventions, where it applied the session's.
 
 Changed: prune judges output against the calling loop's own task, a subagent's spawn prompt or the main loop's newest prompt from a person, where it read the newest user-role message of the main conversation, which inside a subagent was the main session's and in the main loop could be a watch delivery or a task notification. A loop with no recorded task is not pruned. A Read with `offset` or `limit`, a repeat of a Read or Bash command whose output was pruned in the same task, and a Read of a path the task names pass untouched with no judge call, each logged as `prune none` with its reason. The omission note names the opt-out.
+
+Fixed: a pruned Read shows only true file line numbers. The engine numbers a Read's content from its one `startLine`, so every line after an omission note sat at the wrong number. A Read is now pruned only at its tail: it keeps every chunk up to its last needed one and the single note goes last, a Read whose low chunks all sit in front of a needed one passes whole (`prune none`, `gap would misnumber lines`), and `numLines` is the number of lines returned. Its last chunk is no longer kept unconditionally.
 
 Added: the `prune` tool (`off`, `on`) and `/sift prune off [n]|on`, which turn pruning off for one loop until its next task or for a number of outputs, and the `# sift: full` marker, which keeps one Bash command's output whole.
 
