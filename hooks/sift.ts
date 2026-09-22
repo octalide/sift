@@ -9,7 +9,7 @@ import { configLayers, globalConfigPath } from '../src/repo/config.ts';
 import { rulesSubject } from '../src/repo/subjects.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
 import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
-import { failureText, type Answer, type Questions } from '../src/judge/types.ts';
+import { failureText, type Answer, type KeyOrigin, type Questions } from '../src/judge/types.ts';
 import { DecisionLog, type Cost } from '../src/log.ts';
 import { formatReport } from '../src/packs/run.ts';
 import type { Report } from '../src/packs/types.ts';
@@ -90,8 +90,8 @@ export function resolveOptions(raw: PluginOptions): Options {
 
 // everything the hooks share once the session is bound: what a grade reads through, and the session's own state
 type Runtime = GradeHost & {
-  // the jev key and its source, for the status line
-  apiKey?: ApiKey;
+  // where the jev key came from, for the status line; never the key
+  apiKeyOrigin?: KeyOrigin;
   log: DecisionLog;
   // the session's checkout, resolved per call from the session's main working tree
   session: () => Promise<Checkout>;
@@ -183,7 +183,7 @@ export const register: Register = (on, rawOptions) => {
     const log = new DecisionLog(store, sessionId);
     const apiKey = await apiKeyOf($, options);
     const inner = makeJudge(
-      { backend: options.backend, apiKey: apiKey?.key, keySource: apiKey?.source, jevModel: options.jevModel, jevBaseUrl: options.jevBaseUrl, fallbackModel: options.fallbackModel },
+      { backend: options.backend, apiKey: apiKey?.key, keyOrigin: apiKey?.origin, jevModel: options.jevModel, jevBaseUrl: options.jevBaseUrl, fallbackModel: options.fallbackModel },
       {
         fetch: (url, init) => $.http.fetch(url, init),
         complete: (request) => $.model.complete(request),
@@ -253,7 +253,7 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    runtime = { judge, apiKey, log, forge, checkouts, session, fs, store, startWatch, sessionId };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, startWatch, sessionId };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     if (options.grade) {
@@ -462,7 +462,7 @@ export const register: Register = (on, rawOptions) => {
     const watch = !rt.watcher ? 'watch: off' : `watch: ${w!.paused ? 'paused' : 'running'} on ${options.watchRepo || repo}, ${w!.deferred.length} deferred, last poll ${w!.lastPoll ? new Date(w!.lastPoll).toISOString() : 'never'}`;
     return [
       `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${repo ?? 'none'}`,
-      judgeLine(rt.judge.name, rt.apiKey),
+      judgeLine(rt.judge.name, rt.apiKeyOrigin, rt.judge.keyRejected),
       `enabled: ${enabled}`,
       watch,
       `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,

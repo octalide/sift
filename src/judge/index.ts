@@ -1,14 +1,14 @@
 import { JEV_DEFAULTS, JevJudge, type FetchLike } from './jev.ts';
 import { ModelJudge, type CompleteLike } from './model.ts';
 import { labelOf } from './bands.ts';
-import { failureText, KEY_SOURCE_LABEL, type Judge, type Judgement, type KeySource, type Questions } from './types.ts';
+import { failureText, KEY_SOURCE_FIX, keyRefText, shadowedText, type Judge, type Judgement, type KeyOrigin, type KeySource, type Questions } from './types.ts';
 
 export type Backend = 'auto' | 'jev' | 'model' | 'off';
 
 export type JudgeConfig = {
   backend: Backend;
   apiKey?: string;
-  keySource?: KeySource;
+  keyOrigin?: KeyOrigin;
   jevModel: string;
   jevBaseUrl: string;
   fallbackModel: string;
@@ -21,25 +21,38 @@ export const JUDGE_DEFAULTS: JudgeConfig = {
   fallbackModel: 'haiku',
 };
 
-export type ApiKey = { key: string; source: KeySource };
+// the key itself stays here; origin is what may be shown, its source, its last four characters and the other sources
+export type ApiKey = { key: string; origin: KeyOrigin };
 
-// the jev key and where it came from: the apiKey option, then the environment, then the settings env block
+const ending = (key: string) => key.slice(-4);
+
+// the jev key and where it came from: the apiKey option, then the environment, then the settings env block.
+// every other source holding a key is named by its last four characters, so a shadowed key is visible
 export async function resolveApiKey(sources: {
   option?: string;
   env: () => Promise<string | undefined>;
   settings: () => Promise<Record<string, unknown>>;
 }): Promise<ApiKey | undefined> {
-  if (sources.option) return { key: sources.option, source: 'option' };
-  const env = await sources.env();
-  if (env) return { key: env, source: 'env' };
   const fromSettings = ((await sources.settings())['env'] as Record<string, unknown> | undefined)?.['TYPESAFE_API_KEY'];
-  return typeof fromSettings === 'string' && fromSettings ? { key: fromSettings, source: 'settings' } : undefined;
+  const held: { source: KeySource; key: string | undefined }[] = [
+    { source: 'option', key: sources.option },
+    { source: 'env', key: await sources.env() },
+    { source: 'settings', key: typeof fromSettings === 'string' ? fromSettings : undefined },
+  ];
+  const [chosen, ...rest] = held.filter((h): h is { source: KeySource; key: string } => !!h.key);
+  if (!chosen) return undefined;
+  const others = rest.map((o) => ({ source: o.source, ending: ending(o.key), same: o.key === chosen.key }));
+  return { key: chosen.key, origin: { source: chosen.source, ending: ending(chosen.key), others } };
 }
 
-// the backend in one line, and for jev where its key came from and its last four characters, never the key
-export function judgeLine(backend: string, apiKey?: ApiKey): string {
-  if (backend !== 'jev' || !apiKey) return `judge: ${backend}`;
-  return `judge: jev, key from ${KEY_SOURCE_LABEL[apiKey.source]} (ending ${apiKey.key.slice(-4)})`;
+// the backend in one line; for jev where its key came from, its last four characters and any shadowed key, never a key.
+// a rejected key says so and names the fix
+export function judgeLine(backend: string, origin?: KeyOrigin, rejected = false): string {
+  if (backend !== 'jev' || !origin) return `judge: ${backend}`;
+  const head = rejected
+    ? [`judge: jev, key rejected from ${keyRefText(origin)}`, `fix: ${KEY_SOURCE_FIX[origin.source]}`]
+    : [`judge: jev, key from ${keyRefText(origin)}`];
+  return [...head, ...shadowedText(origin)].join('; ');
 }
 
 export class DisabledJudge implements Judge {
@@ -61,7 +74,7 @@ export function makeJudge(config: JudgeConfig, host: JudgeHost): Judge {
   if (wantJev) {
     if (!config.apiKey) return new DisabledJudge();
     return new JevJudge(
-      { apiKey: config.apiKey, model: config.jevModel, baseUrl: config.jevBaseUrl, keySource: config.keySource },
+      { apiKey: config.apiKey, model: config.jevModel, baseUrl: config.jevBaseUrl, keyOrigin: config.keyOrigin },
       host.fetch,
       host.now,
     );
@@ -96,6 +109,9 @@ export class LoggedJudge implements Judge {
     private readonly record: (d: Omit<Decision, 'action' | 'shadow' | 'module'>) => void,
   ) {
     this.name = inner.name;
+  }
+  get keyRejected(): boolean {
+    return this.inner.keyRejected ?? false;
   }
   async ask(state: unknown, questions: Questions): Promise<Judgement> {
     const result = await this.inner.ask(state, questions);

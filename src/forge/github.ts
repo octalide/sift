@@ -352,6 +352,16 @@ export class GitHubForge implements Forge {
     return { changed: true, token: probe.etag, rate: rate(probe), value: (parsed.workflow_runs ?? []).map(run) };
   }
 
+  async branchRuns(repo: string, branch: string): Promise<Run[]> {
+    try {
+      const parsed = await this.gh.json<{ workflow_runs?: GhRun[] } | null>(`repos/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=30`);
+      return (parsed?.workflow_runs ?? []).map(run);
+    } catch (error) {
+      if (missing(error)) return [];
+      throw error;
+    }
+  }
+
   async pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>> {
     const probe = await this.gh.api(`repos/${repo}/pulls?state=open&per_page=100`, { etag: token });
     if (probe.status === 304) return { changed: false, rate: rate(probe) };

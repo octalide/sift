@@ -6,7 +6,7 @@ import { DecisionLog } from '../src/log.ts';
 import { ModelJudge, extractJson } from '../src/judge/model.ts';
 import { judgeLine, makeJudge, resolveApiKey } from '../src/judge/index.ts';
 import { batchEntries, entryOf, fill, fillQuestion, rank, splitKey } from '../src/judge/rank.ts';
-import { failureText, type Judge, type Questions } from '../src/judge/types.ts';
+import { failureText, KEY_SOURCE_LABEL, type Judge, type KeyOrigin, type KeySource, type Questions } from '../src/judge/types.ts';
 
 const questions: Questions = {
   yes: { type: 'noul', instructions: 'is it?' },
@@ -129,49 +129,103 @@ describe('backend selection', () => {
 
 describe('api key source', () => {
   const none = { env: async () => undefined, settings: async () => ({}) };
+  const settingsKey = (key: string) => async () => ({ env: { TYPESAFE_API_KEY: key } });
+  const fix = {
+    option: "fix: set a new key in the plugin's options, or clear the option to fall back to TYPESAFE_API_KEY (the option is stored in ~/.claude/.credentials.json, not in a settings file)",
+    env: 'fix: export a valid TYPESAFE_API_KEY',
+    settings: 'fix: update env.TYPESAFE_API_KEY in the settings file',
+  };
+  // a jev judge over a fake fetch that answers every call with one status and counts the calls
+  const counted = (origin: KeyOrigin | undefined, status: number, text = 'Please check your API key') => {
+    const calls = { n: 0 };
+    const judge = makeJudge(
+      { backend: 'jev', apiKey: 'fake-key-0000', keyOrigin: origin, jevModel: 'm', jevBaseUrl: 'u', fallbackModel: 'haiku' },
+      { fetch: async () => (calls.n++, { status, ok: status < 400, text }), complete: async () => '' },
+    );
+    return { judge, calls };
+  };
+
   it('takes the option, then the environment, then the settings env block', async () => {
-    expect(await resolveApiKey({ ...none, option: 'opt-1234', env: async () => 'env-5678' })).toEqual({ key: 'opt-1234', source: 'option' });
-    expect(await resolveApiKey({ ...none, env: async () => 'env-5678', settings: async () => ({ env: { TYPESAFE_API_KEY: 'set-9012' } }) })).toEqual({ key: 'env-5678', source: 'env' });
-    expect(await resolveApiKey({ ...none, settings: async () => ({ env: { TYPESAFE_API_KEY: 'set-9012' } }) })).toEqual({ key: 'set-9012', source: 'settings' });
+    expect(await resolveApiKey({ ...none, option: 'opt-1234' })).toEqual({ key: 'opt-1234', origin: { source: 'option', ending: '1234', others: [] } });
+    expect(await resolveApiKey({ ...none, env: async () => 'env-5678' })).toEqual({ key: 'env-5678', origin: { source: 'env', ending: '5678', others: [] } });
+    expect(await resolveApiKey({ ...none, settings: settingsKey('set-9012') })).toEqual({ key: 'set-9012', origin: { source: 'settings', ending: '9012', others: [] } });
     expect(await resolveApiKey(none)).toBeUndefined();
   });
 
-  it('names the source on an authentication failure and nowhere else', async () => {
-    const jev = (status: number) =>
-      makeJudge(
-        { backend: 'jev', apiKey: 'stale-key-abcd', keySource: 'option', jevModel: 'm', jevBaseUrl: 'u', fallbackModel: 'haiku' },
-        { fetch: async () => ({ status, ok: false, text: 'Please check your API key' }), complete: async () => '' },
-      );
-    for (const status of [401, 403]) {
-      const result = await jev(status).ask({}, questions);
-      expect(result).toMatchObject({ ok: false, reason: 'unavailable', status, keySource: 'option' });
-      if (result.ok) throw new Error('expected a failure');
-      expect(failureText(result)).toBe(`unavailable (key from the apiKey option): http ${status}: Please check your API key`);
-      expect(failureText(result)).not.toContain('stale-key');
-    }
-    const down = await jev(529).ask({}, questions);
-    if (down.ok) throw new Error('expected a failure');
-    expect(down.keySource).toBeUndefined();
-    expect(failureText(down)).toBe('unavailable: http 529: Please check your API key');
+  it('names every other source holding a key by its last four characters, marking the same key', async () => {
+    const all = await resolveApiKey({ option: 'fake-opt-abcd', env: async () => 'fake-env-wxyz', settings: settingsKey('fake-opt-abcd') });
+    expect(all).toEqual({
+      key: 'fake-opt-abcd',
+      origin: { source: 'option', ending: 'abcd', others: [{ source: 'env', ending: 'wxyz', same: false }, { source: 'settings', ending: 'abcd', same: true }] },
+    });
+    // nothing but the chosen key leaves as a key
+    expect(JSON.stringify(all!.origin)).not.toContain('fake');
   });
 
-  it('carries the source through a rank failure', async () => {
-    const judge = makeJudge(
-      { backend: 'jev', apiKey: 'k', keySource: 'settings', jevModel: 'm', jevBaseUrl: 'u', fallbackModel: 'haiku' },
-      { fetch: async () => ({ status: 401, ok: false, text: 'no' }), complete: async () => '' },
-    );
+  it('names the source, the last four characters and the fix for each source on a rejection', async () => {
+    for (const source of ['option', 'env', 'settings'] as const) {
+      for (const status of [401, 403]) {
+        const { judge } = counted({ source, ending: '0000', others: [] }, status);
+        const result = await judge.ask({}, questions);
+        expect(result).toMatchObject({ ok: false, reason: 'unavailable', status, key: { source, ending: '0000' } });
+        if (result.ok) throw new Error('expected a failure');
+        expect(failureText(result)).toBe(`unavailable: jev rejected the key from ${KEY_SOURCE_LABEL[source]} (ending 0000); ${fix[source]}; http ${status}: Please check your API key`);
+        expect(failureText(result)).not.toContain('fake-key');
+      }
+    }
+  });
+
+  it('leaves a failure that is not a key rejection as it was', async () => {
+    const { judge } = counted({ source: 'option', ending: '0000', others: [] }, 529);
+    const down = await judge.ask({}, questions);
+    if (down.ok) throw new Error('expected a failure');
+    expect(down.key).toBeUndefined();
+    expect(failureText(down)).toBe('unavailable: http 529: Please check your API key');
+    expect(judge.keyRejected).toBe(false);
+  });
+
+  it('names a shadowed environment key on the failure and on the status line', async () => {
+    const resolved = await resolveApiKey({ option: 'fake-opt-abcd', env: async () => 'fake-env-wxyz', settings: async () => ({}) });
+    const origin = resolved!.origin;
+    const shadow = 'TYPESAFE_API_KEY in the environment (ending wxyz) is set but shadowed';
+    expect(judgeLine('jev', origin)).toBe(`judge: jev, key from the apiKey option (ending abcd); ${shadow}`);
+    const { judge } = counted(origin, 403);
+    const result = await judge.ask({}, questions);
+    if (result.ok) throw new Error('expected a failure');
+    expect(failureText(result)).toBe(`unavailable: jev rejected the key from the apiKey option (ending abcd); ${fix.option}; ${shadow}; http 403: Please check your API key`);
+    // a source holding the same key shadows nothing
+    const same = await resolveApiKey({ option: 'fake-opt-abcd', env: async () => 'fake-opt-abcd', settings: async () => ({}) });
+    expect(judgeLine('jev', same!.origin)).toBe('judge: jev, key from the apiKey option (ending abcd)');
+  });
+
+  it('stops asking once the key is rejected and says so on the status line', async () => {
+    const origin: KeyOrigin = { source: 'env', ending: '0000', others: [] };
+    const { judge, calls } = counted(origin, 403);
+    const first = await judge.ask({}, questions);
+    expect(calls.n).toBe(1);
+    const logged = new LoggedJudge(judge, () => {});
+    const second = await logged.ask({}, questions);
+    expect(calls.n).toBe(1);
+    if (first.ok || second.ok) throw new Error('expected failures');
+    expect(failureText(second)).toBe(failureText(first));
+    expect(second.usage).toBeUndefined();
+    expect(logged.keyRejected).toBe(true);
+    expect(judgeLine(logged.name, origin, logged.keyRejected)).toBe(`judge: jev, key rejected from TYPESAFE_API_KEY in the environment (ending 0000); ${fix.env}`);
+  });
+
+  it('carries the key through a rank failure', async () => {
+    const { judge } = counted({ source: 'settings', ending: '0000', others: [] }, 401, 'no');
     const result = await rank(['x'], { yes: questions['yes']! }, judge, { mode: 'batched' });
     if (result.ok) throw new Error('expected a failure');
-    expect(failureText(result)).toBe('unavailable (key from TYPESAFE_API_KEY in the settings env block): http 401: no');
+    expect(failureText(result)).toBe(`unavailable: jev rejected the key from TYPESAFE_API_KEY in the settings env block (ending 0000); ${fix.settings}; http 401: no`);
   });
 
   it('shows the backend and, for jev, the key source and last four characters only', () => {
-    const key = 'sk-secret-material-wxyz';
-    expect(judgeLine('jev', { key, source: 'option' })).toBe('judge: jev, key from the apiKey option (ending wxyz)');
-    expect(judgeLine('jev', { key, source: 'env' })).toBe('judge: jev, key from TYPESAFE_API_KEY in the environment (ending wxyz)');
-    expect(judgeLine('jev', { key, source: 'settings' })).toBe('judge: jev, key from TYPESAFE_API_KEY in the settings env block (ending wxyz)');
-    expect(judgeLine('jev', { key, source: 'env' })).not.toContain('secret');
-    expect(judgeLine('model:haiku', { key, source: 'env' })).toBe('judge: model:haiku');
+    const at = (source: KeySource): KeyOrigin => ({ source, ending: 'wxyz', others: [] });
+    expect(judgeLine('jev', at('option'))).toBe('judge: jev, key from the apiKey option (ending wxyz)');
+    expect(judgeLine('jev', at('env'))).toBe('judge: jev, key from TYPESAFE_API_KEY in the environment (ending wxyz)');
+    expect(judgeLine('jev', at('settings'))).toBe('judge: jev, key from TYPESAFE_API_KEY in the settings env block (ending wxyz)');
+    expect(judgeLine('model:haiku', at('env'))).toBe('judge: model:haiku');
     expect(judgeLine('off')).toBe('judge: off');
   });
 });
