@@ -270,7 +270,7 @@ describe('watcher', () => {
     await watcher.tick();
     expect(delivered).toHaveLength(1);
     const lines = delivered[0]!.split('\n');
-    expect(lines[1]).toBe(`ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (${jobs.length} checks, failed: docs, gate)`);
+    expect(lines[1]).toBe(`ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (${jobs.length} checks, failed: docs, gate) · now: open, head unchanged`);
     const reports = lines.filter((l) => /^  sift ci |^  gate: /.test(l));
     expect(reports).toEqual([`  sift ci o/r job ${failed[0]!.id}: PASS (judge: fake)`, '  gate: failed because docs failed']);
     // the run's jobs are read once for both failed checks
