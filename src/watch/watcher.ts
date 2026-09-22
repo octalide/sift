@@ -6,7 +6,7 @@ import { formatReport, runChecks, runPack } from '../packs/run.ts';
 import { issueSubject } from '../repo/subjects.ts';
 import { downstreamLine, jobSubject, readFailure } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
-import { armedAgent, deliveryAgent, diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
+import { armedAgent, currentState, deliveryAgent, diffItems, diffRuns, formatEvent, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type Run, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
 
 export type WatchOptions = {
@@ -42,6 +42,11 @@ export type WatchHost = {
 };
 
 type Timer = { cancel: () => void };
+
+type Delivery = { event: WatchEvent; label: string };
+
+// what one age-out has read from the forge: the pr heads whose checks it read, the runs of each branch it listed
+type Recheck = { heads: Set<string>; branches: Map<string, Run[]> };
 
 type Pull = PullHead;
 
@@ -218,13 +223,15 @@ export class Watcher {
     const rateWait = this.rateWait(read.rate, now);
     if (!read.changed) return { changed: false, rateWait };
     this.state.pulls = read.value;
+    this.state.heads = recordHeads(this.state.heads, read.value);
     this.state.etags.pulls = read.token;
     return { changed: true, rateWait };
   }
 
   private async handle(events: WatchEvent[], fresh: boolean): Promise<void> {
     const rules: WatchRules = { ...this.options.rules, login: this.state.login };
-    const deliver: { event: WatchEvent; label: string }[] = [];
+    let deliver: Delivery[] = [];
+    for (const e of events) if (e.kind === 'ci' && e.run) e.subject = runSubject(e, this.state.heads);
     const settled = await this.settleRuns(events);
     const seeded = fresh ? await this.seedHeads(this.host.now()) : [];
     for (const e of [...settled, ...seeded, ...(await this.stallHeads())]) {
@@ -252,15 +259,47 @@ export class Watcher {
       }
       deliver.push({ event: e, label: this.options.shadow && triage.action === 'defer' ? `${label} (shadow: would defer)` : label });
     }
-    this.expireDeferred();
+    deliver = this.supersede(deliver);
+    await this.expireDeferred();
     if (deliver.length === 0) return;
-    for (const d of deliver) {
+    await this.send(deliver);
+    this.state.deferred = [];
+  }
+
+  private async send(items: Delivery[], extra: Run[] = []): Promise<void> {
+    for (const d of items) {
       this.host.onDecision?.(d.event, 'deliver', d.label);
       if (d.event.settled && d.event.conclusion === 'failure') d.event.reports = await this.ciReports(d.event);
     }
-    await this.host.deliver(this.render(deliver));
-    this.state.deferred = [];
+    await this.host.deliver(this.render(items, extra));
     this.state.lastDelivery = this.host.now();
+  }
+
+  // drops the ci news a newer result has made old, from this poll's deliveries and from the held events: an older run
+  // of the same workflow on the same subject, an earlier completion of a run that completed again, and on a pr whose
+  // head settled, everything held for its older heads and the held runs of the settled head
+  private supersede(batch: Delivery[]): Delivery[] {
+    const held = this.state.deferred.map((d) => d.event);
+    const all = [...batch.map((d) => d.event), ...held];
+    const verdicts = all.filter((e) => e.settled);
+    const runs = Object.values(this.state.runs);
+    const by = (e: WatchEvent, isHeld: boolean): string | undefined => {
+      if (e.kind !== 'ci' || e.settled || e.stalled || !e.subject) return undefined;
+      const verdict = verdicts.find((v) => v.subject === e.subject && (v.sha !== e.sha || isHeld));
+      if (verdict) return `superseded by the settled verdict on pr #${verdict.number} @${(verdict.sha ?? '').slice(0, 7)}`;
+      if (!e.run) return undefined;
+      const newer = newerRun(runs, (r) => r.name === e.workflow && runSubject(r, this.state.heads) === e.subject, e.run);
+      if (newer) return `superseded by run ${newer.id}`;
+      if (all.some((o) => o !== e && o.run === e.run && o.at > e.at)) return `superseded by run ${e.run} completing again`;
+      return undefined;
+    };
+    const keep = (e: WatchEvent, isHeld: boolean): boolean => {
+      const reason = by(e, isHeld);
+      if (reason) this.host.onDecision?.(e, 'drop', reason);
+      return !reason;
+    };
+    this.state.deferred = this.state.deferred.filter((d) => keep(d.event, true));
+    return batch.filter((d) => keep(d.event, false));
   }
 
   // a completed run on the head of an open pr is reported as the pr's verdict, once, when the last check finishes.
@@ -325,6 +364,8 @@ export class Watcher {
         at: now,
         conclusion: null,
         branch: h.branch,
+        subject: `pr:${h.number}`,
+        sha: h.sha,
         stalled: true,
         isNew: true,
       });
@@ -350,6 +391,8 @@ export class Watcher {
       conclusion: verdict.conclusion,
       ok: verdict.conclusion === 'success',
       branch: pr.branch,
+      subject: `pr:${pr.number}`,
+      sha: pr.sha,
       settled: true,
       failed: verdict.failed,
       isNew: true,
@@ -435,21 +478,54 @@ export class Watcher {
     this.state.deferred.push({ event: e, reason, label });
   }
 
-  // a deferred event older than the limit is delivered on its own so nothing waits forever
-  private expireDeferred(): void {
+  // a deferred event older than the limit is delivered on its own so nothing waits forever, once its subject is read
+  // again: a held run on a pr head that moved is dropped, one on a head that settled meanwhile gives way to the verdict,
+  // and one on a branch that has a newer completed run of its workflow is dropped
+  private async expireDeferred(): Promise<void> {
     const cutoff = this.host.now() - this.options.deferMaxAgeMs;
     const stale = this.state.deferred.filter((d) => d.event.at < cutoff);
     if (stale.length === 0) return;
     this.state.deferred = this.state.deferred.filter((d) => d.event.at >= cutoff);
-    void this.host.deliver(this.render(stale.map((d) => ({ event: d.event, label: `deferred ${d.reason}, aged out` }))));
+    const out: Delivery[] = [];
+    const reads: Recheck = { heads: new Set(), branches: new Map() };
+    for (const d of stale) {
+      const reason = await this.recheck(d.event, reads, out);
+      if (reason) this.host.onDecision?.(d.event, 'drop', reason);
+      else out.push({ event: d.event, label: `deferred ${d.reason}, aged out` });
+    }
+    if (out.length > 0) await this.send(out, [...reads.branches.values()].flat());
   }
 
-  private render(items: { event: WatchEvent; label: string }[]): string {
+  // why an aged-out event is old news, read from the forge once per head and once per branch. a head that settled
+  // meanwhile adds its verdict to the delivery in place of the runs held for it
+  private async recheck(e: WatchEvent, reads: Recheck, out: Delivery[]): Promise<string | undefined> {
+    if (e.kind !== 'ci' || !e.subject || !e.run) return undefined;
+    const pr = /^pr:(\d+)$/.exec(e.subject);
+    if (pr) {
+      const pull = this.state.pulls.find((p) => p.number === Number(pr[1]));
+      if (!pull) return undefined;
+      if (pull.sha !== e.sha) return `superseded by head @${pull.sha.slice(0, 7)}`;
+      const key = headKey(pull);
+      if (!reads.heads.has(key) && !this.state.settled[key]) {
+        reads.heads.add(key);
+        const head = await this.settle(pull.sha).catch(() => undefined);
+        if (head?.verdict) out.push({ event: this.settledEvent(pull, head.verdict, e.user, this.host.now()), label: 'ci settled on pr' });
+      }
+      return this.state.settled[key] ? `superseded by the settled verdict on pr #${pull.number} @${pull.sha.slice(0, 7)}` : undefined;
+    }
+    const branch = e.branch ?? '';
+    if (!reads.branches.has(branch)) reads.branches.set(branch, await this.host.forge.branchRuns(this.options.repo, branch).catch(() => []));
+    const newer = newerRun([...Object.values(this.state.runs), ...reads.branches.get(branch)!], (r) => r.name === e.workflow && runSubject(r, this.state.heads) === e.subject, e.run);
+    return newer ? `superseded by run ${newer.id}` : undefined;
+  }
+
+  private render(items: Delivery[], extra: Run[] = []): string {
     const by = deliveryAgent(items.map((i) => i.event), this.state);
     const lines = [`[sift watch ${this.options.repo}${by ? ` for ${by}` : ''}]`];
     for (const { event, label } of items) {
       const agent = armedAgent(event, this.state);
-      lines.push(`${agent ? `for ${agent}: ` : ''}${formatEvent(event)}`);
+      const now = event.kind === 'ci' && event.subject ? ` · now: ${currentState(event, this.state, extra)}` : '';
+      lines.push(`${agent ? `for ${agent}: ` : ''}${formatEvent(event)}${now}`);
       lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''}`);
       if (event.findings?.length) lines.push(`  filing: ${event.findings.join('; ')}`);
       for (const report of event.reports ?? []) lines.push(...report.split('\n').map((l) => `  ${l}`));

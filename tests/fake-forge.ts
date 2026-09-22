@@ -32,6 +32,7 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     contents: async () => [],
     items: async () => ({ changed: false, rate: {} }),
     runs: async () => ({ changed: false, rate: {} }),
+    branchRuns: async () => [],
     pulls: async () => ({ changed: true, rate: {}, value: [] }),
     parseUrl: (url) => {
       const m = /^https:\/\/fake\/([^/]+\/[^/]+)\/(issue|pr)\/(\d+)$/.exec(url);

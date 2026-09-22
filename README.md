@@ -305,7 +305,7 @@ A settled PR is one line with the aggregate verdict, so a steward waiting to gra
 
 ```
 [sift watch octalide/sift]
-ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks)
+ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks) · now: open, head unchanged
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
 ```
 
@@ -313,7 +313,7 @@ A failure carries the `ci` pack's report on each failed check, one job per check
 
 ```
 [sift watch octalide/sift]
-ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test)
+ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test) · now: open, head unchanged
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
   sift ci octalide/sift job 106195824649: PASS (judge: jev)
     [info] log.trimmed: 212 of 212 lines read from the failing step Run npm test
@@ -329,11 +329,21 @@ The verdict counts every check run and commit status on the PR's head, so it wai
 
 ```
 [sift watch octalide/sift]
-ci stalled: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (1 of 3 checks pending: deploy-preview)
+ci stalled: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (1 of 3 checks pending: deploy-preview) · now: open, head unchanged
   by octalide · https://github.com/octalide/sift/pull/14 · ci stalled on pr
 ```
 
-`watchCi` sets what CI reaches you: `failures` (the default) delivers each open PR once when every check on its head has finished, pass or fail, and failed runs on protected branches, `all` delivers every completed run as well, `none` delivers no CI. Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache, open PR heads and deferred list live in the plugin store, so a restart picks up where it left off.
+CI news that a newer result has made old is dropped rather than delivered late. Each CI event reports on a subject, `pr:<n>` when it ran on a head of that PR (the current head or one it has since moved from) and `branch:<name>` otherwise, and a run is keyed by its subject and its workflow, so a docs run is superseded only by a newer docs run. When a run completes, every held or undelivered event of an older run with the same key is dropped, as is an earlier completion of the same run when it completes again, and a settled verdict on a PR head drops everything held for the PR's older heads and the runs held for that head. Each drop is logged as `drop: superseded by ...`. The forge does not say whether a run's ref is a branch or a tag, so a tag push keys as `branch:<tag>`. An event that ages out is read again first: a run held on a PR head that has since moved is dropped, a head whose checks have all finished since delivers its `ci settled` line in place of the runs held for it (one checks read per head), and a run on a branch with a newer completed run of its workflow is dropped (one run listing per branch). Only what survives is delivered.
+
+Every CI line ends with where its subject stands at delivery rather than at the event: `now: open, head unchanged`, `now: open, head @<sha> (moved)`, `now: merged`, `now: closed` (or `not open` when the watch never saw the PR's state) for a PR, and the newest completed run of the event's workflow for a branch, `now: dev @9f8e7d6, docs success`. It is read from the open PR heads and the item cache the poll already holds, so it costs no request:
+
+```
+[sift watch octalide/sift]
+ci failure: docs on dev @1a2b3c4 (push) · now: dev @1a2b3c4, docs failure
+  by octalide · https://github.com/octalide/sift/actions/runs/17 · ci failure on watched branch
+```
+
+`watchCi` sets what CI reaches you: `failures` (the default) delivers each open PR once when every check on its head has finished, pass or fail, and failed runs on protected branches, `all` delivers every completed run as well, `none` delivers no CI. Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` that is not superseded is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache, open PR heads and deferred list live in the plugin store, so a restart picks up where it left off.
 
 ## Tools and command
 
@@ -345,11 +355,11 @@ The tools are registered under the plugin's name, so the model sees `mcp__sift__
 | `judge` | `state`, `questions` | the answers |
 | `rank` | `items`, `questions`, optional `mode`, `context`, `by`, `choice`, `fields` | the items with their answers, and the sorted view |
 | `watch` | `action`: `status`, `start`, `poll`, `pause`, `resume`, `reset`, `deferred`; `for`: on a `start` from a subagent, the PR it waits on, its number or head branch | the watch's state |
-| `status` | nothing | backend (for jev, where its key came from and the key's last four characters), modules, whether the watch runs, decision counts |
+| `status` | nothing | backend (for jev, where its key came from, the key's last four characters, a shadowed key and a rejected key), modules, whether the watch runs, decision counts |
 
 `grade`, `judge` and `rank` are registered when the `grade` option is on, `watch` and `status` always. `watch start` arms the watch in a session that came up without the `watch` option, `poll` polls once now, `reset` forgets the cursor and reseeds. Deliveries are prompts to the session's main loop, whichever loop armed the watch: a `watch start` from a subagent records that agent's name, says so in the tool result (deliveries reach the agent only when the session relays them), and every delivery header names it (`[sift watch o/r for issue-113]`) so the relay is one `SendMessage`. A later `watch start` replaces the name, one from the main loop clears it. Several subagents waiting on one watch each pass `for`, the PR number or head branch they wait on, and the watch keeps the set of `{ agent, ref }` pairs beside the name: a `ci settled` or `ci stalled` line whose PR number or head branch matches a pair is written as `for issue-113: ci settled success: pr #113 ...`, naming the agent whose PR it is. Once the set holds any pair, a ci event that matches none names no agent, neither on its line nor in the header, so a verdict for a PR nobody armed for is never relayed to an unrelated agent. Only a watch armed without any `for` falls back to the agent that armed last. Deliveries of issue and PR events keep the header name either way. A `start` from the main loop clears the set with the name. One ref names one agent: a later `start` for the same PR replaces the entry, the newest arm winning as the name does. A leading `#` on a PR number is stripped when the ref is stored, so `#42` and `42` are the same PR. Nothing else about agent names or branch conventions is inferred. A session that will act on repository events calls `status` at start to learn whether they will arrive as prompts.
 
-`/sift` prints status and per-module decision counts (the same text as the `status` tool), a judge line naming the backend and, for jev, where its key came from and the key's last four characters (never the key), with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, and `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watch as the tool does.
+`/sift` prints status and per-module decision counts (the same text as the `status` tool), a judge line naming the backend and, for jev, where its key came from and the key's last four characters (never the key), any other source holding a different key as set but shadowed, and whether jev has rejected the key, with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, and `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watch as the tool does.
 
 ## Options
 
@@ -358,7 +368,7 @@ Every option, with its default. The same descriptions are in `.claude-plugin/plu
 | option | default | what it does |
 |---|---|---|
 | `backend` | `auto` | `auto` uses Jev when a key is present and the session's small model otherwise. `jev` and `model` force one. `off` disables every judged feature and leaves only mechanical checks |
-| `apiKey` | unset | Jev key. Leave unset to read `TYPESAFE_API_KEY` from the environment or the settings `env` block. The option wins over both, and as a sensitive option it is stored in `~/.claude/.credentials.json`, not a settings file, so a jev failure refused as http 401 or 403 names the source the key came from |
+| `apiKey` | unset | Jev key. Leave unset to read `TYPESAFE_API_KEY` from the environment or the settings `env` block. The option wins over both, and as a sensitive option it is stored in `~/.claude/.credentials.json`, not a settings file. When another source holds a different key, status and every key rejection name it by its last four characters as set but shadowed. A jev refusal with http 401 or 403 reads `jev rejected the key from <source> (ending XXXX); fix: <what to change for that source>`, and after it the jev judge fails every later call with the same text and sends no request until the session restarts, which is also when a new key is read. Status then reads `judge: jev, key rejected` |
 | `jevModel` | `jev-latest` | TypeSafe model name sent with every Jev request |
 | `jevBaseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. Change it only for a proxy or a compatible local server |
 | `fallbackModel` | `haiku` | model used by the model backend, an alias or a full id |
@@ -377,7 +387,7 @@ Every option, with its default. The same descriptions are in `.claude-plugin/plu
 | `watchIgnoreBots` | `true` | events authored by bot accounts are dropped |
 | `watchCi` | `failures` | `failures` delivers each open PR once when every check on its head has finished and failed runs on protected branches, `all` every completed run as well, `none` no CI |
 | `watchTriage` | `true` | run the triage pack on issue and PR events. Off delivers everything the rules do not defer |
-| `watchDeferMaxAgeHours` | `24` | a deferred event older than this is delivered on its own so nothing waits forever |
+| `watchDeferMaxAgeHours` | `24` | a deferred event older than this is delivered on its own so nothing waits forever, unless a newer result has superseded it |
 | `watchStallHours` | `1` | a PR head whose checks have not all finished within this many hours is delivered once as `ci stalled`, naming the pending checks |
 | `grade` | `true` | register the `grade`, `judge` and `rank` tools |
 | `config` | empty | conventions in the shape of `.sift/config.json`, as inline JSON or a path relative to the repo root, taking the global file's place |
@@ -412,6 +422,8 @@ CI runs the same three commands on every pull request and reports them through a
 This release drops judged review of diffs and is breaking. The judged diff questions caught nothing the repositories' own checks did not, raised false positives, and often could not run from another repository's worktree.
 
 Removed: the `hunks` pack. The `pr` pack's judged questions (`addresses_issue`, `scope_creep`, `workaround`, `contract_change`, `tests_cover`, `risk`) and its `drift_collides` rank step: `pr` now runs its mechanical checks and asks the judge nothing, and `pr.drift` reports that the base moved under the PR without judging whether the patches collide. The `commit` pack's judged questions (`type_matches`, `describes_change`, `breaking_missed`): `commit` runs `commit.format` alone. Pull requests and commits as `rules` subjects: `rules` takes an issue or free text and refuses a pull request or a commit with the forms it takes named. A bare number now names an issue for `rules`, where it named a pull request. The `diff`, `changes` and `hunks` fields of a `pr` subject and the `diff` and `has_diff` fields of a `commit` subject, so a repo pack can no longer judge a diff either. `drift` on a `pr` subject is a list of paths.
+
+Fixed: the watch drops superseded CI news. A newer completed run of the same workflow on the same PR or branch drops the older ones still held or about to be delivered, and a settled verdict on a PR head drops what was held for its older heads. An event that ages out is read again first (the PR's head and checks, or the branch's runs), so a failure since fixed or a run on a head that has since moved is no longer delivered hours late. Every CI delivery line ends with `now:`, the PR's state (open with its head unchanged or moved, merged, closed) or the branch's newest result of that workflow. The `Forge` interface gains `branchRuns`, the newest runs on one branch. The stored watch state changes shape, so the first poll after the upgrade reseeds and a backlog held by an older version is dropped.
 
 ## Changes in 0.10.0
 
