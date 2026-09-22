@@ -347,7 +347,7 @@ export const register: Register = (on, rawOptions) => {
       await $.tool.register({
         name: 'prune',
         description:
-          'Turn sift\'s pruning of long Bash and Read output off or on for the calling loop alone (this subagent, or the main loop). off lasts until the loop\'s next task (a subagent\'s whole run), or for the next calls outputs prune would otherwise judge; on turns it back on. Call off before reading a document in full when every line matters. For one Bash command, end it with # sift: full instead. A Read with offset or limit, a repeat of a Read or command that was pruned, and a Read of a path your task names are never pruned.',
+          'Turn sift\'s pruning of long Bash and Read output off or on for the calling loop alone (this subagent, or the main loop). off lasts until the loop\'s next task (a subagent\'s whole run), or for the next calls outputs prune would otherwise judge; on turns it back on. Call off before reading a document in full when every line matters. For one Bash command, end it with # sift: full instead. A Read with offset or limit, a repeat of a Read or command that was pruned, and a Read of a path your task names are never pruned. A Read is only ever cut at its tail, so its line numbers stay true.',
         inputSchema: {
           type: 'object',
           properties: {

@@ -53,7 +53,7 @@
     "prune": {
       "type": "boolean",
       "title": "Tool output pruning",
-      "description": "Score long tool outputs against the calling loop's task before the model reads them and drop chunks the judge marks unneeded. Each dropped run is replaced by a note with its line range and the call that gets it back; nothing is kept on disk. Targeted reads, repeats of pruned output and reads of paths the task names pass whole, and # sift: full or the prune tool keep output whole on purpose.",
+      "description": "Score long tool outputs against the calling loop's task before the model reads them and drop chunks the judge marks unneeded. Each dropped run is replaced by a note with its line range and the call that gets it back; nothing is kept on disk. A Read is only ever cut at its tail, so its line numbers stay true. Targeted reads, repeats of pruned output and reads of paths the task names pass whole, and # sift: full or the prune tool keep output whole on purpose.",
       "default": true
     },
     "pruneFloorTokens": {
