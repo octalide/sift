@@ -4,7 +4,7 @@ import type { RepoConfig } from '../repo/config.ts';
 import { digest } from '../hash.ts';
 import { bandOf } from '../judge/bands.ts';
 import { rank } from '../judge/rank.ts';
-import { DEFAULT_THRESHOLDS, type Judge, type Questions } from '../judge/types.ts';
+import { DEFAULT_THRESHOLDS, failureText, type Judge, type Questions } from '../judge/types.ts';
 import { excerptOf } from '../locate/tree.ts';
 import type { StoreLike } from '../log.ts';
 import { pool } from '../pool.ts';
@@ -125,14 +125,14 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
   const kept: Doc[] = [...explicit];
   if (candidates.length > 0) {
     const ranked = await rank(candidates.map((d) => ({ path: d.path, excerpt: excerptOf(d.text, EXCERPT.lines, EXCERPT.width) })), DOC_QUESTION, judge, { mode: 'batched' });
-    if (!ranked.ok) return { docs: [], rules: [], candidates: candidates.length, kept: 0, cached: false, error: `${ranked.reason}: ${ranked.message}` };
+    if (!ranked.ok) return { docs: [], rules: [], candidates: candidates.length, kept: 0, cached: false, error: failureText(ranked) };
     for (const r of ranked.items) if (bandOf(r.answers['rules']!, DEFAULT_THRESHOLDS) === 'satisfied') kept.push(candidates[r.index]!);
   }
   const paragraphs = kept.flatMap((d) => ruleParagraphs(d.text).map((text) => ({ doc: d.path, text })));
   const rules: Rule[] = [];
   if (paragraphs.length > 0) {
     const ranked = await rank(paragraphs, PARAGRAPH_QUESTION, judge, { mode: 'batched', fields: ['doc'] });
-    if (!ranked.ok) return { docs: [], rules: [], candidates: candidates.length, kept: kept.length - explicit.length, cached: false, error: `${ranked.reason}: ${ranked.message}` };
+    if (!ranked.ok) return { docs: [], rules: [], candidates: candidates.length, kept: kept.length - explicit.length, cached: false, error: failureText(ranked) };
     for (const r of ranked.items) if (bandOf(r.answers['rule']!, DEFAULT_THRESHOLDS) === 'satisfied') rules.push({ source: paragraphs[r.index]!.doc, text: paragraphs[r.index]!.text });
   }
   const docs = kept.map((d) => d.path).filter((p) => rules.some((r) => r.source === p));

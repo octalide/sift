@@ -43,12 +43,26 @@ export type Answers = Record<string, Answer>;
 
 export type JudgeFailure = 'disabled' | 'unavailable' | 'rejected' | 'malformed';
 
+// where the jev key came from: the apiKey option, TYPESAFE_API_KEY in the environment, or the settings env block
+export type KeySource = 'option' | 'env' | 'settings';
+
+export const KEY_SOURCE_LABEL: Record<KeySource, string> = {
+  option: 'the apiKey option',
+  env: 'TYPESAFE_API_KEY in the environment',
+  settings: 'TYPESAFE_API_KEY in the settings env block',
+};
+
 // what a call cost: the backend's own count when it reports one, else an estimate from the bytes sent and received
 export type Usage = { requestTokens: number; responseTokens: number; source: 'backend' | 'estimate' };
 
 export type Judgement =
   | { ok: true; answers: Answers; backend: string; latencyMs: number; usage?: Usage }
-  | { ok: false; reason: JudgeFailure; message: string; backend: string; status?: number; usage?: Usage };
+  | { ok: false; reason: JudgeFailure; message: string; backend: string; status?: number; keySource?: KeySource; usage?: Usage };
+
+// a failure as one line; keySource is set only when the backend refused the key
+export function failureText(f: { reason: JudgeFailure; message: string; keySource?: KeySource }): string {
+  return f.keySource ? `${f.reason} (key from ${KEY_SOURCE_LABEL[f.keySource]}): ${f.message}` : `${f.reason}: ${f.message}`;
+}
 
 export interface Judge {
   readonly name: string;
