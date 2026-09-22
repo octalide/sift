@@ -1,10 +1,10 @@
 import type { RepoConfig } from '../repo/config.ts';
-import type { Forge, PullHead, Rate } from '../forge/forge.ts';
+import type { Forge, Job, PullHead, Rate } from '../forge/forge.ts';
 import type { Judge } from '../judge/types.ts';
 import type { Finding, Pack } from '../packs/types.ts';
 import { formatReport, runChecks, runPack } from '../packs/run.ts';
 import { issueSubject } from '../repo/subjects.ts';
-import { ciSubject } from '../ci/log.ts';
+import { downstreamLine, jobSubject, readFailure } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
 import { armedAgent, deliveryAgent, diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
@@ -356,18 +356,29 @@ export class Watcher {
     };
   }
 
-  // the ci pack over each failed check that has a log, one report per job; a check the forge keeps no log for is named alone
+  // the ci pack over each failed check that has a log, one report per job; a check the forge keeps no log for is named alone,
+  // and a job that failed only because a job it needs failed is named in one line, since that job is judged on its own
   private async ciReports(e: WatchEvent): Promise<string[]> {
     const pack = this.host.ciPack;
     if (!pack) return [];
     const out: string[] = [];
+    const runs = new Map<string, Promise<Job[]>>();
+    const jobsOf = (run: string): Promise<Job[]> => {
+      if (!runs.has(run)) runs.set(run, this.host.forge.jobs(this.options.repo, run));
+      return runs.get(run)!;
+    };
     for (const check of e.failed ?? []) {
       if (check.id === undefined) {
         out.push(`${check.name}: no log to read`);
         continue;
       }
       try {
-        const subject = await ciSubject(this.host.forge, this.options.repo, { job: check.id });
+        const read = await readFailure(this.host.forge, this.options.repo, check.id, jobsOf);
+        if (read.job && read.upstream.length > 0) {
+          out.push(downstreamLine(read.job, read.upstream));
+          continue;
+        }
+        const subject = await jobSubject(this.host.forge, this.options.repo, check.id, read.log);
         out.push(formatReport(await runPack(pack, subject, this.host.judge, this.host.config)));
       } catch (error) {
         out.push(`${check.name}: could not read the log (${error instanceof Error ? error.message : String(error)})`);

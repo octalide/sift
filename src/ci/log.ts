@@ -1,9 +1,10 @@
-import type { Forge, JobLog, LogStep, PullHead } from '../forge/forge.ts';
+import type { Forge, Job, JobLog, LogStep, PullHead } from '../forge/forge.ts';
 import { diffFiles, type DiffFile } from '../repo/diff.ts';
 import type { Subject } from '../packs/types.ts';
 import { truncate } from '../tokens.ts';
 
-// where a log comes from: a job or a run through the forge (a run reads its first failed job), or the text itself
+// where a log comes from: a job or a run through the forge, or the text itself. a run reads its first job that failed on
+// its own, and a job that failed only because a job it needs failed is followed to that job
 export type LogSource = { job: string } | { run: string } | { text: string };
 
 export type LogOptions = {
@@ -53,7 +54,7 @@ export function trimLog(log: JobLog, options: Partial<LogOptions> = {}): { step?
 
 // the log subject: what is known of the job and its pull request is the state every line is read against,
 // the lines are the list the ci pack ranks and feeds back as the kept ones
-export function logSubject(log: JobLog, pull: LogPull | undefined, ref: string, options: Partial<LogOptions> = {}): Subject {
+export function logSubject(log: JobLog, pull: LogPull | undefined, ref: string, options: Partial<LogOptions> = {}, followed: string[] = []): Subject {
   const { step, lines, total } = trimLog(log, options);
   return {
     kind: 'log',
@@ -64,7 +65,7 @@ export function logSubject(log: JobLog, pull: LogPull | undefined, ref: string, 
       failed_step: step ?? null,
       pull_request: pull ? { number: pull.number, title: pull.title, branch: pull.branch, files: pull.files } : null,
     },
-    facts: { lines, total_lines: total, step, has_lines: lines.length > 0, has_pull: pull !== undefined },
+    facts: { lines, total_lines: total, step, has_lines: lines.length > 0, has_pull: pull !== undefined, followed },
     options: {},
   };
 }
@@ -83,19 +84,83 @@ async function pullFor(forge: Forge, repo: string, sha: string): Promise<LogPull
   return { number: head.number, title: head.title, branch: head.branch, files: diffFiles(diff) };
 }
 
-// the subject for a source: the job's log through the forge with the open pull request on its head, or the text alone
+const failed = (j: Job): boolean => j.done && !j.ok;
+
+const outcome = (j: Job): string => (j.conclusion === 'failure' ? 'failed' : j.conclusion === 'cancelled' ? 'was cancelled' : `ended ${j.conclusion ?? 'unfinished'}`);
+
+// a, b and c
+const series = (words: string[]): string => (words.length < 2 ? words.join('') : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]!}`);
+
+const names = (jobs: Job[]): string => series(jobs.map((j) => j.name));
+
+// the failed or cancelled jobs a failed job needs: when there are any, the job is downstream and failed because they did.
+// decided from needs and the results alone, never judged
+export function failedNeeds(job: Job, jobs: Job[]): Job[] {
+  const needs = job.needs;
+  if (!failed(job) || !needs) return [];
+  return jobs.filter((j) => needs.includes(j.id) && failed(j));
+}
+
+// the jobs a downstream job's failure comes from, followed through the downstream jobs between to those that failed on their own
+export function rootsOf(job: Job, jobs: Job[]): Job[] {
+  const roots: Job[] = [];
+  const seen = new Set([job.id]);
+  const walk = (j: Job): void => {
+    for (const up of failedNeeds(j, jobs)) {
+      if (seen.has(up.id)) continue;
+      seen.add(up.id);
+      if (failedNeeds(up, jobs).length === 0) roots.push(up);
+      else walk(up);
+    }
+  };
+  walk(job);
+  return roots;
+}
+
+// the one line a downstream job is named in instead of judged
+export function downstreamLine(job: Job, upstream: Job[]): string {
+  return `${job.name}: failed because ${series(upstream.map((j) => `${j.name} ${outcome(j)}`))}`;
+}
+
+// a failed job's log, and the failed jobs it needs as read from the run it belongs to
+export type Failure = { log: JobLog; job?: Job; jobs: Job[]; upstream: Job[] };
+
+export async function readFailure(forge: Forge, repo: string, id: string, jobsOf: (run: string) => Promise<Job[]> = (run) => forge.jobs(repo, run)): Promise<Failure> {
+  const log = await forge.jobLog(repo, id);
+  const jobs = log.run ? await jobsOf(log.run) : [];
+  const job = jobs.find((j) => j.id === id);
+  return { log, job, jobs, upstream: job ? failedNeeds(job, jobs) : [] };
+}
+
+// the subject for a job's log, with the open pull request on the commit it ran on
+export async function jobSubject(forge: Forge, repo: string, id: string, log: JobLog, options: Partial<LogOptions> = {}, followed: string[] = []): Promise<Subject> {
+  const pull = log.sha ? await pullFor(forge, repo, log.sha).catch(() => undefined) : undefined;
+  return logSubject(log, pull, `${repo} job ${id}`, options, followed);
+}
+
+// the other jobs that failed on their own, named so a report on one does not hide them
+const others = (roots: Job[]): string[] => roots.slice(1).map((j) => `${j.name}: ${outcome(j)} on its own, not judged here (job:${j.id})`);
+
+// the subject for a source: the job's log through the forge with the open pull request on its head, or the text alone.
+// a downstream job is followed to the job that failed on its own, a run is read through its first such job, and every
+// downstream job and every other job left unjudged is named in followed
 export async function ciSubject(forge: Forge, repo: string | undefined, source: LogSource, options: Partial<LogOptions> = {}): Promise<Subject> {
   if ('text' in source) return logSubject(textLog(source.text), undefined, truncate(source.text, 40), options);
   if (!repo) throw new Error(`no repository: pass repo as the ${forge.name} path or run inside a checkout with a ${forge.name} remote`);
-  let jobId: string;
   if ('job' in source) {
-    jobId = source.job;
-  } else {
-    const failed = (await forge.jobs(repo, source.run)).filter((j) => j.done && !j.ok);
-    if (failed.length === 0) throw new Error(`run ${source.run} has no failed job`);
-    jobId = failed[0]!.id;
+    const read = await readFailure(forge, repo, source.job);
+    const roots = read.job ? rootsOf(read.job, read.jobs) : [];
+    if (roots.length === 0) return jobSubject(forge, repo, source.job, read.log, options);
+    const root = roots[0]!;
+    const followed = [`${downstreamLine(read.job!, read.upstream)}, followed to ${names(roots)}`, ...others(roots)];
+    return jobSubject(forge, repo, root.id, await forge.jobLog(repo, root.id), options, followed);
   }
-  const log = await forge.jobLog(repo, jobId);
-  const pull = log.sha ? await pullFor(forge, repo, log.sha).catch(() => undefined) : undefined;
-  return logSubject(log, pull, `${repo} job ${jobId}`, options);
+  const jobs = await forge.jobs(repo, source.run);
+  const bad = jobs.filter(failed);
+  if (bad.length === 0) throw new Error(`run ${source.run} has no failed job`);
+  const roots = bad.filter((j) => failedNeeds(j, jobs).length === 0);
+  if (roots.length === 0) throw new Error(`run ${source.run}: every failed job waits on another failed job`);
+  const root = roots[0]!;
+  const followed = [...bad.filter((j) => failedNeeds(j, jobs).length > 0).map((j) => downstreamLine(j, failedNeeds(j, jobs))), ...others(roots)];
+  return jobSubject(forge, repo, root.id, await forge.jobLog(repo, root.id), options, followed);
 }
