@@ -369,6 +369,12 @@ export class Watcher {
       return sub?.until === 'settled' && settles(d.event, sub.scope);
     }));
     if (used.length > 0) await this.host.retire?.([...new Set(used)], 'until settled reached');
+    // a run completes once: a run subscription whose completion has been delivered has nothing left to deliver
+    const ran = items.flatMap((d) => d.subs.filter((id) => {
+      const sub = byId.get(id);
+      return sub?.scope.kind === 'run' && !used.includes(id) && d.event.run === sub.scope.id;
+    }));
+    if (ran.length > 0) await this.host.retire?.([...new Set(ran)], 'its run completed');
   }
 
   private byId(): Map<string, Subscription> {

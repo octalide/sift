@@ -870,6 +870,26 @@ describe('subscriptions', () => {
     expect(delivered[0]!.text).toContain('ci success: release on main @m700000');
   });
 
+  it('removes a run subscription once its run\'s completion is delivered, and not before', async () => {
+    let done = false;
+    const forge = fakeForge({ login: async () => 'me', items: script(changed([slim(1)])), run: async () => brun(8, 'release', 'main', done ? 'success' : null, 'm800000') });
+    const { w, delivered, logs } = registry(forge);
+    await w.subscribe({ repo: 'o/r', scope: { kind: 'run', id: '8' }, filter, for: 'a1' });
+    await w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
+    const poller = w.poller('o/r')!;
+    await poller.tick();
+    await poller.tick();
+    // still running: listed, nothing delivered
+    expect(delivered).toHaveLength(0);
+    expect(w.list().map(formatSubscription)).toContain('s1 o/r run 8 · items, ci failures, stall · for a1');
+    done = true;
+    await poller.tick();
+    expect(delivered.map((d) => d.to)).toEqual(['a1']);
+    expect(delivered[0]!.text).toContain('ci success: release on main @m800000');
+    expect(w.list().map((s) => s.id)).toEqual(['s2']);
+    expect(logs).toEqual(['sift watch: s1 on o/r run 8 removed, its run completed']);
+  });
+
   it('removes an until: settled pr subscription after its verdict, an until: merged one once merged, and an until time once passed', async () => {
     let done = false;
     const forge = fakeForge({
