@@ -127,7 +127,7 @@ const checkRun = (c: GhCheckRun): Check => ({ name: c.name, id: String(c.id), do
 const job = (j: GhJob): Job => ({ id: String(j.id), name: j.name, run: String(j.run_id), sha: j.head_sha, done: j.status === 'completed', conclusion: j.conclusion, ok: PASSING.has(j.conclusion ?? ''), url: j.html_url });
 const status = (s: GhStatus): Check => ({ name: s.context, done: s.state !== 'pending', conclusion: s.state === 'pending' ? null : s.state, ok: s.state === 'success' });
 
-const run = (r: GhRun): Run => ({
+const run = (r: GhRun, tag: boolean): Run => ({
   id: String(r.id),
   name: r.name,
   done: r.status === 'completed',
@@ -135,6 +135,7 @@ const run = (r: GhRun): Run => ({
   ok: PASSING.has(r.conclusion ?? ''),
   branch: r.head_branch,
   sha: r.head_sha,
+  tag,
   event: r.event,
   actor: r.actor?.login ?? '',
   url: r.html_url,
@@ -189,9 +190,36 @@ export class GitHubForge implements Forge {
   readonly nouns: Record<ForgeArtifact, string> = { issue: 'GitHub issue', pr: 'pull request', release: 'GitHub release' };
   readonly writes = GH_WRITES;
   readonly gh: Gh;
+  // repo and ref name -> whether a tag of that name exists, read once per name
+  private readonly tagRefs = new Map<string, Promise<boolean>>();
 
   constructor(run: RunLike, cwd?: CwdLike) {
     this.gh = new Gh(run, cwd);
+  }
+
+  // a workflow run names its ref without saying whether it is a branch or a tag, so a ref a pull request did not
+  // start is looked up among the tags, once per name
+  private isTag(repo: string, r: GhRun): Promise<boolean> {
+    if (!r.head_branch || r.event.startsWith('pull_request')) return Promise.resolve(false);
+    const key = `${repo}\0${r.head_branch}`;
+    let known = this.tagRefs.get(key);
+    if (!known) {
+      const path = r.head_branch.split('/').map(encodeURIComponent).join('/');
+      known = this.gh
+        .json<{ ref: string }[] | null>(`repos/${repo}/git/matching-refs/tags/${path}`)
+        .then((refs) => (refs ?? []).some((x) => x.ref === `refs/tags/${r.head_branch}`))
+        .catch((error: unknown) => {
+          this.tagRefs.delete(key);
+          if (missing(error)) return false;
+          throw error;
+        });
+      this.tagRefs.set(key, known);
+    }
+    return known;
+  }
+
+  private toRuns(repo: string, raw: GhRun[]): Promise<Run[]> {
+    return Promise.all(raw.map(async (r) => run(r, await this.isTag(repo, r))));
   }
 
   async checkout(): Promise<{ repo: string; defaultBranch: string } | undefined> {
@@ -349,17 +377,22 @@ export class GitHubForge implements Forge {
     }
     if (probe.status === 304) return { changed: false, rate: rate(probe) };
     const parsed = JSON.parse(probe.body || '{}') as { workflow_runs?: GhRun[] };
-    return { changed: true, token: probe.etag, rate: rate(probe), value: (parsed.workflow_runs ?? []).map(run) };
+    return { changed: true, token: probe.etag, rate: rate(probe), value: await this.toRuns(repo, parsed.workflow_runs ?? []) };
   }
 
   async branchRuns(repo: string, branch: string): Promise<Run[]> {
     try {
       const parsed = await this.gh.json<{ workflow_runs?: GhRun[] } | null>(`repos/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=30`);
-      return (parsed?.workflow_runs ?? []).map(run);
+      return await this.toRuns(repo, parsed?.workflow_runs ?? []);
     } catch (error) {
       if (missing(error)) return [];
       throw error;
     }
+  }
+
+  async run(repo: string, id: string): Promise<Run> {
+    const r = await this.gh.json<GhRun>(`repos/${repo}/actions/runs/${encodeURIComponent(id)}`);
+    return run(r, await this.isTag(repo, r));
   }
 
   async pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>> {

@@ -8,7 +8,6 @@ import type { WatchEvent } from './poll.ts';
 export type WatchRules = {
   ignoreSelf: boolean;
   ignoreBots: boolean;
-  ci: 'failures' | 'all' | 'none';
   triage: boolean;
   login?: string;
   protectedBranches: string[];
@@ -17,19 +16,8 @@ export type WatchRules = {
 
 export type Route = { action: 'deliver' | 'defer' | 'drop' | 'judge'; reason: string };
 
-// rules first: what needs no judgement is settled here
+// rules first: what needs no judgement is settled here. an issue or pr event only, ci is routed per subscription
 export function routeByRules(e: WatchEvent, rules: WatchRules): Route {
-  if (e.kind === 'ci') {
-    if (rules.ci === 'none') return { action: 'drop', reason: 'ci off' };
-    if (e.settled) return { action: 'deliver', reason: 'ci settled on pr' };
-    if (e.stalled) return { action: 'deliver', reason: 'ci stalled on pr' };
-    const ok = e.ok === true;
-    if (rules.ci === 'all') return { action: 'deliver', reason: 'ci all' };
-    if (ok) return { action: 'defer', reason: 'ci success' };
-    const branch = e.branch ?? '';
-    const watched = rules.protectedBranches.includes(branch) || (rules.branchPattern ? new RegExp(rules.branchPattern).test(branch) : false);
-    return watched ? { action: 'deliver', reason: 'ci failure on watched branch' } : { action: 'defer', reason: 'ci failure elsewhere' };
-  }
   if (rules.ignoreBots && e.bot) return { action: 'drop', reason: 'bot' };
   if (rules.ignoreSelf && rules.login && e.user === rules.login) return { action: 'defer', reason: 'own write' };
   const changes = e.changes.join(' ');

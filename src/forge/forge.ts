@@ -53,6 +53,8 @@ export type Run = Check & {
   id: string;
   branch: string;
   sha: string;
+  // the ref it ran on is a tag, not a branch; branch then holds the tag's name
+  tag: boolean;
   // what started it (push, pull_request, schedule) in the forge's words
   event: string;
   actor: string;
@@ -165,6 +167,8 @@ export interface Forge {
   runs(repo: string, token?: string): Promise<Conditional<Run[]>>;
   // the newest ci runs on one branch, empty for a repository without ci
   branchRuns(repo: string, branch: string): Promise<Run[]>;
+  // one ci run by its id, however far it has paged out of the newest runs
+  run(repo: string, id: string): Promise<Run>;
   // the open pull request heads; without a token the read always answers changed
   pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>>;
   // the jobs of a ci run
