@@ -1,13 +1,14 @@
 import { JEV_DEFAULTS, JevJudge, type FetchLike } from './jev.ts';
 import { ModelJudge, type CompleteLike } from './model.ts';
 import { labelOf } from './bands.ts';
-import type { Judge, Judgement, Questions } from './types.ts';
+import { failureText, KEY_SOURCE_LABEL, type Judge, type Judgement, type KeySource, type Questions } from './types.ts';
 
 export type Backend = 'auto' | 'jev' | 'model' | 'off';
 
 export type JudgeConfig = {
   backend: Backend;
   apiKey?: string;
+  keySource?: KeySource;
   jevModel: string;
   jevBaseUrl: string;
   fallbackModel: string;
@@ -19,6 +20,27 @@ export const JUDGE_DEFAULTS: JudgeConfig = {
   jevBaseUrl: JEV_DEFAULTS.baseUrl,
   fallbackModel: 'haiku',
 };
+
+export type ApiKey = { key: string; source: KeySource };
+
+// the jev key and where it came from: the apiKey option, then the environment, then the settings env block
+export async function resolveApiKey(sources: {
+  option?: string;
+  env: () => Promise<string | undefined>;
+  settings: () => Promise<Record<string, unknown>>;
+}): Promise<ApiKey | undefined> {
+  if (sources.option) return { key: sources.option, source: 'option' };
+  const env = await sources.env();
+  if (env) return { key: env, source: 'env' };
+  const fromSettings = ((await sources.settings())['env'] as Record<string, unknown> | undefined)?.['TYPESAFE_API_KEY'];
+  return typeof fromSettings === 'string' && fromSettings ? { key: fromSettings, source: 'settings' } : undefined;
+}
+
+// the backend in one line, and for jev where its key came from and its last four characters, never the key
+export function judgeLine(backend: string, apiKey?: ApiKey): string {
+  if (backend !== 'jev' || !apiKey) return `judge: ${backend}`;
+  return `judge: jev, key from ${KEY_SOURCE_LABEL[apiKey.source]} (ending ${apiKey.key.slice(-4)})`;
+}
 
 export class DisabledJudge implements Judge {
   readonly name = 'off';
@@ -39,7 +61,7 @@ export function makeJudge(config: JudgeConfig, host: JudgeHost): Judge {
   if (wantJev) {
     if (!config.apiKey) return new DisabledJudge();
     return new JevJudge(
-      { apiKey: config.apiKey, model: config.jevModel, baseUrl: config.jevBaseUrl },
+      { apiKey: config.apiKey, model: config.jevModel, baseUrl: config.jevBaseUrl, keySource: config.keySource },
       host.fetch,
       host.now,
     );
@@ -82,7 +104,7 @@ export class LoggedJudge implements Judge {
       backend: result.backend,
       ok: result.ok,
       latencyMs: result.ok ? result.latencyMs : undefined,
-      reason: result.ok ? undefined : `${result.reason}: ${result.message}`,
+      reason: result.ok ? undefined : failureText(result),
       requestTokens: result.usage?.requestTokens,
       responseTokens: result.usage?.responseTokens,
       digest: digestOf(state),
