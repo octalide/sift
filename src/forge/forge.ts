@@ -171,6 +171,8 @@ export interface Forge {
   items(repo: string, since: string, token?: string): Promise<Conditional<WatchItem[]>>;
   // the newest ci runs; a repository without ci is unchanged forever
   runs(repo: string, token?: string): Promise<Conditional<Run[]>>;
+  // the newest ci runs on one branch, empty for a repository without ci
+  branchRuns(repo: string, branch: string): Promise<Run[]>;
   // the open pull request heads; without a token the read always answers changed
   pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>>;
   // the jobs of a ci run
