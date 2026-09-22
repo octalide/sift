@@ -305,7 +305,7 @@ A settled PR is one line with the aggregate verdict, so a steward waiting to gra
 
 ```
 [sift watch octalide/sift]
-ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks)
+ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks) · now: open, head unchanged
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
 ```
 
@@ -313,7 +313,7 @@ A failure carries the `ci` pack's report on each failed check, one job per check
 
 ```
 [sift watch octalide/sift]
-ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test)
+ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test) · now: open, head unchanged
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
   sift ci octalide/sift job 106195824649: PASS (judge: jev)
     [info] log.trimmed: 212 of 212 lines read from the failing step Run npm test
@@ -329,11 +329,21 @@ The verdict counts every check run and commit status on the PR's head, so it wai
 
 ```
 [sift watch octalide/sift]
-ci stalled: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (1 of 3 checks pending: deploy-preview)
+ci stalled: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (1 of 3 checks pending: deploy-preview) · now: open, head unchanged
   by octalide · https://github.com/octalide/sift/pull/14 · ci stalled on pr
 ```
 
-`watchCi` sets what CI reaches you: `failures` (the default) delivers each open PR once when every check on its head has finished, pass or fail, and failed runs on protected branches, `all` delivers every completed run as well, `none` delivers no CI. Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache, open PR heads and deferred list live in the plugin store, so a restart picks up where it left off.
+CI news that a newer result has made old is dropped rather than delivered late. Each CI event reports on a subject, `pr:<n>` when it ran on a head of that PR (the current head or one it has since moved from) and `branch:<name>` otherwise, and a run is keyed by its subject and its workflow, so a docs run is superseded only by a newer docs run. When a run completes, every held or undelivered event of an older run with the same key is dropped, as is an earlier completion of the same run when it completes again, and a settled verdict on a PR head drops everything held for the PR's older heads and the runs held for that head. Each drop is logged as `drop: superseded by ...`. The forge does not say whether a run's ref is a branch or a tag, so a tag push keys as `branch:<tag>`. An event that ages out is read again first: a run held on a PR head that has since moved is dropped, a head whose checks have all finished since delivers its `ci settled` line in place of the runs held for it (one checks read per head), and a run on a branch with a newer completed run of its workflow is dropped (one run listing per branch). Only what survives is delivered.
+
+Every CI line ends with where its subject stands at delivery rather than at the event: `now: open, head unchanged`, `now: open, head @<sha> (moved)`, `now: merged`, `now: closed` (or `not open` when the watch never saw the PR's state) for a PR, and the newest completed run of the event's workflow for a branch, `now: dev @9f8e7d6, docs success`. It is read from the open PR heads and the item cache the poll already holds, so it costs no request:
+
+```
+[sift watch octalide/sift]
+ci failure: docs on dev @1a2b3c4 (push) · now: dev @1a2b3c4, docs failure
+  by octalide · https://github.com/octalide/sift/actions/runs/17 · ci failure on watched branch
+```
+
+`watchCi` sets what CI reaches you: `failures` (the default) delivers each open PR once when every check on its head has finished, pass or fail, and failed runs on protected branches, `all` delivers every completed run as well, `none` delivers no CI. Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` that is not superseded is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache, open PR heads and deferred list live in the plugin store, so a restart picks up where it left off.
 
 ## Tools and command
 
@@ -377,7 +387,7 @@ Every option, with its default. The same descriptions are in `.claude-plugin/plu
 | `watchIgnoreBots` | `true` | events authored by bot accounts are dropped |
 | `watchCi` | `failures` | `failures` delivers each open PR once when every check on its head has finished and failed runs on protected branches, `all` every completed run as well, `none` no CI |
 | `watchTriage` | `true` | run the triage pack on issue and PR events. Off delivers everything the rules do not defer |
-| `watchDeferMaxAgeHours` | `24` | a deferred event older than this is delivered on its own so nothing waits forever |
+| `watchDeferMaxAgeHours` | `24` | a deferred event older than this is delivered on its own so nothing waits forever, unless a newer result has superseded it |
 | `watchStallHours` | `1` | a PR head whose checks have not all finished within this many hours is delivered once as `ci stalled`, naming the pending checks |
 | `grade` | `true` | register the `grade`, `judge` and `rank` tools |
 | `config` | empty | conventions in the shape of `.sift/config.json`, as inline JSON or a path relative to the repo root, taking the global file's place |
@@ -412,6 +422,8 @@ CI runs the same three commands on every pull request and reports them through a
 This release drops judged review of diffs and is breaking. The judged diff questions caught nothing the repositories' own checks did not, raised false positives, and often could not run from another repository's worktree.
 
 Removed: the `hunks` pack. The `pr` pack's judged questions (`addresses_issue`, `scope_creep`, `workaround`, `contract_change`, `tests_cover`, `risk`) and its `drift_collides` rank step: `pr` now runs its mechanical checks and asks the judge nothing, and `pr.drift` reports that the base moved under the PR without judging whether the patches collide. The `commit` pack's judged questions (`type_matches`, `describes_change`, `breaking_missed`): `commit` runs `commit.format` alone. Pull requests and commits as `rules` subjects: `rules` takes an issue or free text and refuses a pull request or a commit with the forms it takes named. A bare number now names an issue for `rules`, where it named a pull request. The `diff`, `changes` and `hunks` fields of a `pr` subject and the `diff` and `has_diff` fields of a `commit` subject, so a repo pack can no longer judge a diff either. `drift` on a `pr` subject is a list of paths.
+
+Fixed: the watch drops superseded CI news. A newer completed run of the same workflow on the same PR or branch drops the older ones still held or about to be delivered, and a settled verdict on a PR head drops what was held for its older heads. An event that ages out is read again first (the PR's head and checks, or the branch's runs), so a failure since fixed or a run on a head that has since moved is no longer delivered hours late. Every CI delivery line ends with `now:`, the PR's state (open with its head unchanged or moved, merged, closed) or the branch's newest result of that workflow. The `Forge` interface gains `branchRuns`, the newest runs on one branch. The stored watch state changes shape, so the first poll after the upgrade reseeds and a backlog held by an older version is dropped.
 
 ## Changes in 0.10.0
 

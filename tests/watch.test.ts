@@ -3,7 +3,7 @@ import type { Check, Conditional, Run, WatchItem } from '../src/forge/forge.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
-import { armedAgent, deliveryAgent, diffItems, diffRuns, hashOf, pendingChecks, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
+import { armedAgent, currentState, deliveryAgent, diffItems, diffRuns, hashOf, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { armedNotice, armingAgent, armRef, Watcher, summarize, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -227,7 +227,7 @@ describe('watcher', () => {
     await watcher.tick();
     expect(delivered).toHaveLength(1);
     const lines = delivered[0]!.split('\n');
-    expect(lines[1]).toBe('ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (3 checks, failed: test, ext)');
+    expect(lines[1]).toBe('ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (3 checks, failed: test, ext) · now: open, head unchanged');
     expect(lines[2]).toBe('  by me · https://x/pull/3 · ci settled on pr');
     expect(lines[3]).toBe('  sift ci o/r job 7: PASS (judge: fake)');
     expect(lines[4]).toBe('    [info] log.trimmed: 2 of 2 lines read from the failing step Run npm test');
@@ -409,9 +409,9 @@ describe('watcher', () => {
     // a match by pr number
     let out = await armed([['issue-3', '3']]);
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
-    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
     // pr 4 matches no entry of a non-empty set and names no agent, on its line or in the header
-    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build) · now: open, head unchanged');
     expect(out.lines[0]).toBe('[sift watch o/r]');
 
     // a miss: armed for a pr that is not settling, neither line nor the header names the stale agent
@@ -424,21 +424,21 @@ describe('watcher', () => {
     out = await armed([['issue-5', undefined]]);
     expect(out.state.armedFor).toBeUndefined();
     expect(out.lines[0]).toBe('[sift watch o/r for issue-5]');
-    expect(out.lines).toContain('for issue-5: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).toContain('for issue-5: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('for issue-5: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
+    expect(out.lines).toContain('for issue-5: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build) · now: open, head unchanged');
 
     // two agents on two prs in one poll, one by number and one by head branch, each line names its own agent
     out = await armed([['issue-3', '3'], ['issue-4', 'feat/4'], ['issue-4', 'feat/4']]);
     expect(out.state.armedBy).toBe('issue-4');
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }, { agent: 'issue-4', ref: 'feat/4' }]);
     expect(out.lines[0]).toBe('[sift watch o/r for issue-4]');
-    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).toContain('for issue-4: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
+    expect(out.lines).toContain('for issue-4: ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build) · now: open, head unchanged');
 
     // a leading # on a pr number is stripped when the ref is stored, so #3 names pr 3
     out = await armed([['issue-3', '#3']]);
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
-    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
     expect(armRef('#3')).toBe('3');
     expect(armRef('3')).toBe('3');
     expect(armRef('feat/3')).toBe('feat/3');
@@ -447,22 +447,22 @@ describe('watcher', () => {
     // one ref names one agent: a later arm for the same pr replaces the entry, the newest wins
     out = await armed([['issue-3', '3'], ['issue-3b', '#3']]);
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3b', ref: '3' }]);
-    expect(out.lines).toContain('for issue-3b: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).not.toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('for issue-3b: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
+    expect(out.lines).not.toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
 
     // a start without a ref keeps the set and replaces the name, which an unmatched verdict still does not take
     out = await armed([['issue-3', '3'], ['issue-5', undefined]]);
     expect(out.state.armedBy).toBe('issue-5');
     expect(out.state.armedFor).toEqual([{ agent: 'issue-3', ref: '3' }]);
     expect(out.lines[0]).toBe('[sift watch o/r]');
-    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
-    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build)');
+    expect(out.lines).toContain('for issue-3: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
+    expect(out.lines).toContain('ci settled failure: pr #4 feat/4 @def5678: Feat 4 (1 checks, failed: build) · now: open, head unchanged');
     // a main-loop start clears both
     out = await armed([['issue-3', '3'], [undefined, undefined]]);
     expect(out.state.armedBy).toBeUndefined();
     expect(out.state.armedFor).toBeUndefined();
     expect(out.lines[0]).toBe('[sift watch o/r]');
-    expect(out.lines).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks)');
+    expect(out.lines).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
   });
 
   it('keeps the last armer on a delivery of non-ci events whatever the set holds, and drops it for an unmatched ci event', () => {
@@ -523,5 +523,223 @@ describe('watcher', () => {
     expect(delivered[0]).toContain('issue #2 new [open]: Issue 2');
     expect(delivered[0]).toContain('· filed with 3 findings');
     expect(delivered[0]).toContain('filing: issue.labels: needs one of: bug, enhancement; issue.template: missing section: Acceptance; issue.parent: labeled as a child but has no parent sub-issue link');
+  });
+});
+
+describe('superseded ci news', () => {
+  const H = 3600_000;
+  const brun = (id: number, name: string, branch: string, conclusion: string, sha: string): Run => ({ id: String(id), name, branch, event: 'push', done: true, conclusion, ok: conclusion === 'success', sha, url: `https://x/runs/${id}`, actor: 'me', updatedAt: '1' });
+  const pr3 = (sha: string) => ({ number: 3, title: 'Feat 3', branch: 'feat/3', sha, url: 'https://x/pull/3', user: 'alice' });
+  const ext = (done: boolean): Check => ({ name: 'ext', done, conclusion: done ? 'success' : null, ok: done });
+  const rulesFor = (ci: 'failures' | 'all') => ({ ignoreSelf: true, ignoreBots: true, ci, triage: false, protectedBranches: ['main', 'dev'], branchPattern: '^feat/\\d+$' });
+  const host = (forge: ReturnType<typeof fakeForge>, clock: { now: number }, store = new Map<string, unknown>()) => {
+    const delivered: string[] = [];
+    const decisions: string[] = [];
+    const h: WatchHost = {
+      forge,
+      store: { get: async (k) => store.get(k), set: async (k, v) => void store.set(k, JSON.parse(JSON.stringify(v))) },
+      judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) } as Judge,
+      pack: BUILTIN_PACKS['triage']!,
+      config: DEFAULT_CONFIG,
+      now: () => clock.now,
+      deliver: async (t) => void delivered.push(t),
+      log: () => {},
+      status: () => {},
+      schedule: () => ({ cancel: () => {} }),
+      onDecision: (e, action, label) => decisions.push(`${action} ${e.id} ${label}`),
+    };
+    return { h, delivered, decisions, store };
+  };
+  const options = (ci: 'failures' | 'all' = 'failures') => ({ repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 24 * H, stallMs: 1e12, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: rulesFor(ci) });
+
+  it('drops a held failure once a newer run of the same workflow on the same branch completes, and keeps other workflows', async () => {
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      runs: script(changed([]), changed([brun(1, 'docs', 'scratch', 'failure', 's100000')], 'r2'), changed([brun(1, 'docs', 'scratch', 'failure', 's100000'), brun(2, 'docs', 'scratch', 'success', 's200000'), brun(3, 'lint', 'scratch', 'failure', 's200000')], 'r3')),
+    });
+    const clock = { now: 1_000_000 };
+    const { h, delivered, decisions } = host(forge, clock);
+    const watcher = new Watcher(h, options());
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(watcher.snapshot().deferred.map((d) => d.event.id)).toEqual(['ci#1']);
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    expect(decisions).toContain('drop ci#1 superseded by run 2');
+    expect(watcher.snapshot().deferred.map((d) => d.event.id)).toEqual(['ci#2', 'ci#3']);
+  });
+
+  it('delivers only the green run when a failure and a newer green run of one workflow land in the same poll', async () => {
+    const both = () =>
+      fakeForge({
+        login: async () => 'me',
+        items: script(changed([slim(1)])),
+        runs: script(changed([]), changed([brun(1, 'docs', 'dev', 'failure', 'd100000'), brun(2, 'docs', 'dev', 'success', 'd200000')], 'r2')),
+      });
+    const all = host(both(), { now: 1_000_000 });
+    const w1 = new Watcher(all.h, options('all'));
+    await w1.start();
+    await w1.tick();
+    await w1.tick();
+    expect(all.delivered).toHaveLength(1);
+    expect(all.delivered[0]).not.toContain('ci failure');
+    expect(all.delivered[0]!.split('\n')[1]).toBe('ci success: docs on dev @d200000 (push) · now: dev @d200000, docs success');
+
+    // under ci: failures the failure on the protected branch is dropped and the green run is held: nothing is delivered
+    const failures = host(both(), { now: 1_000_000 });
+    const w2 = new Watcher(failures.h, options());
+    await w2.start();
+    await w2.tick();
+    await w2.tick();
+    expect(failures.delivered).toHaveLength(0);
+    expect(failures.decisions).toContain('drop ci#1 superseded by run 2');
+    expect(w2.snapshot().deferred.map((d) => d.event.id)).toEqual(['ci#2']);
+  });
+
+  it('drops the runs held for an older pr head when the new head settles', async () => {
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      runs: script(changed([]), changed([run(10, 'build', true, 'failure', 'aaa1234')], 'r2'), changed([run(10, 'build', true, 'failure', 'aaa1234'), run(11, 'build', true, 'success', 'bbb1234')], 'r3')),
+      pulls: script(changed([pr3('aaa1234')]), same(), changed([pr3('bbb1234')], 'p3')),
+      checks: async (_r, at) => (at === 'aaa1234' ? [check('build', true, 'failure'), ext(false)] : [check('build', true), ext(true)]),
+    });
+    const { h, delivered, decisions } = host(forge, { now: 1_000_000 });
+    const watcher = new Watcher(h, options());
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(watcher.snapshot().deferred.map((d) => d.reason)).toEqual(['ci failure on pr #3, awaiting the other checks']);
+    await watcher.tick();
+    expect(decisions).toContain('drop ci#10 superseded by the settled verdict on pr #3 @bbb1234');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.split('\n')[1]).toBe('ci settled success: pr #3 feat/3 @bbb1234: Feat 3 (2 checks) · now: open, head unchanged');
+    expect(delivered[0]).not.toContain('deferred meanwhile');
+  });
+
+  it('drops a held run on a pr head that has since moved when it ages out, rather than delivering it', async () => {
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      runs: script(changed([]), changed([run(10, 'build', true, 'failure', 'aaa1234')], 'r2')),
+      pulls: script(changed([pr3('aaa1234')]), same(), changed([pr3('bbb1234')], 'p3')),
+      checks: async (_r, at) => (at === 'aaa1234' ? [check('build', true, 'failure'), ext(false)] : [ext(false)]),
+    });
+    const clock = { now: 1_000_000 };
+    const { h, delivered, decisions } = host(forge, clock);
+    const watcher = new Watcher(h, options());
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    clock.now += 25 * H;
+    await watcher.tick();
+    expect(delivered).toHaveLength(0);
+    expect(decisions).toContain('drop ci#10 superseded by head @bbb1234');
+    expect(watcher.snapshot().deferred).toEqual([]);
+  });
+
+  it('reads each aged-out subject again: a newer run on the branch drops it, a head that settled meanwhile delivers its verdict, the rest carry their current state', async () => {
+    let extDone = false;
+    const branchReads: string[] = [];
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      // tick 2: a docs failure on scratch, a docs success on other, and a build on the head of pr 3 whose external check is still running
+      runs: script(changed([]), changed([brun(5, 'docs', 'scratch', 'failure', 's500000'), brun(6, 'docs', 'other', 'success', 'o600000'), brun(10, 'build', 'feat/3', 'success', 'abc1234def')], 'r2')),
+      pulls: script(changed([pr3('abc1234def')]), same(), same()),
+      checks: async () => [check('build', true), ext(extDone)],
+      // the listing the poll holds never saw run 7: only the per-branch read does
+      branchRuns: async (_r, branch) => {
+        branchReads.push(branch);
+        return branch === 'scratch' ? [brun(7, 'docs', 'scratch', 'success', 's700000'), brun(5, 'docs', 'scratch', 'failure', 's500000')] : [brun(6, 'docs', 'other', 'success', 'o600000')];
+      },
+    });
+    const clock = { now: 1_000_000 };
+    const { h, delivered, decisions } = host(forge, clock);
+    const watcher = new Watcher(h, options());
+    await watcher.start();
+    await watcher.tick();
+    await watcher.tick();
+    expect(watcher.snapshot().deferred.map((d) => d.event.id)).toEqual(['ci#10', 'ci#5', 'ci#6']);
+    extDone = true;
+    clock.now += 25 * H;
+    await watcher.tick();
+    expect(branchReads.sort()).toEqual(['other', 'scratch']);
+    expect(decisions).toContain('drop ci#5 superseded by run 7');
+    expect(decisions).toContain('drop ci#10 superseded by the settled verdict on pr #3 @abc1234');
+    expect(delivered).toHaveLength(1);
+    const lines = delivered[0]!.split('\n');
+    expect(lines).toContain('ci success: docs on other @o600000 (push) · now: other @o600000, docs success');
+    expect(lines).toContain('  by me · https://x/runs/6 · deferred ci success, aged out');
+    expect(lines).toContain('ci settled success: pr #3 feat/3 @abc1234: Feat 3 (2 checks) · now: open, head unchanged');
+    expect(delivered[0]).not.toContain('scratch');
+    expect(watcher.snapshot().deferred).toEqual([]);
+  });
+
+  it('delivers only what is not superseded from a persisted backlog restored hours later', async () => {
+    const store = new Map<string, unknown>();
+    const first = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(1)])),
+      runs: script(changed([]), changed([brun(5, 'docs', 'scratch', 'failure', 's500000'), brun(6, 'docs', 'other', 'success', 'o600000'), run(10, 'build', true, 'failure', 'aaa1234')], 'r2')),
+      pulls: script(changed([pr3('aaa1234')]), same()),
+      checks: async () => [check('build', true, 'failure'), ext(false)],
+    });
+    const clock = { now: 1_000_000 };
+    const before = host(first, clock, store);
+    const w1 = new Watcher(before.h, options());
+    await w1.start();
+    await w1.tick();
+    await w1.tick();
+    w1.stop();
+    expect(before.delivered).toHaveLength(0);
+    expect(w1.snapshot().deferred).toHaveLength(3);
+
+    // the session comes back 30 hours later: scratch went green, pr 3 moved to a new head whose checks are still running
+    clock.now += 30 * H;
+    const later = fakeForge({
+      login: async () => 'me',
+      items: script(same()),
+      runs: script(changed([brun(7, 'docs', 'scratch', 'success', 's700000'), brun(5, 'docs', 'scratch', 'failure', 's500000'), brun(6, 'docs', 'other', 'success', 'o600000'), run(10, 'build', true, 'failure', 'aaa1234')], 'r9')),
+      pulls: script(changed([pr3('bbb1234')], 'p9')),
+      checks: async () => [ext(false)],
+      branchRuns: async () => [brun(6, 'docs', 'other', 'success', 'o600000')],
+    });
+    const after = host(later, clock, store);
+    const w2 = new Watcher(after.h, options());
+    await w2.start();
+    await w2.tick();
+    expect(after.decisions).toContain('drop ci#5 superseded by run 7');
+    expect(after.decisions).toContain('drop ci#10 superseded by head @bbb1234');
+    expect(after.delivered).toHaveLength(1);
+    const lines = after.delivered[0]!.split('\n');
+    expect(lines.filter((l) => l.startsWith('ci '))).toEqual(['ci success: docs on other @o600000 (push) · now: other @o600000, docs success']);
+    // the green run on scratch is fresh news, held as ci success rather than aged out
+    expect(w2.snapshot().deferred.map((d) => d.event.id)).toEqual(['ci#7']);
+  });
+
+  it('states where the subject stands now: a pr open with its head unchanged or moved, merged, closed, or a branch\'s newest run', () => {
+    const state = {
+      ...initialState(),
+      pulls: [pr3('bbb1234')],
+      items: { '4': { kind: 'pr' as const, title: 't', state: 'closed', user: 'u', bot: false, bodySig: '', created: '', comments: 0, labels: '', updated: '', merged: true, url: '' }, '5': { kind: 'pr' as const, title: 't', state: 'closed', user: 'u', bot: false, bodySig: '', created: '', comments: 0, labels: '', updated: '', merged: false, url: '' } },
+      runs: { '1': brun(1, 'docs', 'dev', 'failure', 'd100000'), '2': brun(2, 'docs', 'dev', 'success', 'd200000'), '3': brun(3, 'lint', 'dev', 'failure', 'd300000') },
+      heads: recordHeads({}, [pr3('aaa1234'), pr3('bbb1234')]),
+    };
+    const ci = (over: Partial<WatchEvent>): WatchEvent => event({ kind: 'ci', ...over });
+    expect(currentState(ci({ subject: 'pr:3', sha: 'bbb1234' }), state)).toBe('open, head unchanged');
+    expect(currentState(ci({ subject: 'pr:3', sha: 'aaa1234' }), state)).toBe('open, head @bbb1234 (moved)');
+    expect(currentState(ci({ subject: 'pr:4', sha: 'x' }), state)).toBe('merged');
+    expect(currentState(ci({ subject: 'pr:5', sha: 'x' }), state)).toBe('closed');
+    expect(currentState(ci({ subject: 'pr:6', sha: 'x' }), state)).toBe('not open');
+    expect(currentState(ci({ subject: 'branch:dev', branch: 'dev', sha: 'd100000', run: '1', workflow: 'docs', conclusion: 'failure' }), state)).toBe('dev @d200000, docs success');
+    expect(currentState(ci({ subject: 'branch:dev', branch: 'dev', sha: 'd300000', run: '3', workflow: 'lint', conclusion: 'failure' }), state)).toBe('dev @d300000, lint failure');
+    // a run on a past head of a pr keys to the pr, anything else to its branch
+    expect(runSubject({ sha: 'aaa1234', branch: 'feat/3' }, state.heads)).toBe('pr:3');
+    expect(runSubject({ sha: 'zzz', branch: 'dev' }, state.heads)).toBe('branch:dev');
+    expect(newerRun(Object.values(state.runs), (r) => r.name === 'docs', '1')?.id).toBe('2');
+    expect(newerRun(Object.values(state.runs), (r) => r.name === 'docs', '2')).toBeUndefined();
   });
 });
