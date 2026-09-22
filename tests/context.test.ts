@@ -24,15 +24,15 @@ describe('pruning', () => {
     expect(result.text).toContain('Error: boom');
     expect(result.text).toContain('progress 0%');
     expect(result.text).toContain('progress 199%');
-    expect(result.text).toContain('[sift: lines 21-120 (100 lines) omitted as not needed for the current task, rerun the command for the full output]');
+    expect(result.text).toContain('[sift: lines 21-120 (100 lines) omitted as not needed for the current task, rerun the command for the full output, or end a command with # sift: full to keep its output whole]');
     expect(result.text.split('\n').filter((l) => l.startsWith('[sift:'))).toHaveLength(2);
   });
 
   it('notes a dropped Read range in file lines with the call to read it back', async () => {
     const result = await prune(noisy, { tool: 'Read', input: { file_path: '/src/a.ts', offset: 100, limit: 200 }, task: 'find the bug' }, judgeBy(() => 0.1), { ...PRUNE_DEFAULTS, floorTokens: 10, chunkLines: 20 });
-    expect(result.text).toContain('[sift: lines 120-219 (100 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 120 limit 100]');
+    expect(result.text).toContain('[sift: lines 120-219 (100 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 120 limit 100, or call mcp__sift__prune off to read files whole]');
     const plain = omissionNote({ tool: 'Read', input: { file_path: '/src/a.ts' }, task: '' });
-    expect(plain(21, 40)).toBe('[sift: lines 21-40 (20 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 21 limit 20]');
+    expect(plain(21, 40)).toBe('[sift: lines 21-40 (20 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 21 limit 20, or call mcp__sift__prune off to read files whole]');
   });
 
   it('passes short output and judge failures through untouched', async () => {
@@ -68,8 +68,8 @@ describe('pruning', () => {
     const context = { tool: 'Read', input: { file_path: '/src/a.ts', offset: 100, limit: 200 }, task: 'find the bug' };
     const result = await prune(text, context, judgeBy((k) => (k === 'needed_6' ? 1 : 0)), { ...PRUNE_DEFAULTS, floorTokens: 10, chunkLines: 20 });
     expect(result.chunks).toBe(11);
-    expect(result.text).toContain('[sift: lines 120-219 (100 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 120 limit 100]');
-    expect(result.text).toContain('[sift: lines 238-297 (60 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 238 limit 60]');
+    expect(result.text).toContain('[sift: lines 120-219 (100 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 120 limit 100, or call mcp__sift__prune off to read files whole]');
+    expect(result.text).toContain('[sift: lines 238-297 (60 lines) omitted as not needed for the current task, re-read /src/a.ts with offset 238 limit 60, or call mcp__sift__prune off to read files whole]');
     const lines = result.text.split('\n');
     expect(lines).toHaveLength(42);
     expect(lines[21]).toBe(long);
