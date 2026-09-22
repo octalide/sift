@@ -83,13 +83,13 @@
     "watch": {
       "type": "boolean",
       "title": "Repo watch",
-      "description": "Poll a repository for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts.",
+      "description": "Subscribe to the repositories in watchRepos at boot: poll them for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts.",
       "default": false
     },
-    "watchRepo": {
+    "watchRepos": {
       "type": "string",
-      "title": "Watched repo",
-      "description": "owner/name. Empty watches the session's own repo.",
+      "title": "Watched repos",
+      "description": "Comma separated owner/name list, each subscribed as a whole at boot when watch is on. Empty subscribes the session's own repo. More subscriptions, scoped to a PR, branch, run or tag, are added at runtime with the watch tool.",
       "default": ""
     },
     "watchMinInterval": {
@@ -129,8 +129,9 @@
     "watchCi": {
       "type": "string",
       "title": "Watch CI events",
-      "description": "failures delivers each open PR once when every check on its head has finished (pass or fail) and failed runs on protected branches, all delivers every completed run as well, none delivers no CI.",
+      "description": "The CI filter of a subscription that sets none. settled delivers each open PR once when every check on its head has finished (pass or fail), and each completed run on a branch, tag or run subscription. failures delivers those verdicts and failed runs (on a whole repository, only those on protected or work pattern branches). all delivers every completed run as well, none delivers no CI.",
       "options": [
+        "settled",
         "failures",
         "all",
         "none"

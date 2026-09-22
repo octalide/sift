@@ -62,6 +62,26 @@ describe('github forge', () => {
     expect(await withRuns.runs('o/r')).toMatchObject({ changed: true, token: '"r"', value: [{ id: '7', name: 'ci', done: true, conclusion: 'skipped', ok: true, branch: 'main', sha: 'abc', actor: 'a' }] });
   });
 
+  it('marks a run whose ref is a tag, looking each ref name up once, and reads one run by id', async () => {
+    const calls: string[] = [];
+    const raw = (id: number, branch: string, event: string) => ({ id, name: 'ci', head_branch: branch, event, status: 'completed', conclusion: 'success', head_sha: 'abc', html_url: 'u', actor: { login: 'a' }, updated_at: '1' });
+    const forge = github(
+      {
+        'repos/o/r/actions/runs/9': { body: raw(9, 'v1.2.0', 'push') },
+        'repos/o/r/actions/runs': { body: { workflow_runs: [raw(7, 'v1.2.0', 'push'), raw(8, 'main', 'push'), raw(6, 'feat/1', 'pull_request'), raw(5, 'v1.2.0', 'release'), raw(4, 'v1', 'push')] } },
+        'repos/o/r/git/matching-refs/tags/v1.2.0': { body: [{ ref: 'refs/tags/v1.2.0' }] },
+        // matching-refs matches by prefix: only an exact ref is the tag
+        'repos/o/r/git/matching-refs/tags/v1': { body: [{ ref: 'refs/tags/v1.2.0' }] },
+        'repos/o/r/git/matching-refs/tags/main': { body: [] },
+      },
+      calls,
+    );
+    const read = await forge.runs('o/r');
+    expect(read.changed && read.value.map((r) => [r.id, r.tag])).toEqual([['7', true], ['8', false], ['6', false], ['5', true], ['4', false]]);
+    expect(await forge.run('o/r', '9')).toMatchObject({ id: '9', branch: 'v1.2.0', tag: true, done: true });
+    expect(calls.filter((c) => c.includes('matching-refs')).map((c) => c.split('/').slice(-1)[0])).toEqual(['v1.2.0', 'main', 'v1']);
+  });
+
   it('finds templates in every documented location and skips the issue form chooser', async () => {
     const entry = (path: string, type = 'file') => ({ name: path.split('/').pop()!, path, type });
     const forge = github({

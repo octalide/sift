@@ -6,8 +6,9 @@ import { formatReport, runChecks, runPack } from '../packs/run.ts';
 import { issueSubject } from '../repo/subjects.ts';
 import { downstreamLine, jobSubject, readFailure } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
-import { armedAgent, currentState, deliveryAgent, diffItems, diffRuns, formatEvent, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type Run, type WatchEvent, type WatchState } from './poll.ts';
-import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
+import { currentState, diffItems, diffRuns, formatEvent, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type Run, type WatchEvent, type WatchState } from './poll.ts';
+import { route, settles, type Subscription } from './subscription.ts';
+import { eventSubject, judgeEvent, type EventDetail, type WatchRules } from './triage.ts';
 
 export type WatchOptions = {
   repo: string;
@@ -34,16 +35,27 @@ export type WatchHost = {
   ciPack?: Pack;
   config: RepoConfig;
   now: () => number;
-  deliver: (text: string) => Promise<void>;
+  deliver: (delivery: WatchDelivery) => Promise<void>;
   log: (text: string) => void;
   status: (text: string | undefined) => void;
   schedule: (ms: number, fn: () => void) => { cancel: () => void };
   onDecision?: (event: WatchEvent, action: string, label: string) => void;
+  // the subscriptions on this repository, read at each step so one added or removed mid-poll counts at once
+  subscriptions: () => Subscription[];
+  // removes subscriptions whose until is reached
+  retire?: (ids: string[], why: string) => Promise<void>;
+  // runs before each poll: the owner reaps what no longer has anyone to deliver to
+  prepare?: () => Promise<void>;
+  // the epoch ms before which no poll on this token runs, shared by every poller on it
+  rate?: { until: number };
 };
+
+// one prompt's worth of events and the subscriptions they matched, each naming the agent it belongs to
+export type WatchDelivery = { repo: string; text: string; subscriptions: Subscription[] };
 
 type Timer = { cancel: () => void };
 
-type Delivery = { event: WatchEvent; label: string };
+type Delivery = { event: WatchEvent; label: string; subs: string[] };
 
 // what one age-out has read from the forge: the pr heads whose checks it read, the runs of each branch it listed
 type Recheck = { heads: Set<string>; branches: Map<string, Run[]> };
@@ -71,7 +83,7 @@ export class Watcher {
     this.stopped = false;
     const stored = (await this.host.store.get(this.key)) as WatchState | undefined;
     if (stored && stored.version !== STATE_VERSION) this.host.log(`sift watch ${this.options.repo}: stored state is from an older version, reseeding`);
-    this.state = stored && stored.version === STATE_VERSION ? stored : initialState();
+    this.state = stored && stored.version === STATE_VERSION ? stored : this.fresh();
     if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.forge.login();
     if (this.state.paused) {
       this.host.status(`watch paused (${this.options.repo})`);
@@ -103,22 +115,31 @@ export class Watcher {
 
   async reset(): Promise<void> {
     this.stop();
-    this.state = initialState();
+    this.state = this.fresh();
     await this.save();
     await this.start();
   }
 
-  // records who armed the watch: a subagent's name, or nothing when the main loop did, which also forgets the
-  // per-pr set. a subagent naming its pr (number or head branch) takes that ref in the set, one agent per ref, the
-  // newest arm winning as armedBy does. deliveries always reach the main loop, the names on them tell it whom to relay to
-  async arm(by: string | undefined, ref?: string): Promise<void> {
-    this.state.armedBy = by;
-    if (!by) delete this.state.armedFor;
-    else if (ref) {
-      const key = armRef(ref);
-      this.state.armedFor = [...(this.state.armedFor ?? []).filter((a) => a.ref !== key), { agent: by, ref: key }];
-    }
+  // a run subscription waits on its run: the run is read by id each poll until its completion goes out
+  async await(run: string): Promise<void> {
+    if (!this.state.awaited.includes(run)) this.state.awaited.push(run);
     await this.save();
+  }
+
+  private fresh(): WatchState {
+    return { ...initialState(), awaited: this.runSubs() };
+  }
+
+  private runSubs(): string[] {
+    return [...new Set(this.host.subscriptions().flatMap((s) => (s.scope.kind === 'run' ? [s.scope.id] : [])))];
+  }
+
+  private wantsCi(): boolean {
+    return this.host.subscriptions().some((s) => s.filter.ci !== 'none');
+  }
+
+  private rules(): WatchRules {
+    return { ...this.options.rules, login: this.state.login };
   }
 
   snapshot(): WatchState {
@@ -146,6 +167,8 @@ export class Watcher {
   }
 
   private async poll(): Promise<void> {
+    await this.host.prepare?.();
+    if (this.stopped) return;
     const now = this.host.now();
     let changed = false;
     let rateWait = 0;
@@ -153,16 +176,20 @@ export class Watcher {
       const a = await this.pollItems(now);
       const b = await this.pollRuns(now);
       const c = await this.pollPulls(now);
-      changed = a.changed || b.changed;
+      const d = await this.pollAwaited(now, b.events);
+      changed = a.changed || b.changed || d.length > 0;
       rateWait = Math.max(a.rateWait, b.rateWait, c.rateWait);
       this.state.failures = 0;
       if (!this.state.seeded) {
         this.state.seeded = true;
         if (c.changed) await this.seedHeads(now);
         this.host.log(`sift watch seeded for ${this.options.repo}, streaming changes from now`);
+        // a run subscription is answered on the seed poll too: its completion is what it asked for, not old news
+        if (d.length > 0) await this.handle(d, false);
       } else {
-        await this.handle([...a.events, ...b.events], c.changed);
+        await this.handle([...a.events, ...b.events, ...d], c.changed);
       }
+      await this.retireReached();
     } catch (error) {
       this.state.failures += 1;
       if (this.state.failures === 1 || this.state.failures % 10 === 0) {
@@ -175,7 +202,7 @@ export class Watcher {
       else if (changed) this.state.interval = minIntervalMs;
       else this.state.interval = Math.min(maxIntervalMs, Math.max(minIntervalMs, this.state.interval * 2 || minIntervalMs));
       await this.save();
-      this.schedule(Math.max(this.state.interval, rateWait));
+      this.schedule(Math.max(this.state.interval, rateWait, (this.host.rate?.until ?? 0) - now));
     }
   }
 
@@ -208,17 +235,56 @@ export class Watcher {
     return { changed: events.length > 0, events, rateWait };
   }
 
+  // each awaited run the listing did not just report complete is read by id, so a run that paged out of the newest
+  // runs still delivers its completion. a run already complete when it was awaited is delivered from the cache
+  private async pollAwaited(now: number, listed: WatchEvent[]): Promise<WatchEvent[]> {
+    const wanted = new Set(this.runSubs());
+    const reported = new Set(listed.map((e) => e.run));
+    const out: WatchEvent[] = [];
+    const left: string[] = [];
+    for (const id of this.state.awaited) {
+      if (!wanted.has(id) || reported.has(id)) continue;
+      let run = this.state.runs[id];
+      if (!run?.done) {
+        try {
+          run = await this.host.forge.run(this.options.repo, id);
+        } catch (error) {
+          this.host.log(`sift watch ${this.options.repo}: could not read run ${id} (${error instanceof Error ? error.message : String(error)})`);
+          left.push(id);
+          continue;
+        }
+        this.state.runs[id] = run;
+      }
+      if (run.done) out.push(...diffRuns({}, { [id]: run }, now));
+      else left.push(id);
+    }
+    this.state.awaited = left;
+    return out;
+  }
+
+  // a pr subscription until merged or closed goes once the pr's state reaches it, as the item cache holds it
+  private async retireReached(): Promise<void> {
+    const reached = this.host.subscriptions().filter((s) => {
+      if (s.scope.kind !== 'pr' || (s.until !== 'merged' && s.until !== 'closed')) return false;
+      const item = this.state.items[String(s.scope.number)];
+      return item !== undefined && (item.merged || (s.until === 'closed' && item.state === 'closed'));
+    });
+    if (reached.length > 0) await this.host.retire?.(reached.map((s) => s.id), 'until reached');
+  }
+
+  // the floor is per token: a poller that reads it low holds every poller on the token until the window refills
   private rateWait({ remaining, reset }: Rate, now: number): number {
     if (remaining === undefined || remaining >= this.options.rateFloor) return 0;
-    const wait = reset ? reset * 1000 - now + 5000 : this.options.maxIntervalMs;
+    const wait = Math.max(reset ? reset * 1000 - now + 5000 : this.options.maxIntervalMs, this.options.maxIntervalMs);
     this.host.log(`sift watch ${this.options.repo}: ${remaining} api calls left, waiting ${Math.round(wait / 1000)}s`);
-    return Math.max(wait, this.options.maxIntervalMs);
+    if (this.host.rate) this.host.rate.until = Math.max(this.host.rate.until, now + wait);
+    return wait;
   }
 
   // the open pr heads, fetched conditionally so an unchanged list costs nothing. a 200 replaces the list in state and
   // every head on it is seeded; the steps of the poll read the list from state either way
   private async pollPulls(now: number): Promise<{ changed: boolean; rateWait: number }> {
-    if (this.options.rules.ci === 'none') return { changed: false, rateWait: 0 };
+    if (!this.wantsCi()) return { changed: false, rateWait: 0 };
     const read = await this.host.forge.pulls(this.options.repo, this.state.etags.pulls);
     const rateWait = this.rateWait(read.rate, now);
     if (!read.changed) return { changed: false, rateWait };
@@ -228,36 +294,39 @@ export class Watcher {
     return { changed: true, rateWait };
   }
 
+  // every event is routed against the subscriptions on this repository before anything reads or judges it
   private async handle(events: WatchEvent[], fresh: boolean): Promise<void> {
-    const rules: WatchRules = { ...this.options.rules, login: this.state.login };
+    const rules = this.rules();
+    const subs = this.host.subscriptions();
     let deliver: Delivery[] = [];
-    for (const e of events) if (e.kind === 'ci' && e.run) e.subject = runSubject(e, this.state.heads);
+    for (const e of events) if (e.kind === 'ci' && e.run) e.subject = runSubject(this.state.runs[e.run] ?? e, this.state.heads);
     const settled = await this.settleRuns(events);
     const seeded = fresh ? await this.seedHeads(this.host.now()) : [];
     for (const e of [...settled, ...seeded, ...(await this.stallHeads())]) {
-      const filing = e.kind === 'issue' && e.isNew && !(rules.ignoreBots && e.bot) ? await this.fileCheck(e) : [];
+      const routed = route(e, subs, rules);
+      if (routed.action === 'drop') {
+        this.host.onDecision?.(e, 'drop', routed.reason);
+        continue;
+      }
+      const filing = e.kind === 'issue' && e.isNew ? await this.fileCheck(e) : [];
       if (filing.length > 0) e.findings = filing.map((f) => `${f.check}: ${f.message}`);
-      const route = filing.length > 0 ? { action: 'deliver' as const, reason: `filed with ${filing.length} finding${filing.length === 1 ? '' : 's'}` } : routeByRules(e, rules);
-      if (route.action === 'drop') {
-        this.host.onDecision?.(e, 'drop', route.reason);
+      const r = filing.length > 0 ? { action: 'deliver' as const, reason: `filed with ${filing.length} finding${filing.length === 1 ? '' : 's'}` } : routed;
+      if (r.action === 'defer') {
+        this.defer(e, r.reason, routed.subs);
         continue;
       }
-      if (route.action === 'defer') {
-        this.defer(e, route.reason);
-        continue;
-      }
-      if (route.action === 'deliver' || !this.options.rules.triage) {
-        deliver.push({ event: e, label: route.reason });
+      if (r.action === 'deliver' || !this.options.rules.triage) {
+        deliver.push({ event: e, label: r.reason, subs: routed.subs });
         continue;
       }
       const detail = await this.detail(e).catch(() => ({}) as EventDetail);
       const triage = await judgeEvent(this.host.pack, eventSubject(this.options.repo, e, detail), this.host.judge, this.host.config);
       const label = triage.error ? `judge unavailable: ${triage.error}` : triage.label;
       if (triage.action === 'defer' && !this.options.shadow) {
-        this.defer(e, 'judged not actionable', label);
+        this.defer(e, 'judged not actionable', routed.subs, label);
         continue;
       }
-      deliver.push({ event: e, label: this.options.shadow && triage.action === 'defer' ? `${label} (shadow: would defer)` : label });
+      deliver.push({ event: e, label: this.options.shadow && triage.action === 'defer' ? `${label} (shadow: would defer)` : label, subs: routed.subs });
     }
     deliver = this.supersede(deliver);
     await this.expireDeferred();
@@ -266,13 +335,34 @@ export class Watcher {
     this.state.deferred = [];
   }
 
+  // one delivery, then every until: settled subscription it answered is retired
   private async send(items: Delivery[], extra: Run[] = []): Promise<void> {
     for (const d of items) {
       this.host.onDecision?.(d.event, 'deliver', d.label);
       if (d.event.settled && d.event.conclusion === 'failure') d.event.reports = await this.ciReports(d.event);
     }
-    await this.host.deliver(this.render(items, extra));
+    const byId = this.byId();
+    const ids = [...new Set(items.flatMap((d) => d.subs))];
+    await this.host.deliver({ repo: this.options.repo, text: this.render(items, extra), subscriptions: ids.flatMap((id) => byId.get(id) ?? []) });
     this.state.lastDelivery = this.host.now();
+    const used = items.flatMap((d) => d.subs.filter((id) => {
+      const sub = byId.get(id);
+      return sub?.until === 'settled' && settles(d.event, sub.scope);
+    }));
+    if (used.length > 0) await this.host.retire?.([...new Set(used)], 'until settled reached');
+  }
+
+  private byId(): Map<string, Subscription> {
+    return new Map(this.host.subscriptions().map((s) => [s.id, s]));
+  }
+
+  // a run subscription asked for its run by id, so nothing newer supersedes the run for it
+  private unsuperseded(e: WatchEvent, subs: string[], reason: string | undefined): string[] {
+    if (!reason) return subs;
+    const byId = this.byId();
+    const left = subs.filter((id) => byId.get(id)?.scope.kind === 'run');
+    if (left.length === 0) this.host.onDecision?.(e, 'drop', reason);
+    return left;
   }
 
   // drops the ci news a newer result has made old, from this poll's deliveries and from the held events: an older run
@@ -293,43 +383,40 @@ export class Watcher {
       if (all.some((o) => o !== e && o.run === e.run && o.at > e.at)) return `superseded by run ${e.run} completing again`;
       return undefined;
     };
-    const keep = (e: WatchEvent, isHeld: boolean): boolean => {
-      const reason = by(e, isHeld);
-      if (reason) this.host.onDecision?.(e, 'drop', reason);
-      return !reason;
-    };
-    this.state.deferred = this.state.deferred.filter((d) => keep(d.event, true));
-    return batch.filter((d) => keep(d.event, false));
+    this.state.deferred = this.state.deferred.flatMap((d) => {
+      const subs = this.unsuperseded(d.event, d.subs, by(d.event, true));
+      return subs.length > 0 ? [{ ...d, subs }] : [];
+    });
+    return batch.flatMap((d) => {
+      const subs = this.unsuperseded(d.event, d.subs, by(d.event, false));
+      return subs.length > 0 ? [{ ...d, subs }] : [];
+    });
   }
 
   // a completed run on the head of an open pr is reported as the pr's verdict, once, when the last check finishes.
-  // until then the run event is held with the pr named and the head is tracked as pending. under ci: all the run events pass through as well
+  // the run event passes on marked with where its head stands, so each subscription holds it, drops it or takes it
   private async settleRuns(events: WatchEvent[]): Promise<WatchEvent[]> {
     const runs = events.filter((e) => e.kind === 'ci' && !e.settled);
-    if (runs.length === 0 || this.options.rules.ci === 'none') return events;
+    if (runs.length === 0 || !this.wantsCi()) return events;
     const out: WatchEvent[] = events.filter((e) => e.kind !== 'ci');
     const pulls = this.state.pulls;
     this.prunePending();
-    const sha = (e: WatchEvent) => this.state.runs[e.id.replace(/^ci#/, '')]?.sha ?? '';
     for (const e of runs) {
-      const pr = pulls.find((p) => p.sha === sha(e));
-      if (!pr) {
-        out.push(e);
-        continue;
-      }
-      if (this.options.rules.ci === 'all') out.push(e);
+      out.push(e);
+      const pr = pulls.find((p) => p.sha === e.sha);
+      if (!pr) continue;
       const key = headKey(pr);
       if (this.state.settled[key]) {
-        if (this.options.rules.ci !== 'all') this.host.onDecision?.(e, 'drop', `ci settled on pr #${pr.number} already delivered`);
+        e.head = 'settled';
         continue;
       }
       const head = await this.settle(pr.sha).catch(() => undefined);
-      if (!head) continue;
-      if (!head.verdict) {
-        this.state.pending[key] ??= { ...pr, user: e.user, since: e.at, stalled: false };
-        if (this.options.rules.ci !== 'all') this.defer(e, `ci ${e.conclusion ?? 'unknown'} on pr #${pr.number}, awaiting the other checks`);
+      if (!head?.verdict) {
+        if (head) this.state.pending[key] ??= { ...pr, user: e.user, since: e.at, stalled: false };
+        e.head = 'pending';
         continue;
       }
+      e.head = 'settled';
       out.push(this.settledEvent(pr, head.verdict, e.user, e.at));
     }
     return out;
@@ -340,7 +427,7 @@ export class Watcher {
   private async stallHeads(): Promise<WatchEvent[]> {
     const now = this.host.now();
     const due = Object.entries(this.state.pending).filter(([, h]) => !h.stalled && now - h.since >= this.options.stallMs);
-    if (due.length === 0 || this.options.rules.ci === 'none') return [];
+    if (due.length === 0 || !this.wantsCi()) return [];
     this.prunePending();
     const out: WatchEvent[] = [];
     for (const [key, h] of due) {
@@ -473,9 +560,9 @@ export class Watcher {
     }
   }
 
-  private defer(e: WatchEvent, reason: string, label?: string): void {
+  private defer(e: WatchEvent, reason: string, subs: string[], label?: string): void {
     this.host.onDecision?.(e, 'defer', label ?? reason);
-    this.state.deferred.push({ event: e, reason, label });
+    this.state.deferred.push({ event: e, reason, label, subs });
   }
 
   // a deferred event older than the limit is delivered on its own so nothing waits forever, once its subject is read
@@ -488,10 +575,15 @@ export class Watcher {
     this.state.deferred = this.state.deferred.filter((d) => d.event.at >= cutoff);
     const out: Delivery[] = [];
     const reads: Recheck = { heads: new Set(), branches: new Map() };
+    const live = this.byId();
     for (const d of stale) {
-      const reason = await this.recheck(d.event, reads, out);
-      if (reason) this.host.onDecision?.(d.event, 'drop', reason);
-      else out.push({ event: d.event, label: `deferred ${d.reason}, aged out` });
+      const held = d.subs.filter((id) => live.has(id));
+      if (held.length === 0) {
+        this.host.onDecision?.(d.event, 'drop', 'no subscription holds it any more');
+        continue;
+      }
+      const subs = this.unsuperseded(d.event, held, await this.recheck(d.event, reads, out));
+      if (subs.length > 0) out.push({ event: d.event, label: `deferred ${d.reason}, aged out`, subs });
     }
     if (out.length > 0) await this.send(out, [...reads.branches.values()].flat());
   }
@@ -509,7 +601,11 @@ export class Watcher {
       if (!reads.heads.has(key) && !this.state.settled[key]) {
         reads.heads.add(key);
         const head = await this.settle(pull.sha).catch(() => undefined);
-        if (head?.verdict) out.push({ event: this.settledEvent(pull, head.verdict, e.user, this.host.now()), label: 'ci settled on pr' });
+        if (head?.verdict) {
+          const verdict = this.settledEvent(pull, head.verdict, e.user, this.host.now());
+          const routed = route(verdict, this.host.subscriptions(), this.rules());
+          if (routed.action === 'deliver') out.push({ event: verdict, label: routed.reason, subs: routed.subs });
+        }
       }
       return this.state.settled[key] ? `superseded by the settled verdict on pr #${pull.number} @${pull.sha.slice(0, 7)}` : undefined;
     }
@@ -519,14 +615,19 @@ export class Watcher {
     return newer ? `superseded by run ${newer.id}` : undefined;
   }
 
+  // each event names the subscriptions it matched and the agents they belong to; the header names an agent only when
+  // every subscription in the delivery is that one agent's
   private render(items: Delivery[], extra: Run[] = []): string {
-    const by = deliveryAgent(items.map((i) => i.event), this.state);
+    const byId = this.byId();
+    const owners = (ids: string[]) => [...new Set(ids.map((id) => byId.get(id)?.for))];
+    const all = owners(items.flatMap((i) => i.subs));
+    const by = all.length === 1 ? all[0] : undefined;
     const lines = [`[sift watch ${this.options.repo}${by ? ` for ${by}` : ''}]`];
-    for (const { event, label } of items) {
-      const agent = armedAgent(event, this.state);
+    for (const { event, label, subs } of items) {
+      const agents = owners(subs).filter((a): a is string => a !== undefined);
       const now = event.kind === 'ci' && event.subject ? ` · now: ${currentState(event, this.state, extra)}` : '';
-      lines.push(`${agent ? `for ${agent}: ` : ''}${formatEvent(event)}${now}`);
-      lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''}`);
+      lines.push(`${agents.length > 0 ? `for ${agents.join(', ')}: ` : ''}${formatEvent(event)}${now}`);
+      lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''} · ${subs.join(', ')}`);
       if (event.findings?.length) lines.push(`  filing: ${event.findings.join('; ')}`);
       for (const report of event.reports ?? []) lines.push(...report.split('\n').map((l) => `  ${l}`));
     }
@@ -556,20 +657,15 @@ export class Watcher {
   }
 }
 
-// the ref as the set keys it: a pr number with or without its leading #, or a head branch as given
-export function armRef(ref: string): string {
-  return ref.replace(/^#(?=\d+$)/, '');
-}
-
 // the name SendMessage reaches a tool.call's agent by: its listed name, else its id, nothing on the main loop
-export function armingAgent(agentId: string | undefined, agents: { id: string; name?: string }[]): string | undefined {
+export function agentName(agentId: string | undefined, agents: { id: string; name?: string }[]): string | undefined {
   if (!agentId) return undefined;
   return agents.find((a) => a.id === agentId)?.name ?? agentId;
 }
 
-// what a subagent that armed the watch is told: the plugin submits prompts to the session's main loop only
-export function armedNotice(by: string): string {
-  return `armed from agent ${by}: deliveries are submitted to the session's main loop, not to this agent. Nothing reaches you unless the session relays it (each delivery for you names you as \`for ${by}\`), so do not end your turn expecting a delivery to arrive on its own.`;
+// what a subagent that subscribed is told: the plugin submits prompts to the session's main loop only
+export function ownerNotice(by: string): string {
+  return `subscribed for agent ${by}: deliveries are submitted to the session's main loop, not to this agent. Nothing reaches you unless the session relays it (each delivery for you names you as \`for ${by}\`), so do not end your turn expecting a delivery to arrive on its own.`;
 }
 
 export function summarize(deferred: Deferred[]): string {
