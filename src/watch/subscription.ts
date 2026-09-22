@@ -19,7 +19,7 @@ export type Subscription = {
   repo: string;
   scope: Scope;
   filter: Filter;
-  // the agent it belongs to, by the name SendMessage reaches it by; absent for the main loop
+  // the agent it belongs to, by the agentId SendMessage reaches it by; absent for the main loop
   for?: string;
   until?: Until;
 };
@@ -139,9 +139,10 @@ export function settles(e: WatchEvent, scope: Scope): boolean {
 // a subscribe or start as the watch tool takes it
 export type SubscribeInput = { repo?: string; scope?: string; items?: boolean; ci?: string; stall?: boolean; until?: string; for?: string };
 
-// the subscription a subscribe asks for: the session's repository unless it names one, the default filter under what
-// it sets, owned by the agent that asked. a start takes the session's repository alone, scoped to the pull request or
-// branch its for names, else the whole repository
+// the subscription a subscribe asks for: the caller's repository unless it names one, the default filter under what
+// it sets, owned by the agent that asked. a start takes the caller's repository alone, scoped to the pull request or
+// branch its for names, else the whole repository; a subagent's start for a pull request or branch lasts until settled
+// unless it says otherwise, since the verdict is what it waits on
 export function subscriptionOf(input: SubscribeInput, how: { start: boolean; repo?: string; filter: Filter; owner?: string }): Omit<Subscription, 'id'> | { error: string } {
   const repo = how.start ? how.repo : input.repo?.trim() || how.repo;
   if (!repo) return { error: 'no repository (pass repo, or run in a checkout of one)' };
@@ -149,7 +150,7 @@ export function subscriptionOf(input: SubscribeInput, how: { start: boolean; rep
   const scope = how.start ? (!ref ? { kind: 'repo' as const } : /^\d+$/.test(ref) ? { kind: 'pr' as const, number: Number(ref) } : { kind: 'branch' as const, name: ref }) : parseScope(input.scope);
   if (typeof scope === 'string') return { error: scope };
   if (input.ci !== undefined && !CI_FILTERS.includes(input.ci as CiFilter)) return { error: `ci must be one of ${CI_FILTERS.join(', ')}` };
-  const until = parseUntil(input.until, scope);
+  const until = parseUntil(input.until ?? (how.start && ref && how.owner ? 'settled' : undefined), scope);
   if (typeof until === 'object') return until;
   const filter: Filter = { items: input.items ?? how.filter.items, ci: (input.ci as CiFilter | undefined) ?? how.filter.ci, stall: input.stall ?? how.filter.stall };
   return { repo, scope, filter, ...(how.owner ? { for: how.owner } : {}), ...(until ? { until } : {}) };

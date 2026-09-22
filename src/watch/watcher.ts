@@ -50,8 +50,9 @@ export type WatchHost = {
   rate?: { until: number };
 };
 
-// one prompt's worth of events and the subscriptions they matched, each naming the agent it belongs to
-export type WatchDelivery = { repo: string; text: string; subscriptions: Subscription[] };
+// one recipient's share of a poll: the agent it is for by agentId, absent for the main loop, and the subscriptions of
+// that recipient its events matched. the recipient is named here alone, never in the text
+export type WatchDelivery = { repo: string; to?: string; text: string; subscriptions: Subscription[] };
 
 type Timer = { cancel: () => void };
 
@@ -331,19 +332,37 @@ export class Watcher {
     deliver = this.supersede(deliver);
     await this.expireDeferred();
     if (deliver.length === 0) return;
-    await this.send(deliver);
-    this.state.deferred = [];
+    await this.send(deliver, [], true);
   }
 
-  // one delivery, then every until: settled subscription it answered is retired
-  private async send(items: Delivery[], extra: Run[] = []): Promise<void> {
+  // one delivery per recipient, each with the events its own subscriptions matched and the digest of what it has held,
+  // then every until: settled subscription answered is retired. a poll's own delivery consumes the digest it carried;
+  // an aged-out one leaves the held events held
+  private async send(items: Delivery[], extra: Run[] = [], consume = false): Promise<void> {
     for (const d of items) {
       this.host.onDecision?.(d.event, 'deliver', d.label);
       if (d.event.settled && d.event.conclusion === 'failure') d.event.reports = await this.ciReports(d.event);
     }
     const byId = this.byId();
-    const ids = [...new Set(items.flatMap((d) => d.subs))];
-    await this.host.deliver({ repo: this.options.repo, text: this.render(items, extra), subscriptions: ids.flatMap((id) => byId.get(id) ?? []) });
+    const ownerOf = (id: string) => byId.get(id)?.for;
+    const owners = new Set(items.flatMap((d) => d.subs.map(ownerOf)));
+    // the main loop first, then each agent by agentId
+    const recipients = [...(owners.has(undefined) ? [undefined] : []), ...[...owners].filter((o): o is string => o !== undefined).sort()];
+    for (const to of recipients) {
+      const mine = items.flatMap((d) => {
+        const subs = d.subs.filter((id) => ownerOf(id) === to);
+        return subs.length > 0 ? [{ ...d, subs }] : [];
+      });
+      const held = this.state.deferred.filter((d) => d.subs.some((id) => ownerOf(id) === to));
+      const ids = [...new Set(mine.flatMap((d) => d.subs))];
+      await this.host.deliver({ repo: this.options.repo, ...(to !== undefined ? { to } : {}), text: this.render(mine, held, extra), subscriptions: ids.flatMap((id) => byId.get(id) ?? []) });
+      if (!consume) continue;
+      // a held event is summarized once for each recipient; what is left waits for its other recipients or ages out
+      this.state.deferred = this.state.deferred.flatMap((d) => {
+        const subs = d.subs.filter((id) => ownerOf(id) !== to);
+        return subs.length === d.subs.length ? [d] : subs.length > 0 ? [{ ...d, subs }] : [];
+      });
+    }
     this.state.lastDelivery = this.host.now();
     const used = items.flatMap((d) => d.subs.filter((id) => {
       const sub = byId.get(id);
@@ -615,23 +634,18 @@ export class Watcher {
     return newer ? `superseded by run ${newer.id}` : undefined;
   }
 
-  // each event names the subscriptions it matched and the agents they belong to; the header names an agent only when
-  // every subscription in the delivery is that one agent's
-  private render(items: Delivery[], extra: Run[] = []): string {
-    const byId = this.byId();
-    const owners = (ids: string[]) => [...new Set(ids.map((id) => byId.get(id)?.for))];
-    const all = owners(items.flatMap((i) => i.subs));
-    const by = all.length === 1 ? all[0] : undefined;
-    const lines = [`[sift watch ${this.options.repo}${by ? ` for ${by}` : ''}]`];
+  // one recipient's delivery: each event names the subscriptions of that recipient it matched, and the digest counts
+  // what that recipient has held. the recipient itself is named by the channel, not here
+  private render(items: Delivery[], held: Deferred[], extra: Run[] = []): string {
+    const lines = [`[sift watch ${this.options.repo}]`];
     for (const { event, label, subs } of items) {
-      const agents = owners(subs).filter((a): a is string => a !== undefined);
       const now = event.kind === 'ci' && event.subject ? ` · now: ${currentState(event, this.state, extra)}` : '';
-      lines.push(`${agents.length > 0 ? `for ${agents.join(', ')}: ` : ''}${formatEvent(event)}${now}`);
+      lines.push(`${formatEvent(event)}${now}`);
       lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''} · ${subs.join(', ')}`);
       if (event.findings?.length) lines.push(`  filing: ${event.findings.join('; ')}`);
       for (const report of event.reports ?? []) lines.push(...report.split('\n').map((l) => `  ${l}`));
     }
-    if (this.state.deferred.length > 0) lines.push(`deferred meanwhile: ${summarize(this.state.deferred)}`);
+    if (held.length > 0) lines.push(`deferred meanwhile: ${summarize(held)}`);
     return lines.join('\n');
   }
 
@@ -655,17 +669,6 @@ export class Watcher {
     }
     return detail;
   }
-}
-
-// the name SendMessage reaches a tool.call's agent by: its listed name, else its id, nothing on the main loop
-export function agentName(agentId: string | undefined, agents: { id: string; name?: string }[]): string | undefined {
-  if (!agentId) return undefined;
-  return agents.find((a) => a.id === agentId)?.name ?? agentId;
-}
-
-// what a subagent that subscribed is told: the plugin submits prompts to the session's main loop only
-export function ownerNotice(by: string): string {
-  return `subscribed for agent ${by}: deliveries are submitted to the session's main loop, not to this agent. Nothing reaches you unless the session relays it (each delivery for you names you as \`for ${by}\`), so do not end your turn expecting a delivery to arrive on its own.`;
 }
 
 export function summarize(deferred: Deferred[]): string {

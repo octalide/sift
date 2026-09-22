@@ -2,14 +2,10 @@ import type { StoreLike } from '../log.ts';
 import { formatScope, type Subscription } from './subscription.ts';
 import { Watcher, type WatchHost, type WatchOptions } from './watcher.ts';
 
-// one agent as the engine lists it: status is running until it completes, fails or is killed
-export type AgentLike = { id: string; name?: string; status: string };
-
 export type WatchesHost = {
   store: StoreLike;
   // the store key the subscriptions persist under
   key: string;
-  agents: () => Promise<AgentLike[]>;
   now: () => number;
   log: (text: string) => void;
   status: (text: string | undefined) => void;
@@ -19,8 +15,6 @@ export type WatchesHost = {
 };
 
 type Stored = { next: number; subs: Subscription[] };
-
-const FINISHED = new Set(['completed', 'failed', 'killed']);
 
 // the subscriptions of a session and one poller per repository they name: a poller starts with the first
 // subscription on its repository and stops with the last
@@ -94,14 +88,15 @@ export class Watches {
     }
   }
 
-  // a subscription whose owner has finished, or whose until time has passed, has nobody left to deliver to
+  // every subscription an agent owns, once nothing can reach it any more
+  async retireOwner(agentId: string, why: string): Promise<void> {
+    await this.remove(this.subs.filter((s) => s.for === agentId).map((s) => s.id), why);
+  }
+
+  // a subscription whose until time has passed. an owner that finished its turn keeps its subscriptions: a delivery
+  // resumes it
   async reap(): Promise<void> {
     const now = this.host.now();
-    const owned = this.subs.filter((s) => s.for !== undefined);
-    const agents = owned.length > 0 ? await this.host.agents() : [];
-    const alive = (name: string) => agents.some((a) => (a.name === name || a.id === name) && !FINISHED.has(a.status));
-    const finished = owned.filter((s) => !alive(s.for!)).map((s) => s.id);
-    if (finished.length > 0) await this.remove(finished, 'its agent finished');
     const expired = this.subs.filter((s) => s.until !== undefined && !['settled', 'merged', 'closed'].includes(s.until) && Date.parse(s.until) <= now).map((s) => s.id);
     if (expired.length > 0) await this.remove(expired, 'until reached');
   }

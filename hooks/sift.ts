@@ -17,7 +17,7 @@ import { prune, PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { estimateTokens } from '../src/tokens.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
-import { agentName, ownerNotice } from '../src/watch/watcher.ts';
+import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
 
 type Options = {
   backend: Backend;
@@ -99,6 +99,8 @@ type Runtime = GradeHost & {
   session: () => Promise<Checkout>;
   // the session's watch subscriptions and their pollers; absent without the triage pack
   watches?: Watches;
+  // the channels a delivery reaches its recipient by; with the watches
+  mailbox?: Mailbox;
   sessionId: string;
 };
 
@@ -209,11 +211,22 @@ export const register: Register = (on, rawOptions) => {
     // the watch polls under the session's conventions and packs, as bound at start
     const { config, packs } = bound;
     const triagePack = packs['triage'];
-    const watches = triagePack
+    let watches: Watches | undefined;
+    const mailbox = new Mailbox({
+      store,
+      key: `watch-mail:${sessionId}`,
+      agents: () => $.agent.list(),
+      now: () => Date.now(),
+      submit: async (text) => void (await $.prompt.submit({ text })),
+      send: async (to, text) => refusalOf(await $.tool.call({ tool: 'SendMessage', to, message: text, summary: 'sift watch delivery' })),
+      retire: async (agentId, why) => watches?.retireOwner(agentId, why),
+      schedule: (ms, fn) => $.clock.after(ms, () => void fn()),
+      log: (text) => $.ui.log(text),
+    });
+    watches = triagePack
       ? new Watches({
           store,
           key: `watch-subs:${sessionId}`,
-          agents: () => $.agent.list(),
           now: () => Date.now(),
           log: (text) => $.ui.log(text),
           status: (text) => $.ui.status(text),
@@ -226,13 +239,13 @@ export const register: Register = (on, rawOptions) => {
             ciPack: packs['ci'],
             config,
             now: () => Date.now(),
-            // every delivery reaches the main loop; the subscriptions it carries name the agents it is for
-            deliver: async ({ text }) => {
+            // each recipient's delivery goes by its channel: the main loop's prompt, or the owning agent's mailbox
+            deliver: async (d) => {
               if (options.watchDelivery === 'log') {
-                for (const line of text.split('\n')) $.ui.log(line);
+                for (const line of [...(d.to ? [`sift watch to ${d.to}:`] : []), ...d.text.split('\n')]) $.ui.log(line);
                 return;
               }
-              await $.prompt.submit({ text });
+              await mailbox.deliver(d);
             },
             log: (text) => $.ui.log(text),
             schedule: (ms, fn) => $.clock.after(ms, fn),
@@ -256,7 +269,7 @@ export const register: Register = (on, rawOptions) => {
           },
         })
       : undefined;
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, watches, sessionId };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, watches, mailbox: watches ? mailbox : undefined, sessionId };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     if (options.grade) {
@@ -319,25 +332,26 @@ export const register: Register = (on, rawOptions) => {
     await $.tool.register({
       name: 'watch',
       description:
-        'Control the sift watch, a set of subscriptions polled one repository at a time. subscribe (repo, default the session\'s; scope: repo, pr <n>, branch <name>, run <id> or tag <glob>; items, ci, stall filter what reaches you; until: settled, merged, closed or an iso time; returns the id), unsubscribe (id), list (every subscription with its scope, filter and owner), start (subscribe to the session\'s repository with the configured filter, or to one pull request or branch when for names it), status, poll (one poll now), pause, resume, reset (forget the cursor and reseed), deferred (events held back). poll, pause, resume, reset and deferred act on every polled repository, or on repo alone. A subscription made from a subagent belongs to it and is removed once it finishes.',
+        'Control the sift watch, a set of subscriptions polled one repository at a time. subscribe (repo, default the one checked out where the calling subagent was spawned, else the session\'s; scope: repo, pr <n>, branch <name>, run <id> or tag <glob>; items, ci, stall filter what reaches you; until: settled, merged, closed or an iso time; returns the id), unsubscribe (id), list (every subscription with its scope, filter and owner), start (subscribe to that repository with the configured filter, or to one pull request or branch when for names it, until settled from a subagent), status, poll (one poll now), pause, resume, reset (forget the cursor and reseed), deferred (events held back). poll, pause, resume, reset and deferred act on every polled repository, or on repo alone. A subscription made from a subagent belongs to it and outlives its turn: subscribe, end your turn, and the delivery resumes you. It arrives with your next tool call, or as a message after 60 s without one or once you have ended your turn. Do not wait or poll for it. It is removed by until, unsubscribe, or once no message can reach you.',
       inputSchema: {
         type: 'object',
         properties: {
           action: { type: 'string', enum: [...WATCH_ACTIONS] },
-          repo: { type: 'string', description: 'owner/name. subscribe: the repository, default the session\'s. poll, pause, resume, reset, deferred: only this repository' },
+          repo: { type: 'string', description: 'owner/name. subscribe: the repository, default the one checked out where the calling subagent was spawned, else the session\'s. poll, pause, resume, reset, deferred: only this repository' },
           scope: { type: 'string', description: 'subscribe: repo (default), pr <n> (the pull request across its heads), branch <name> (its runs), run <id> (that run, read by id until it completes), tag <glob> (runs on tags matching the glob)' },
           items: { type: 'boolean', description: 'subscribe: deliver issue and pull request events in scope, default true' },
           ci: { type: 'string', enum: [...CI_FILTERS], description: 'subscribe: settled (each pull request head\'s verdict, and each completed run on a branch, tag or run scope), failures (verdicts and failed runs), all (every completed run as well), none. Default the watchCi option' },
           stall: { type: 'boolean', description: 'subscribe: deliver a pull request head whose checks stall, default true' },
           until: { type: 'string', description: 'subscribe: settled (after its first verdict or completed run is delivered), merged or closed (pr scope), or an iso time; the subscription is removed once reached' },
           id: { type: 'string', description: 'unsubscribe: the subscription id' },
-          for: { type: 'string', description: 'start only: the pull request to follow, its number or head branch, instead of the whole repository' },
+          for: { type: 'string', description: 'start only: the pull request to follow, its number or head branch, instead of the whole repository. From a subagent it lasts until settled unless until says otherwise' },
         },
       },
     });
     await $.command.register({ name: 'sift', description: 'sift status, log, watch control', argumentHint: '[status|log|clear|watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred]' });
 
     if (watches) {
+      await mailbox.load();
       await watches.load();
       if (options.watch) {
         const repos = options.watchRepos.split(',').map((r) => r.trim()).filter(Boolean);
@@ -349,6 +363,65 @@ export const register: Register = (on, rawOptions) => {
       $.ui.log('sift watch: triage pack missing');
     }
     return next(e);
+  });
+
+  // registered first, so outermost over every tool. a delivery waiting for a subagent rides the result of its next
+  // tool call, whichever tool and whichever hook answers it; beneath that, outbound gate before, prune after
+  on('tool.call', async ($, e, next) => {
+    const answer = async (): Promise<Awaited<ReturnType<typeof next>>> => {
+      if (e.tool.startsWith('mcp__sift__')) return next(e);
+      const rt = runtime;
+      if (!rt) return next(e);
+      const session = options.gateOutbound ? await rt.session() : undefined;
+      // the outbound channel table: the defaults for the forge, then the config's entries over them
+      const outbound = session ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, channelTable(defaultChannels(rt.forge), session.config.outbound.channels)) : undefined;
+      if (session && outbound) {
+        const rulesPack = session.packs['rules'];
+        const scope = { checkout: session, named: false };
+        const subject = rulesPack ? await rulesSubject({ forge: rt.forge, repo: session.repo, source: ruleSource(rt, scope, undefined), judge: rt.judge, store: rt.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, session.config) : undefined;
+        if (rulesPack && subject) {
+          const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, session.config);
+          record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
+          for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
+          if (!decision.allow) {
+            if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
+            else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
+          }
+        }
+      }
+      const r = await next(e);
+      if (!options.prune || !pruneTools(options).includes(e.tool) || r.deny !== undefined || r.isError) return r;
+      const text = e.tool === 'Bash' ? (r.result as { stdout?: string } | undefined)?.stdout : e.tool === 'Read' ? (r.result as { type?: string; file?: { content?: string } } | undefined)?.file?.content : undefined;
+      if (typeof text !== 'string' || estimateTokens(text) < options.pruneFloorTokens) return r;
+      const input = e as unknown as Record<string, unknown>;
+      const pruned = await prune(
+        text,
+        { tool: e.tool, input, task: await lastUserText($) },
+        rt.judge,
+        { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold },
+      );
+      if (pruned.error) {
+        record('prune', 'fallback', { ok: false, reason: pruned.error, digest: e.tool });
+        return r;
+      }
+      if (pruned.skipped || pruned.dropped === 0) {
+        record('prune', 'none', { digest: `${e.tool}: ${pruned.skipped ?? 'nothing dropped'}` });
+        return r;
+      }
+      const before = estimateTokens(text);
+      const after = estimateTokens(pruned.text);
+      record('prune', options.shadow ? 'would-prune' : 'pruned', { digest: `${e.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens`, tokensRemoved: before - after, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
+      $.ui.toast(`sift${options.shadow ? ' (shadow)' : ''}: ${e.tool} output ${pruned.dropped}/${pruned.chunks} chunks dropped, ~${before - after} tokens`);
+      if (options.shadow) return r;
+      if (e.tool === 'Bash') return { result: { ...(r.result as Record<string, unknown>), stdout: pruned.text } };
+      const read = r.result as { file: Record<string, unknown> } & Record<string, unknown>;
+      return { result: { ...read, file: { ...read.file, content: pruned.text } } };
+    };
+    const r = await answer();
+    const mailbox = runtime?.mailbox;
+    if (!e.agentId || !mailbox || r.deny !== undefined) return r;
+    const letters = await mailbox.take(e.agentId);
+    return letters.length === 0 ? r : { ...r, context: [...(r.context ?? []), ...letters] };
   });
 
   on('tool.call', { tool: 'mcp__sift__grade' }, async ($, e) => {
@@ -385,57 +458,6 @@ export const register: Register = (on, rawOptions) => {
     if (!result.ok) return { deny: `rank unavailable: ${failureText(result)}` };
     const lines = result.sorted.map((r) => `${r.index}: ${r.value.toFixed(3)} ${Object.entries(r.answers).map(([id, a]) => `${id}=${answerLabel(a)}`).join(' ')} ${digestOf(r.item)}`);
     return { result: [{ type: 'text', text: [`${result.items.length} items in ${result.requests} request${result.requests === 1 ? '' : 's'}, sorted by ${input.by ?? Object.keys(input.questions)[0]}`, ...lines].join('\n') }] };
-  });
-
-  // outbound gate before, prune after, on the same call
-  on('tool.call', async ($, e, next) => {
-    if (e.tool.startsWith('mcp__sift__')) return next(e);
-    const rt = runtime;
-    if (!rt) return next(e);
-    const session = options.gateOutbound ? await rt.session() : undefined;
-    // the outbound channel table: the defaults for the forge, then the config's entries over them
-    const outbound = session ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, channelTable(defaultChannels(rt.forge), session.config.outbound.channels)) : undefined;
-    if (session && outbound) {
-      const rulesPack = session.packs['rules'];
-      const scope = { checkout: session, named: false };
-      const subject = rulesPack ? await rulesSubject({ forge: rt.forge, repo: session.repo, source: ruleSource(rt, scope, undefined), judge: rt.judge, store: rt.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, session.config) : undefined;
-      if (rulesPack && subject) {
-        const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, session.config);
-        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
-        for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-        if (!decision.allow) {
-          if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
-        }
-      }
-    }
-    const r = await next(e);
-    if (!options.prune || !pruneTools(options).includes(e.tool) || r.deny !== undefined || r.isError) return r;
-    const text = e.tool === 'Bash' ? (r.result as { stdout?: string } | undefined)?.stdout : e.tool === 'Read' ? (r.result as { type?: string; file?: { content?: string } } | undefined)?.file?.content : undefined;
-    if (typeof text !== 'string' || estimateTokens(text) < options.pruneFloorTokens) return r;
-    const input = e as unknown as Record<string, unknown>;
-    const pruned = await prune(
-      text,
-      { tool: e.tool, input, task: await lastUserText($) },
-      rt.judge,
-      { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold },
-    );
-    if (pruned.error) {
-      record('prune', 'fallback', { ok: false, reason: pruned.error, digest: e.tool });
-      return r;
-    }
-    if (pruned.skipped || pruned.dropped === 0) {
-      record('prune', 'none', { digest: `${e.tool}: ${pruned.skipped ?? 'nothing dropped'}` });
-      return r;
-    }
-    const before = estimateTokens(text);
-    const after = estimateTokens(pruned.text);
-    record('prune', options.shadow ? 'would-prune' : 'pruned', { digest: `${e.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens`, tokensRemoved: before - after, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
-    $.ui.toast(`sift${options.shadow ? ' (shadow)' : ''}: ${e.tool} output ${pruned.dropped}/${pruned.chunks} chunks dropped, ~${before - after} tokens`);
-    if (options.shadow) return r;
-    if (e.tool === 'Bash') return { result: { ...(r.result as Record<string, unknown>), stdout: pruned.text } };
-    const read = r.result as { file: Record<string, unknown> } & Record<string, unknown>;
-    return { result: { ...read, file: { ...read.file, content: pruned.text } } };
   });
 
   // a module that fell back since the last prompt says so once, beside the prompt, instead of hiding in a count
@@ -497,18 +519,21 @@ export const register: Register = (on, rawOptions) => {
       const state = !st ? 'not polled' : `${st.paused ? 'paused' : 'running'}, ${st.deferred.length} deferred, last poll ${st.lastPoll ? new Date(st.lastPoll).toISOString() : 'never'}`;
       return `  ${repo}: ${state}`;
     });
-    return [`watch: ${w.list().length} subscription${w.list().length === 1 ? '' : 's'} on ${repos.length} repositor${repos.length === 1 ? 'y' : 'ies'}`, ...repos, ...w.list().map((s) => `  ${formatSubscription(s)}`)].join('\n');
+    const waiting = (rt.mailbox?.pending() ?? []).map((p) => `  waiting for ${p.to}'s next tool call: ${p.count} deliver${p.count === 1 ? 'y' : 'ies'}`);
+    return [`watch: ${w.list().length} subscription${w.list().length === 1 ? '' : 's'} on ${repos.length} repositor${repos.length === 1 ? 'y' : 'ies'}`, ...repos, ...w.list().map((s) => `  ${formatSubscription(s)}`), ...waiting].join('\n');
   }
 
-  // the watch controls, shared by /sift watch and the watch tool. owner is the subagent the call runs in, if any:
-  // what it subscribes belongs to it
+  // the watch controls, shared by /sift watch and the watch tool. owner is the agentId of the subagent the call runs
+  // in, if any: what it subscribes belongs to it, on the repository of the checkout it was spawned in unless it names one
   async function watchControl(rt: Runtime, input: WatchInput, owner?: string): Promise<string> {
     const w = rt.watches;
     if (!w) return 'watch unavailable: triage pack missing';
     const sub = input.action ?? 'status';
     if (sub === 'list') return w.list().map(formatSubscription).join('\n') || 'no subscriptions';
     if (sub === 'start' || sub === 'subscribe') {
-      const wanted = subscriptionOf(input, { start: sub === 'start', repo: (await rt.session()).repo, filter: defaultFilter(), owner });
+      const checkout = await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(owner)).then((s) => s.checkout, (error: unknown) => ({ error: messageOf(error) }));
+      if ('error' in checkout) return `watch cannot subscribe: ${checkout.error}`;
+      const wanted = subscriptionOf(input, { start: sub === 'start', repo: checkout.repo, filter: defaultFilter(), owner });
       if ('error' in wanted) return `watch cannot subscribe: ${wanted.error}`;
       const { sub: made, added } = await w.subscribe(wanted);
       return [`${added ? 'subscribed' : 'already subscribed'}: ${formatSubscription(made)}`, ...(owner ? [ownerNotice(owner)] : [])].join('\n');
@@ -550,8 +575,7 @@ export const register: Register = (on, rawOptions) => {
     const action = String(input.action ?? 'status');
     if (!rt) return { result: [{ type: 'text', text: 'sift is not bound yet' }] };
     if (!(WATCH_ACTIONS as readonly string[]).includes(action)) return { deny: `unknown watch action ${action}` };
-    const owner = e.agentId ? agentName(e.agentId, await $.agent.list()) : undefined;
-    return { result: [{ type: 'text', text: await watchControl(rt, { ...input, action }, owner) }] };
+    return { result: [{ type: 'text', text: await watchControl(rt, { ...input, action }, e.agentId) }] };
   });
 
   on('tool.call', { tool: 'mcp__sift__status' }, async () => {
