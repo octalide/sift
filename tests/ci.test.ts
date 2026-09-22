@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { ciSubject, cleanLine, logSubject, textLog, trimLog } from '../src/ci/log.ts';
-import type { JobLog } from '../src/forge/forge.ts';
+import type { Job, JobLog } from '../src/forge/forge.ts';
 import { DEFAULT_CONFIG } from '../src/repo/config.ts';
 import { diffFiles } from '../src/repo/diff.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
 import { fakeForge } from './fake-forge.ts';
+import { MACH_CI, MACH_JOBS, MACH_RUN } from './fixtures/mach-ci.ts';
+import { fillNeeds, workflowJobs } from '../src/forge/workflow.ts';
 
 const log: JobLog = {
   job: 'test',
@@ -143,9 +145,86 @@ describe('ci pack', () => {
     expect(byJob.facts['has_pull']).toBe(true);
     const byRun = await ciSubject(forge, 'o/r', { run: '3' });
     expect(byRun.ref).toBe('o/r job 7');
-    expect(calls).toEqual(['log 7', 'jobs 3', 'log 7']);
+    expect(calls).toEqual(['log 7', 'jobs 3', 'jobs 3', 'log 7']);
     await expect(ciSubject(forge, undefined, { job: '7' })).rejects.toThrow(/no repository/);
     await expect(ciSubject(fakeForge(), 'o/r', { run: '3' })).rejects.toThrow(/no failed job/);
     expect((await ciSubject(fakeForge(), 'o/r', { text: 'boom' })).state['pull_request']).toBeNull();
+  });
+
+  describe('an aggregate job that failed because a job it needs failed', () => {
+    // mach's run 35781279928: docs failed, gate needs every job and failed because docs did
+    const jobs = fillNeeds(
+      MACH_JOBS.map((j) => ({ id: String(j.id), name: j.name, run: String(j.run_id), sha: j.head_sha, done: true, conclusion: j.conclusion, ok: j.conclusion !== 'failure', url: j.html_url })),
+      workflowJobs(MACH_CI)!,
+    );
+    const id = (name: string): string => jobs.find((j) => j.name === name)!.id;
+    const logs: string[] = [];
+    const forge = (over: Parameters<typeof fakeForge>[0] = {}) =>
+      fakeForge({
+        jobs: async () => jobs,
+        jobLog: async (_r, job) => {
+          logs.push(job);
+          const name = jobs.find((j) => j.id === job)!.name;
+          return { job: name, run: String(MACH_RUN), sha: 'abc', url: `u${job}`, steps: [{ name: 'Run it', ok: false, text: `${name} broke\n##[error]Process completed with exit code 1.` }] };
+        },
+        ...over,
+      });
+
+    it('reads a run through the job that failed on its own and names the aggregate as downstream', async () => {
+      logs.length = 0;
+      const subject = await ciSubject(forge(), 'o/r', { run: String(MACH_RUN) });
+      expect(subject.ref).toBe(`o/r job ${id('docs')}`);
+      expect(subject.state['job']).toBe('docs');
+      expect(subject.facts['followed']).toEqual(['gate: failed because docs failed']);
+      expect(logs).toEqual([id('docs')]);
+      const report = await runPack(BUILTIN_PACKS['ci']!, subject, reader, DEFAULT_CONFIG);
+      expect(report.mechanical).toContainEqual({ check: 'log.followed', severity: 'info', message: 'gate: failed because docs failed' });
+    });
+
+    it('follows the aggregate named by its job id to the job that failed, and says so', async () => {
+      logs.length = 0;
+      const subject = await ciSubject(forge(), 'o/r', { job: id('gate') });
+      expect(subject.ref).toBe(`o/r job ${id('docs')}`);
+      expect(subject.state['job']).toBe('docs');
+      expect(subject.facts['followed']).toEqual(['gate: failed because docs failed, followed to docs']);
+      expect(logs).toEqual([id('gate'), id('docs')]);
+    });
+
+    it('follows through the downstream jobs between, and names every job that failed on its own but the one judged', async () => {
+      // build x86_64-linux failed, docs was cancelled for it, and a test leg whose needs are unknown failed on its own
+      const chain = jobs.map((j) =>
+        j.name === 'build x86_64-linux' ? { ...j, conclusion: 'failure', ok: false }
+        : j.name === 'docs' ? { ...j, conclusion: 'cancelled' }
+        : j.name === 'test x86_64-windows' ? { ...j, conclusion: 'failure', ok: false, needs: undefined }
+        : j,
+      );
+      const subject = await ciSubject(forge({ jobs: async () => chain }), 'o/r', { job: id('gate') });
+      expect(subject.state['job']).toBe('build x86_64-linux');
+      expect(subject.facts['followed']).toEqual([
+        'gate: failed because build x86_64-linux failed, docs was cancelled and test x86_64-windows failed, followed to build x86_64-linux and test x86_64-windows',
+        `test x86_64-windows: failed on its own, not judged here (job:${id('test x86_64-windows')})`,
+      ]);
+      // a chain the aggregate does not need directly: gate needs docs alone, docs needs the build
+      const job = (n: string, needs: string[], conclusion: string): Job => ({ id: n, name: n, run: '1', sha: 'abc', url: n, done: true, conclusion, ok: false, needs });
+      const short = [job('build', [], 'failure'), job('docs', ['build'], 'failure'), job('gate', ['docs'], 'failure')];
+      const followed = await ciSubject(fakeForge({ jobs: async () => short, jobLog: async (_r, n) => ({ job: n, run: '1', sha: '', url: n, steps: [] }) }), 'o/r', { job: 'gate' });
+      expect(followed.state['job']).toBe('build');
+      expect(followed.facts['followed']).toEqual(['gate: failed because docs failed, followed to build']);
+      const byRun = await ciSubject(fakeForge({ jobs: async () => short, jobLog: async (_r, n) => ({ job: n, run: '1', sha: '', url: n, steps: [] }) }), 'o/r', { run: '1' });
+      expect(byRun.state['job']).toBe('build');
+      expect(byRun.facts['followed']).toEqual(['docs: failed because build failed', 'gate: failed because docs failed']);
+    });
+
+    it('judges a job whose needs cannot be resolved as before', async () => {
+      logs.length = 0;
+      const unresolved = jobs.map(({ needs: _, ...j }) => j);
+      const byRun = await ciSubject(forge({ jobs: async () => unresolved }), 'o/r', { run: String(MACH_RUN) });
+      expect(byRun.state['job']).toBe('docs');
+      expect(byRun.facts['followed']).toEqual([`gate: failed on its own, not judged here (job:${id('gate')})`]);
+      const byJob = await ciSubject(forge({ jobs: async () => unresolved }), 'o/r', { job: id('gate') });
+      expect(byJob.state['job']).toBe('gate');
+      expect(byJob.facts['followed']).toEqual([]);
+      expect(logs).toEqual([id('docs'), id('gate')]);
+    });
   });
 });

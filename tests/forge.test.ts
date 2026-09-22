@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GitHubForge, splitJobLog, templateKind } from '../src/forge/github.ts';
+import { MACH_CI, MACH_JOBS, MACH_RUN } from './fixtures/mach-ci.ts';
 
 type Reply = { status?: number; body?: unknown; etag?: string; headers?: string[] };
 
@@ -59,6 +60,26 @@ describe('github forge', () => {
     expect(await forge.runs('o/r')).toEqual({ changed: false, rate: {} });
     const withRuns = github({ 'repos/o/r/actions/runs': { body: { workflow_runs: [{ id: 7, name: 'ci', head_branch: 'main', event: 'push', status: 'completed', conclusion: 'skipped', head_sha: 'abc', html_url: 'u', actor: { login: 'a' }, updated_at: '1' }] }, etag: '"r"' } });
     expect(await withRuns.runs('o/r')).toMatchObject({ changed: true, token: '"r"', value: [{ id: '7', name: 'ci', done: true, conclusion: 'skipped', ok: true, branch: 'main', sha: 'abc', actor: 'a' }] });
+  });
+
+  it('marks a run whose ref is a tag, looking each ref name up once, and reads one run by id', async () => {
+    const calls: string[] = [];
+    const raw = (id: number, branch: string, event: string) => ({ id, name: 'ci', head_branch: branch, event, status: 'completed', conclusion: 'success', head_sha: 'abc', html_url: 'u', actor: { login: 'a' }, updated_at: '1' });
+    const forge = github(
+      {
+        'repos/o/r/actions/runs/9': { body: raw(9, 'v1.2.0', 'push') },
+        'repos/o/r/actions/runs': { body: { workflow_runs: [raw(7, 'v1.2.0', 'push'), raw(8, 'main', 'push'), raw(6, 'feat/1', 'pull_request'), raw(5, 'v1.2.0', 'release'), raw(4, 'v1', 'push')] } },
+        'repos/o/r/git/matching-refs/tags/v1.2.0': { body: [{ ref: 'refs/tags/v1.2.0' }] },
+        // matching-refs matches by prefix: only an exact ref is the tag
+        'repos/o/r/git/matching-refs/tags/v1': { body: [{ ref: 'refs/tags/v1.2.0' }] },
+        'repos/o/r/git/matching-refs/tags/main': { body: [] },
+      },
+      calls,
+    );
+    const read = await forge.runs('o/r');
+    expect(read.changed && read.value.map((r) => [r.id, r.tag])).toEqual([['7', true], ['8', false], ['6', false], ['5', true], ['4', false]]);
+    expect(await forge.run('o/r', '9')).toMatchObject({ id: '9', branch: 'v1.2.0', tag: true, done: true });
+    expect(calls.filter((c) => c.includes('matching-refs')).map((c) => c.split('/').slice(-1)[0])).toEqual(['v1.2.0', 'main', 'v1']);
   });
 
   it('finds templates in every documented location and skips the issue form chooser', async () => {
@@ -158,6 +179,8 @@ describe('github forge', () => {
         'repos/o/r/actions/jobs/7/logs': { body: log, headers: ['Content-Type: text/plain', 'Content-Length: 19481', 'Server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0'] },
         'repos/o/r/actions/jobs/7': { body: { id: 7, run_id: 3, head_sha: 'abc', name: 'codegen', status: 'completed', conclusion: 'failure', html_url: 'https://x/job/7' } },
         'repos/o/r/actions/runs/3/jobs': { body: [{ id: 7, run_id: 3, head_sha: 'abc', name: 'codegen', status: 'completed', conclusion: 'failure', html_url: 'https://x/job/7' }] },
+        // a run record without a workflow path: nothing to read needs from
+        'repos/o/r/actions/runs/3': { body: { id: 3, head_sha: 'abc' } },
       },
       calls,
     );
@@ -176,5 +199,58 @@ describe('github forge', () => {
     expect(logsCall).not.toContain('Accept:');
     expect(await forge.jobs('o/r', '3')).toEqual([{ id: '7', name: 'codegen', run: '3', sha: 'abc', done: true, conclusion: 'failure', ok: false, url: 'https://x/job/7' }]);
     expect(splitJobLog('')).toEqual([]);
+  });
+
+  it('fills each job\'s needs from the workflow file at the run\'s sha, matrix and skipped jobs included', async () => {
+    const calls: string[] = [];
+    const sha = '40d626492bb65d0cbe06344b258df3510a84923a';
+    const forge = github(
+      {
+        [`repos/o/r/actions/runs/${MACH_RUN}/jobs`]: { body: MACH_JOBS },
+        [`repos/o/r/actions/runs/${MACH_RUN}`]: { body: { id: MACH_RUN, head_sha: sha, path: '.github/workflows/ci.yml' } },
+        [`repos/o/r/contents/.github/workflows/ci.yml?ref=${sha}`]: { body: MACH_CI },
+      },
+      calls,
+    );
+    const jobs = await forge.jobs('o/r', String(MACH_RUN));
+    const ids = (...names: string[]): string[] => jobs.filter((j) => names.includes(j.name)).map((j) => j.id);
+    const needs = (name: string): string[] | undefined => jobs.find((j) => j.name === name)!.needs;
+    const builds = ids('build x86_64-windows', 'build aarch64-linux', 'build x86_64-linux');
+    expect(builds).toHaveLength(3);
+    expect(needs('build x86_64-linux')).toEqual([]);
+    expect(needs('docs')).toEqual(builds);
+    expect(needs('test aarch64-linux')).toEqual(builds);
+    // a skipped matrix job keeps its name unrendered
+    expect(needs('darwin ${{ matrix.target }}')).toEqual(builds);
+    expect(needs('release ${{ matrix.target }}')).toEqual([]);
+    expect(needs('qemu riscv32')).toEqual(builds);
+    const gate = needs('gate')!;
+    expect(gate).toHaveLength(jobs.length - 1);
+    expect(gate).toContain(ids('docs')[0]);
+    expect(new Set(gate)).toEqual(new Set(jobs.filter((j) => j.name !== 'gate').map((j) => j.id)));
+    expect(calls.some((c) => c.includes(`contents/.github/workflows/ci.yml?ref=${sha}`))).toBe(true);
+  });
+
+  it('leaves needs unset when the workflow file cannot be read', async () => {
+    const forge = github({
+      'repos/o/r/actions/runs/3/jobs': { body: [{ id: 7, run_id: 3, head_sha: 'abc', name: 'gate', status: 'completed', conclusion: 'failure', html_url: 'u' }] },
+      'repos/o/r/actions/runs/3': { body: { id: 3, head_sha: 'abc', path: '.github/workflows/gone.yml' } },
+    });
+    expect((await forge.jobs('o/r', '3'))[0]!.needs).toBeUndefined();
+  });
+
+  it('reads every page of comments with the commenter\'s standing and time, and the newest when capped', async () => {
+    const calls: string[] = [];
+    const at = (i: number) => `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}Z`;
+    const page = (from: number, count: number) => Array.from({ length: count }, (_, k) => ({ user: { login: `u${from + k}`, type: 'User' }, body: `c${from + k}`, created_at: at(from + k), author_association: from + k === 0 ? 'OWNER' : 'NONE' }));
+    const forge = github({ 'repos/o/r/issues/5/comments': (argv) => ({ body: /page=1$/.test(argv[argv.length - 1]!) ? page(0, 100) : page(100, 2) }) }, calls);
+    const all = await forge.comments('o/r', 'issue', 5);
+    expect(all).toHaveLength(102);
+    expect(all[0]).toEqual({ author: { login: 'u0', bot: false }, body: 'c0', createdAt: at(0), association: 'OWNER' });
+    expect(calls.filter((c) => c.includes('/comments'))).toHaveLength(2);
+    expect((await forge.comments('o/r', 'issue', 5, 1)).map((c) => c.body)).toEqual(['c101']);
+    expect(await forge.comments('o/r', 'issue', 5, 0)).toEqual([]);
+    expect(forge.maintains('OWNER') && forge.maintains('MEMBER') && forge.maintains('COLLABORATOR')).toBe(true);
+    expect([forge.maintains('CONTRIBUTOR'), forge.maintains('FIRST_TIME_CONTRIBUTOR'), forge.maintains('NONE'), forge.maintains(undefined)]).toEqual([false, false, false, false]);
   });
 });

@@ -1,4 +1,4 @@
-import type { Answer, Answers, Judge, JudgeFailure, KeySource, Question, Questions, Usage } from './types.ts';
+import type { Answer, Answers, Judge, JudgeFailure, KeyOrigin, Question, Questions, Usage } from './types.ts';
 import { estimateTokensOf, JEV_LIMITS } from '../tokens.ts';
 import { pool } from '../pool.ts';
 
@@ -35,7 +35,7 @@ export type Ranked<T extends RankItem> = { index: number; item: T; answers: Answ
 export type RankResult<T extends RankItem> =
   // dropped: answers under a key no item or question of the request owns
   | { ok: true; items: Ranked<T>[]; sorted: Ranked<T>[]; requests: number; dropped: number; backend: string; usage?: Usage }
-  | { ok: false; reason: JudgeFailure; message: string; backend: string; requests: number; keySource?: KeySource };
+  | { ok: false; reason: JudgeFailure; message: string; backend: string; requests: number; key?: KeyOrigin };
 
 // what an item looks like in the state: its index as k, a string under text, an object's own fields
 export type Entry = { k: number } & Record<string, unknown>;
@@ -172,7 +172,7 @@ export async function rank<T extends RankItem>(items: T[], questions: Questions,
   let dropped = 0;
   for (const [i, result] of results.entries()) {
     backend = result.backend;
-    if (!result.ok) return { ok: false, reason: result.reason, message: result.message, backend, requests: requests.length, keySource: result.keySource };
+    if (!result.ok) return { ok: false, reason: result.reason, message: result.message, backend, requests: requests.length, key: result.key };
     for (const [key, answer] of Object.entries(result.answers)) {
       const owner = requests[i]!.owners(key);
       const slot = owner && ids.includes(owner.id) ? answers[owner.index] : undefined;

@@ -1,5 +1,6 @@
 import { Gh, GhError, type ApiResponse } from './gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
+import { fillNeeds, workflowJobs } from './workflow.ts';
 import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgeUser, ForgeWrite, Issue, IssueSummary, Job, JobLog, LogStep, PullHead, PullRequest, Rate, Review, ReviewComment, Run, Template, WatchItem } from './forge.ts';
 
 type GhUser = { login: string; type?: string };
@@ -26,7 +27,7 @@ type GhPull = GhIssue & {
   deletions: number;
   changed_files: number;
 };
-type GhComment = { user: GhUser; body: string; created_at: string };
+type GhComment = { user: GhUser; body: string | null; created_at: string; author_association?: string };
 type GhCommit = { sha: string; parents: { sha: string }[]; commit: { message: string } };
 type GhCheckRun = { id: number; name: string; status: string; conclusion: string | null };
 type GhJob = { id: number; run_id: number; head_sha: string; name: string; status: string; conclusion: string | null; html_url: string };
@@ -40,6 +41,8 @@ type GhRun = {
   conclusion: string | null;
   head_sha: string;
   html_url: string;
+  // the workflow file the run ran
+  path?: string;
   actor?: { login: string };
   updated_at: string;
 };
@@ -48,6 +51,9 @@ type GhEntry = { name: string; path: string; type: string };
 const RAW = 'application/vnd.github.raw+json';
 const COMMIT_JQ = '[.[] | {sha, parents, commit: {message: .commit.message}}]';
 const PASSING = new Set(['success', 'skipped', 'neutral']);
+// the associations that maintain a repository; contributor, first-timer and none do not
+const MAINTAINING = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const COMMENT_JQ = '[.[] | {user: {login: .user.login, type: .user.type}, body, created_at, author_association}]';
 
 // the slim record the items poll produces server side, so a page of 100 stays small
 export const ITEM_JQ = '[.[] | {n: .number, t: .title, s: .state, u: .user.login, ut: .user.type, bl: ((.body // "") | length), bp: ((.body // "")[0:400]), c: .comments, l: ([.labels[].name] | sort | join(",")), up: .updated_at, cr: .created_at, url: .html_url, pr: (.pull_request != null), m: (.pull_request.merged_at != null)}]';
@@ -89,6 +95,8 @@ export const GH_WRITES: ForgeWrite[] = [
 
 const user = (u: GhUser): ForgeUser => ({ login: u.login, bot: u.type === 'Bot' || u.login.endsWith('[bot]') });
 
+const comment = (c: GhComment): Comment => ({ author: user(c.user), body: c.body ?? '', createdAt: c.created_at, association: c.author_association });
+
 const commit = (c: GhCommit): Commit => ({ sha: c.sha, message: c.commit.message, merge: c.parents.length > 1 });
 
 const issue = (i: GhIssue): Issue => ({
@@ -127,7 +135,7 @@ const checkRun = (c: GhCheckRun): Check => ({ name: c.name, id: String(c.id), do
 const job = (j: GhJob): Job => ({ id: String(j.id), name: j.name, run: String(j.run_id), sha: j.head_sha, done: j.status === 'completed', conclusion: j.conclusion, ok: PASSING.has(j.conclusion ?? ''), url: j.html_url });
 const status = (s: GhStatus): Check => ({ name: s.context, done: s.state !== 'pending', conclusion: s.state === 'pending' ? null : s.state, ok: s.state === 'success' });
 
-const run = (r: GhRun): Run => ({
+const run = (r: GhRun, tag: boolean): Run => ({
   id: String(r.id),
   name: r.name,
   done: r.status === 'completed',
@@ -135,6 +143,7 @@ const run = (r: GhRun): Run => ({
   ok: PASSING.has(r.conclusion ?? ''),
   branch: r.head_branch,
   sha: r.head_sha,
+  tag,
   event: r.event,
   actor: r.actor?.login ?? '',
   url: r.html_url,
@@ -189,9 +198,36 @@ export class GitHubForge implements Forge {
   readonly nouns: Record<ForgeArtifact, string> = { issue: 'GitHub issue', pr: 'pull request', release: 'GitHub release' };
   readonly writes = GH_WRITES;
   readonly gh: Gh;
+  // repo and ref name -> whether a tag of that name exists, read once per name
+  private readonly tagRefs = new Map<string, Promise<boolean>>();
 
   constructor(run: RunLike, cwd?: CwdLike) {
     this.gh = new Gh(run, cwd);
+  }
+
+  // a workflow run names its ref without saying whether it is a branch or a tag, so a ref a pull request did not
+  // start is looked up among the tags, once per name
+  private isTag(repo: string, r: GhRun): Promise<boolean> {
+    if (!r.head_branch || r.event.startsWith('pull_request')) return Promise.resolve(false);
+    const key = `${repo}\0${r.head_branch}`;
+    let known = this.tagRefs.get(key);
+    if (!known) {
+      const path = r.head_branch.split('/').map(encodeURIComponent).join('/');
+      known = this.gh
+        .json<{ ref: string }[] | null>(`repos/${repo}/git/matching-refs/tags/${path}`)
+        .then((refs) => (refs ?? []).some((x) => x.ref === `refs/tags/${r.head_branch}`))
+        .catch((error: unknown) => {
+          this.tagRefs.delete(key);
+          if (missing(error)) return false;
+          throw error;
+        });
+      this.tagRefs.set(key, known);
+    }
+    return known;
+  }
+
+  private toRuns(repo: string, raw: GhRun[]): Promise<Run[]> {
+    return Promise.all(raw.map(async (r) => run(r, await this.isTag(repo, r))));
   }
 
   async checkout(): Promise<{ repo: string; defaultBranch: string } | undefined> {
@@ -225,11 +261,15 @@ export class GitHubForge implements Forge {
     }
   }
 
-  // issue and pull request comments share one endpoint on github
+  // issue and pull request comments share one endpoint on github. it lists oldest first and takes no sort
+  // or direction, so the newest are the tail of every page
   async comments(repo: string, _kind: 'issue' | 'pr', number: number, last?: number): Promise<Comment[]> {
-    const page = last === undefined ? 'per_page=100' : `per_page=${last}&direction=desc&sort=created`;
-    const got = await this.gh.json<GhComment[]>(`repos/${repo}/issues/${number}/comments?${page}`);
-    return (last === undefined ? got : [...got].reverse()).map((c) => ({ author: user(c.user), body: c.body, createdAt: c.created_at }));
+    const all = await this.gh.pages<GhComment>(`repos/${repo}/issues/${number}/comments`, COMMENT_JQ);
+    return (last === undefined ? all : all.slice(Math.max(0, all.length - last))).map(comment);
+  }
+
+  maintains(association: string | undefined): boolean {
+    return association !== undefined && MAINTAINING.has(association);
   }
 
   async pull(repo: string, number: number): Promise<PullRequest> {
@@ -349,7 +389,22 @@ export class GitHubForge implements Forge {
     }
     if (probe.status === 304) return { changed: false, rate: rate(probe) };
     const parsed = JSON.parse(probe.body || '{}') as { workflow_runs?: GhRun[] };
-    return { changed: true, token: probe.etag, rate: rate(probe), value: (parsed.workflow_runs ?? []).map(run) };
+    return { changed: true, token: probe.etag, rate: rate(probe), value: await this.toRuns(repo, parsed.workflow_runs ?? []) };
+  }
+
+  async branchRuns(repo: string, branch: string): Promise<Run[]> {
+    try {
+      const parsed = await this.gh.json<{ workflow_runs?: GhRun[] } | null>(`repos/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=30`);
+      return await this.toRuns(repo, parsed?.workflow_runs ?? []);
+    } catch (error) {
+      if (missing(error)) return [];
+      throw error;
+    }
+  }
+
+  async run(repo: string, id: string): Promise<Run> {
+    const r = await this.gh.json<GhRun>(`repos/${repo}/actions/runs/${encodeURIComponent(id)}`);
+    return run(r, await this.isTag(repo, r));
   }
 
   async pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>> {
@@ -359,8 +414,15 @@ export class GitHubForge implements Forge {
     return { changed: true, token: probe.etag, rate: rate(probe), value: raw.map((p) => ({ number: p.number, title: p.title, branch: p.head.ref, sha: p.head.sha, url: p.html_url, user: p.user.login })) };
   }
 
+  // the jobs api carries no dependencies, so needs are read from the workflow file at the run's sha
   async jobs(repo: string, run: string): Promise<Job[]> {
-    return (await this.gh.pages<GhJob>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}/jobs`, '[.jobs[] | {id, run_id, head_sha, name, status, conclusion, html_url}]')).map(job);
+    const [record, jobs] = await Promise.all([
+      this.gh.json<GhRun>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}`),
+      this.gh.pages<GhJob>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}/jobs`, '[.jobs[] | {id, run_id, head_sha, name, status, conclusion, html_url}]'),
+    ]);
+    const text = record.path ? await this.file(repo, record.path, record.head_sha) : undefined;
+    const workflow = text === undefined ? undefined : workflowJobs(text);
+    return workflow ? fillNeeds(jobs.map(job), workflow) : jobs.map(job);
   }
 
   // the logs endpoint refuses any accept but json and answers a 302 to the log's download url, which gh follows

@@ -75,12 +75,11 @@ A pack is data: a subject kind, a list of mechanical checks, typed questions wit
 | pack | subject | what it answers |
 |---|---|---|
 | `issue` | an issue number or URL | is the issue well formed, correctly typed, scoped to this repo, implementable without a decision it does not make, and ready to work on |
-| `pr` | a PR number or URL, or a `base..head` range | does the PR do what its issue asks, nothing more, without workarounds, and is it safe to merge, drift against the base included |
-| `hunks` | the same as `pr` | which hunk of the diff is wrong: unrelated to the stated purpose, a workaround, or a behaviour change no test covers |
+| `pr` | a PR number or URL, or a `base..head` range | is the PR linked, targeted, named, templated, committed and checked as the repository requires, and has the base moved under it. Mechanical only, no judge call |
 | `plan` | an issue number, the plan in `text` | does the plan cover the issue, add nothing beyond it, and decide nothing the issue leaves open; a warn means the plan lists its decisions in the PR body |
-| `commit` | a ref or range | do the commits follow the repository's commit format and describe their diffs honestly |
+| `commit` | a ref or range | do the commit messages follow the repository's commit format. Mechanical only, no judge call |
 | `ci` | a job id, a run id, or a log in `text` | why the job failed: the lines that explain it, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository |
-| `rules` | a PR, an issue, a ref or range, or free text | does the subject comply with each rule the repository's rule documents state |
+| `rules` | an issue number or URL, or free text | does the subject comply with each rule the repository's rule documents state |
 | `release` | a proposed version, or `release` | are the commits since the last tag safe to ship as described, and do the version bump and changelog agree with them |
 | `triage` | a repository event | does this event need the session to act on it now, what kind is it, how urgent |
 | `locate` | an issue number or URL, or free text in `text` | which files of the checkout must be read or changed to implement it |
@@ -88,36 +87,36 @@ A pack is data: a subject kind, a list of mechanical checks, typed questions wit
 ```
 grade(pack: "pr", subject: "42")               # or "#42", or the PR's URL
 grade(pack: "pr", subject: "dev..HEAD")        # the PR this branch would open, graded before it exists
-grade(pack: "hunks", subject: "42")            # which hunk of PR 42 is wrong, a range works too
 grade(pack: "issue", subject: "17")            # or "#17", or an issue URL, which may name another repo
 grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17
 grade(pack: "commit", subject: "main..HEAD")
 grade(pack: "ci", subject: "job:106195824649")  # a failed job by id
-grade(pack: "ci", subject: "35554549814")       # a run id (or run:<id>) reads its first failed job
+grade(pack: "ci", subject: "35554549814")       # a run id (or run:<id>) reads its first job that failed on its own
 grade(pack: "ci", subject: "x", text: "...")    # a log pasted as text
-grade(pack: "rules", subject: "42")            # a PR against the repo's rule documents
-grade(pack: "rules", subject: "x", text: "...") # free text against the rules
+grade(pack: "rules", subject: "17")            # issue 17 against the repo's rule documents
+grade(pack: "rules", subject: "x", text: "...") # free text against the rules, a commit message or PR body before it is written
 grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
 grade(pack: "release", subject: "v1.4.0", repo: "o/r", ref: "dev")  # any repo, no checkout needed
 grade(pack: "locate", subject: "17")           # the files to read or change for issue 17, top 20 per level
 grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free text
+grade(pack: "commit", subject: "HEAD", cwd: "/src/other-42")  # HEAD of another checkout, under its conventions
 ```
 
-The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. `rules` and `locate` take the same reference forms, a bare number naming a pull request for `rules` (an issue with `text: "issue"`) and an issue for `locate`, a commit ref or range for `rules`, or free text in `text`. `ci` takes `job:<id>`, `run:<id>`, a bare run id, or the log in `text`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
+The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. `locate` takes the same reference forms, a bare number naming an issue, or free text in `text`. `rules` takes an issue number or URL, or free text in `text`, and refuses a pull request or a commit with the forms it takes named: sift judges no diff. `ci` takes `job:<id>`, `run:<id>`, a bare run id, or the log in `text`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named.
+
+Every grade reads one checkout: `cwd` when the call passes it (an absolute path), otherwise the directory the calling subagent was spawned in when its Agent call set one (or its parent's), otherwise the session's repository. The checkout is the git toplevel of that directory, so a worktree grades its own HEAD and working tree, and it brings its repository, its `.sift/config.json` and its `.sift/packs`: the packs a grade can name and the conventions it checks against are that checkout's. `commit`, a `pr` range, `locate`, and `release` and `rules` when they read the checkout refuse a `repo` that is not the checkout's, naming both, rather than mix one repository's commits with another's name; pass the `cwd` of a checkout of that repository instead. Without `cwd`, a `release` or `rules` grade of another repository reads it from the forge as before. A subject read from the forge (an issue, a PR by number, a plan, a ci log, or a `release` or `rules` grade of another repository) is checked against the conventions of the repository it is in: the checkout's own when it is that repository, otherwise that repository's `.sift/config.json` at its default branch, read through the forge over the global layer. The repository a checkout names on the forge is looked up once per checkout, and its conventions and packs are reread when anything under `.sift/` changes.
 
 A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, drift, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable). A pack with rank steps adds one list per step. A question the judge left unanswered is reported in the unclear band without an answer, and an answer under an id no question asked for is dropped and counted.
 
 ### pr
 
-A PR grade reads the base branch as well: `pr.drift` warns with the files the PR touches that also changed on the base since the branch point (the merge base to the base head), and `drift_collides` is asked of each such file with the PR's patch and the base's patch side by side, so a conflict in meaning is caught where the lines alone would merge clean. A `base..head` subject grades the same way from the checkout before the PR exists: the diff, commits and drift come from `git`, the issue from the head branch name (a `(?<issue>)` group in `branches.pattern` names it, otherwise the number segment of `feat/52` or `52-title`), and the checks only a forge can answer (`pr.linked`, `pr.target`, `pr.ci`, `pr.template`) skip rather than fail.
-
-### hunks
-
-The `hunks` pack takes the same subjects as `pr` and answers which change is wrong rather than whether one is: the diff is split into hunks and each is judged alone (one request per hunk, so no hunk colours another) against the PR's stated purpose (title, body, linked issue, commits) and the map of the whole change (every hunk's file and header). Three questions per hunk: `unrelated` (it does not serve the stated purpose), `workaround` (it patches a symptom), `untested` (it changes behaviour and no hunk of the diff touches a test of it). The report lists the hunks ruled out, by file and header, with the probability of each question that ruled them out. No mechanical checks. A shadow run over this repository's own merged PRs (#65) found the same things the `pr` pack's whole-diff questions did, localized to the hunk, at three to twenty times the tokens. Grade the `pr` pack first and reach for `hunks` when it warns.
+The `pr` pack is mechanical: it runs its checks and asks the judge nothing. The diff is read only to find drift and never reaches a judge. `pr.drift` warns with the files the PR touches that also changed on the base since the branch point (the merge base to the base head). It reports that the base moved, not whether the two patches collide. A `base..head` subject grades the same way from the checkout before the PR exists: the commits and drift come from `git`, the issue from the head branch name (a `(?<issue>)` group in `branches.pattern` names it, otherwise the number segment of `feat/52` or `52-title`), and the checks only a forge can answer (`pr.linked`, `pr.target`, `pr.ci`, `pr.template`) skip rather than fail.
 
 ### issue
 
 The `issue` pack asks whether the body is substantive, which type label fits, whether the change stays in this repository, whether it needs a parent, which open issue it duplicates, whether it is `implementable` (a competent engineer could build it without making a decision the body does not make: two valid designs, an unnamed interface, an unstated edge behaviour all fail it), whether its scope is clear enough to reject an unrelated change, which open issue it is `blocked_by` (`none` unless the title or body says so, or the same code must change there first), and how ready it is. A violated `implementable` fails the report.
+
+The issue is judged as it stands, not as first filed. The subject carries the whole comment thread, oldest first, each comment as `{ by, association, at, text }` with the commenter's standing in the forge's words (`OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE` on GitHub). A long thread is cut to a character budget that keeps the comments of the author and of maintainers (owners, members, collaborators) first and then the newest of the rest, so a ruling followed by any amount of discussion stays in. A later comment by the author or a maintainer that records a decision supersedes the body where they conflict: a decision it makes counts for `implementable`, a hold or dependency it states counts for `blocked_by`, and `substantive`, `scope_clear`, `type` and `readiness` read the body as it amends it. A comment from anyone else is discussion and never overrides the body. When the author or a maintainer has commented, `ruling` names the comment the issue turns on (`octalide at 2026-09-22T20:29:33Z`), or `none`. A pull request's subject carries its thread in the same shape.
 
 ### plan
 
@@ -125,7 +124,7 @@ The `plan` pack reads an issue and a plan for it from `text` and asks three ques
 
 ### ci
 
-The `ci` pack reads a failing job's log: a job id (`job:<id>`), a run id (its first failed job) read through the forge, or the text itself. The log is trimmed in code to the step the forge marks failed (the tail of the whole log when none is), stripped of timestamps, colours and group marks, and bounded at 300 lines. One `top` rank step over the lines keeps the ones that explain the failure and feeds them to the questions, so the judge reads the failure rather than the log. The pull request whose head the job ran on, when one is open, stands beside it with the files its diff touches, and `own_fault` (the failure is caused by the change under test) is asked only then. `environment` asks whether it is a flake, a runner or network problem or an external service, and `fixable_here` whether a change to this repository would make the job pass. The watch attaches this report to every settled CI failure, see [Watch](#watch).
+The `ci` pack reads a failing job's log: a job id (`job:<id>`), a run id (its first job that failed on its own) read through the forge, or the text itself. A job that failed only because a job it `needs` failed or was cancelled, such as an aggregate `gate` job, is downstream: it is never judged. A run names each downstream job in one `log.followed` line (`gate: failed because docs failed`), and `job:<id>` naming one follows it to the job that failed on its own and says so (`gate: failed because docs failed, followed to docs`). Any other job that failed on its own is named with its id, so one report hides no failure. Whether a job is downstream is decided in code from the forge's dependencies and the results: on GitHub the jobs API carries none, so they are read from the workflow file at the run's commit, each `jobs.<key>` mapped to the listed jobs by its name (a matrix job by the literal text of its `name` template). A job sift cannot map, or whose workflow cannot be read, is judged as a leaf. The log is trimmed in code to the step the forge marks failed (the tail of the whole log when none is), stripped of timestamps, colours and group marks, and bounded at 300 lines. One `top` rank step over the lines keeps the ones that explain the failure and feeds them to the questions, so the judge reads the failure rather than the log. The pull request whose head the job ran on, when one is open, stands beside it with the files its diff touches, and `own_fault` (the failure is caused by the change under test) is asked only then. `environment` asks whether it is a flake, a runner or network problem or an external service, and `fixable_here` whether a change to this repository would make the job pass. The watch attaches this report to every settled CI failure, see [Watch](#watch).
 
 ### rules
 
@@ -133,7 +132,7 @@ The `rules` pack is one rank step over the rule paragraphs of the repository's r
 
 ### release
 
-A release grade reads the checkout when the session is inside the repo being graded (`ref` defaults to `HEAD`, and the working tree stands in for it so an uncommitted changelog promotion is graded before the commit). For any other repo, or from a directory that is no checkout, it reads the forge: tags, the compare between the last tag and `ref`, and the manifest and changelog contents at each end. `ref` then defaults to the first configured `prs.targets` entry and otherwise to the default branch. `release.commits` lists the commits since the last tag, `release.bump` the bump they and the manifests call for against the proposed version, and `release.changelog` whether the changelog moved. The judge is asked whether any commit hides a breaking change and whether the changelog text added since the last tag describes every user-visible change. What is checked depends on the conventions under [Releases](#releases): with none configured the pack only judges the commits.
+A release grade reads the checkout when the grade's checkout is the repo being graded (`ref` defaults to `HEAD`, and the working tree stands in for it so an uncommitted changelog promotion is graded before the commit). For any other repo, or from a directory that is no checkout, it reads the forge: tags, the compare between the last tag and `ref`, and the manifest and changelog contents at each end. `ref` then defaults to the first configured `prs.targets` entry and otherwise to the default branch. `release.commits` lists the commits since the last tag, `release.bump` the bump they and the manifests call for against the proposed version, and `release.changelog` whether the changelog moved. The judge is asked whether any commit hides a breaking change and whether the changelog text added since the last tag describes every user-visible change. What is checked depends on the conventions under [Releases](#releases): with none configured the pack only judges the commits.
 
 ### triage
 
@@ -153,9 +152,9 @@ The built-in packs are in `src/packs/builtin.ts`. A repo overrides or adds one w
   "description": "House rules for pull requests",
   "checks": ["pr.linked", "pr.target", "pr.commits"],
   "questions": {
-    "workaround": {
+    "unexplained": {
       "type": "noul",
-      "instructions": "The diff patches a symptom rather than its cause.",
+      "instructions": "The body does not say why the change is needed.",
       "inverted": true,
       "severity": "fail",
       "lo": 0.3,
@@ -167,7 +166,7 @@ The built-in packs are in `src/packs/builtin.ts`. A repo overrides or adds one w
 
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, and `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`). A pack with more questions than one request holds goes out in several, the subject repeated in each.
 
-A pack may also carry `rank`, a list of steps run in order before the questions, each one `rank` over a subject list with the state so far as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by, or a template over its fields), `list` (`each` prints every item in order with every question of the step, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`, `violated` only the items ruled out with the questions that ruled them out), `order` (`input` shows a top list in input order instead of by value), `fields` (the item fields the state carries beside its index, every field unless said. The rest only fill the questions, so a text that is already in the question is not sent twice), `context` (the state fields the items are read against, the whole state unless said. An isolated step repeats them in every request, so a step over many items names the few it needs), `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out, which makes steps hierarchical, and `feed`, the state field the items the step did not rule out are placed under for the steps and questions after it. Every question of a step is judged for every item, and `by` only orders. A step rules out an item that any of its questions bands violated, and a `top` step everything below the top it shows. The rules pack is one `each` step over the rule paragraphs, the pr pack one over the drifted files, the hunks pack one isolated `violated` step over the diff's hunks, locate two `top` steps, ci one `top` step over a log's lines feeding `lines` to its questions.
+A pack may also carry `rank`, a list of steps run in order before the questions, each one `rank` over a subject list with the state so far as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by, or a template over its fields), `list` (`each` prints every item in order with every question of the step, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`, `violated` only the items ruled out with the questions that ruled them out), `order` (`input` shows a top list in input order instead of by value), `fields` (the item fields the state carries beside its index, every field unless said. The rest only fill the questions, so a text that is already in the question is not sent twice), `context` (the state fields the items are read against, the whole state unless said. An isolated step repeats them in every request, so a step over many items names the few it needs), `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out, which makes steps hierarchical, and `feed`, the state field the items the step did not rule out are placed under for the steps and questions after it. Every question of a step is judged for every item, and `by` only orders. A step rules out an item that any of its questions bands violated, and a `top` step everything below the top it shows. The rules pack is one `each` step over the rule paragraphs, locate two `top` steps, ci one `top` step over a log's lines feeding `lines` to its questions.
 
 Subject kinds and the checks they support:
 
@@ -179,7 +178,7 @@ Subject kinds and the checks they support:
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
 | `tree` | `tree.indexed` |
-| `log` | `log.trimmed` |
+| `log` | `log.trimmed`, `log.followed` |
 | `plan`, `event`, `text` | none |
 
 ## Conventions
@@ -213,13 +212,13 @@ Three layers apply in order, each field by field over the last: the defaults, a 
 "issues": { "requiredLabelGroups": [["bug", "enhancement", "documentation"]], "templateSections": ["Problem", "Fix"], "childLabels": ["task"], "milestone": false }
 ```
 
-`prs.linkIssue` requires a pull request to name its issue. The issue is found from the code host's own relation first (the issues a pull request closes), then from a closing keyword in the body (`Closes #N`), then from an issue number in the branch name (`feat/52`), and the first found is the one the judge reads the diff against. `prs.templateSections` works as `issues.templateSections` does. `branches.pattern` is matched against a work branch name. `prs.targets` is either a list of branch names a PR may target or a regex the base branch must match. `prs.target: "dev"` from older configs reads as `targets: ["dev"]`. `branches.protected` lists the branches whose CI runs the watch delivers on failure, the default branch when unset.
+`prs.linkIssue` requires a pull request to name its issue. The issue is found from the code host's own relation first (the issues a pull request closes), then from a closing keyword in the body (`Closes #N`), then from an issue number in the branch name (`feat/52`), and the first found is the linked issue. `prs.templateSections` works as `issues.templateSections` does. `branches.pattern` is matched against a work branch name. `prs.targets` is either a list of branch names a PR may target or a regex the base branch must match. `prs.target: "dev"` from older configs reads as `targets: ["dev"]`. `branches.protected` lists the branches whose CI runs the watch delivers on failure, the default branch when unset.
 
 ### Conventions as regexes
 
 Every convention is a regex string with named groups. A preset stands for one of them: it expands to its regex when the config resolves, and an explicit pattern beside a preset wins. An invalid regex in any of these fields fails config resolution with the field named.
 
-`commits.format` is matched against the subject line and names the groups `type`, `scope`, `breaking` (any match marks the commit breaking, as a `BREAKING CHANGE:` footer does) and `description`. The preset `commits.convention: "conventional"` is `^(?<type>\w+)(?:\((?<scope>[^)]*)\))?(?<breaking>!)?:\s+(?<description>.+)$`. `none`, the default, runs no format check unless `format` is set. `commits.types` lists the values the `type` group may take, and a format without a `type` group skips that check. The same list is the choice set for the commit pack's `type_matches` question, so the judge names the type the diff warrants in the repository's own vocabulary. `commits.forbidTrailers` lists trailers a commit message may not carry.
+`commits.format` is matched against the subject line and names the groups `type`, `scope`, `breaking` (any match marks the commit breaking, as a `BREAKING CHANGE:` footer does) and `description`. The preset `commits.convention: "conventional"` is `^(?<type>\w+)(?:\((?<scope>[^)]*)\))?(?<breaking>!)?:\s+(?<description>.+)$`. `none`, the default, runs no format check unless `format` is set. `commits.types` lists the values the `type` group may take, and a format without a `type` group skips that check. The same list is the `commit_types` option set a repo pack's choice question can name. `commits.forbidTrailers` lists trailers a commit message may not carry.
 
 `commits.bumps` maps a type to the release bump it calls for, `major`, `minor`, `patch` or `none`: a type not in the map calls for none, and a breaking commit calls for the breaking bump whatever its type. Left unset, the `conventional` preset fills it with `{ "feat": "minor", "fix": "patch", "perf": "patch" }`, as does a config with no `format` at all, since its commits parse with the conventional header. A custom `format` starts from an empty map, so only breaking changes and manifests call for a release until the map names its types.
 
@@ -245,7 +244,7 @@ Discovery is cached in the plugin store per checkout (or per repository and ref)
 
 ## Forge
 
-Nothing above the code host layer names a host. Every read and write of a repository goes through the `Forge` interface in `src/forge/forge.ts`: the checkout's repository and default branch, the login, issues and their parents, pull requests with their diffs, commits, closing issues, reviews and checks, runs and jobs and a job's log by step, tags and compares, file trees and contents at a ref, templates, and the writes its cli makes (which command carries a body, in which flags) so the outbound gate can find text on its way out. A repository is the forge's own path for it, opaque above this layer, and a forge names its artifacts in its own words (`GitHub issue`, `merge request`) for the judge.
+Nothing above the code host layer names a host. Every read and write of a repository goes through the `Forge` interface in `src/forge/forge.ts`: the checkout's repository and default branch, the login, issues and their parents, comment threads with each commenter's standing and whether that standing maintains the repository, pull requests with their diffs, commits, closing issues, reviews and checks, runs and jobs and a job's log by step, tags and compares, file trees and contents at a ref, templates, and the writes its cli makes (which command carries a body, in which flags) so the outbound gate can find text on its way out. A repository is the forge's own path for it, opaque above this layer, and a forge names its artifacts in its own words (`GitHub issue`, `merge request`) for the judge.
 
 GitHub, over `gh`, is the one member today. The shapes are held to what a second member (GitLab, with merge requests, pipelines and project paths with slashes) can also answer, so adding one is a new class behind the interface, not a change to the packs, the watch or the gate.
 
@@ -263,14 +262,26 @@ Three modules act inside the session without being asked.
 
 ### Prune
 
-Output over `pruneFloorTokens` (estimated) from the tools in `pruneTools` is split into chunks of `pruneChunkLines` lines and ranked, batched, against the last user prompt: is this chunk needed for the current task. A chunk below `pruneKeepThreshold` is dropped. Nothing is kept on disk. In its place stands a one-line note with the omitted line range and how to get it back:
+Output over `pruneFloorTokens` (estimated) from the tools in `pruneTools` is split into chunks of `pruneChunkLines` lines and ranked, batched, against the calling loop's task: is this chunk needed for the current task. A chunk below `pruneKeepThreshold` is dropped. Nothing is kept on disk. In its place stands a one-line note with the omitted line range, how to get it back, and how to keep such output whole:
 
 ```
-[sift: lines 51-75 (25 lines) omitted as not needed for the current task, re-read src/watch/watcher.ts with offset 51 limit 25]
-[sift: lines 120-180 (61 lines) omitted as not needed for the current task, rerun the command for the full output]
+[sift: lines 51-75 (25 lines) omitted as not needed for the current task, re-read src/watch/watcher.ts with offset 51 limit 25, or call mcp__sift__prune off to read files whole]
+[sift: lines 120-180 (61 lines) omitted as not needed for the current task, rerun the command for the full output, or end a command with # sift: full to keep its output whole]
 ```
 
 For a Read the range is in file lines (the call's offset is applied), so the re-read named by the note lands on the omitted text. A judge failure passes the output through untouched.
+
+A Read is pruned only at its tail. The engine numbers a Read's content consecutively from its one `startLine` and cannot show a gap, so a note in front of kept lines would shift every line after it off its file line. A Read keeps every chunk up to its last needed one, the single note goes last, and `numLines` is the number of lines returned. A Read whose low chunks all sit in front of a needed one passes whole, logged as `prune none` with `gap would misnumber lines`. Bash output has no line numbers and is pruned anywhere.
+
+The task is the calling loop's own. In a subagent it is the prompt the subagent was spawned with, recorded by the `agent.spawn` hook under its agentId. In the main loop it is the newest prompt a person submitted (origin `composer`, `bridge` or `sdk`); a plugin's prompt such as a watch delivery, a task notification, a peer session's message and `/sift` itself leave it as it was. A loop with no recorded task (a subagent spawned before the plugin loaded) is not pruned.
+
+Before any judge call, prune backs off mechanically, at no cost, and passes the output untouched when:
+
+1. a Read has `offset` or `limit`: the read is targeted,
+2. a Read of a path, or a Bash command, had output dropped earlier in this loop's task: a re-read means the prune was wrong for this task, so it stays whole for the rest of the task,
+3. a Read is of a path the loop's task names, whole or as a path's tail (`hooks/sift.ts`, `README.md`, a `:line` suffix ignored).
+
+Each back-off is logged as `prune none` with its reason, so `/sift log` shows why. To keep output whole on purpose, a Bash command that carries the marker `# sift: full` is not pruned, and the `prune` tool turns pruning `off` for the calling loop alone, until its next task (for a subagent, the rest of its run) or, with `calls`, for that many outputs over the floor, and `on` again. `/sift prune off [n]` and `/sift prune on` do the same for the main loop from the prompt.
 
 ### Outbound text
 
@@ -296,14 +307,28 @@ With `classify: true` the engine's own `model.classify` calls (a text and a list
 
 ## Watch
 
-With `watch: true` the plugin polls the session's repository (or `watchRepo`) through the forge with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. Every change is one event. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops (`watchIgnoreBots`), your own writes defer (`watchIgnoreSelf`, keyed on the forge login), new PRs deliver, a new issue is checked against the issue pack and delivers with its findings when it fails one (own writes otherwise defer under `watchIgnoreSelf`), label churn defers. Everything else goes through the `triage` pack (`watchTriage`), and an event whose `actionable` lands in the violated band is deferred.
+The watch is a set of subscriptions, added and removed at runtime with the `watch` tool, any number at once and across repositories. Each one names a repository and a scope, carries its own filter, and may name the agent it belongs to and when it ends:
 
-A delivery is one prompt:
+```
+{ id, repo, scope, filter, for?, until? }
+scope  = repo | pr <n> | branch <name> | run <id> | tag <glob>
+filter = { items, ci: settled | failures | all | none, stall }
+for    = the agent it belongs to, by the agentId SendMessage reaches it by, set when a subagent subscribes
+until  = settled | merged | closed | <iso time>
+```
+
+`repo` covers the whole repository, `pr <n>` one pull request across every head it moves to (its item events, the runs on its heads and its verdicts), `branch <name>` the runs of one branch, `run <id>` one run, and `tag <glob>` the runs on tags matching the glob (`*` any run of characters, `?` one). `items` (default on) takes issue and pull request events in scope, `stall` (default on) takes `ci stalled`, and `ci` defaults to `watchCi`. A subscription with `until` is removed on its own: `settled` once its verdict (a completed run, outside a `pr` scope) is delivered, `merged` or `closed` once its pull request is, a time once it passes. A `run <id>` subscription is removed once its run's completion is delivered, `until` or not, since a run completes only once. A subscription made from a subagent belongs to it and outlives the agent's turn, since a delivery resumes the agent (below). It goes by its `until`, by `unsubscribe`, or once the engine refuses a SendMessage to its agent, which retires every subscription that agent owns. The subscriptions live in the plugin store under the session, so a resumed session gets them back.
+
+There is one poller per repository, started with its first subscription and stopped with its last. It polls through the forge with conditional requests, so idle polls are free, and adapts the interval between `watchMinInterval` and `watchMaxInterval`. N repositories cost N probe sets per interval, and the rate floor is per token: once any poller reads the remaining calls below it, every poller waits for the window to refill. Every change is one event, and each event is matched against the repository's subscriptions, scope first, then filter. An event no subscription takes is dropped, one several take is delivered once, naming each. A `run` subscription reads its run by id each poll until it completes, so a run that pages out of the newest runs on a busy repository still delivers, and a run already complete when it is subscribed to delivers on the next poll.
+
+With `watch: true` each repository in `watchRepos` (the session's own when empty) is subscribed whole at boot with the configured filter. Rules settle what needs no judgement: a PR whose checks have all finished delivers once as `ci settled <conclusion>` (pass or fail, even when you pushed the commit), runs on other branches deliver on failure when the branch is protected or matches the work branch pattern and defer on success, bot activity drops (`watchIgnoreBots`), your own writes defer (`watchIgnoreSelf`, keyed on the forge login), new PRs deliver, a new issue is checked against the issue pack and delivers with its findings when it fails one (own writes otherwise defer under `watchIgnoreSelf`), label churn defers. Everything else goes through the `triage` pack (`watchTriage`), and an event whose `actionable` lands in the violated band is deferred.
+
+A delivery is one prompt, each event ending with the subscriptions it matched:
 
 ```
 [sift watch octalide/sift]
 issue #41 comments 2->3: watcher misses review comments
-  by alice · https://github.com/octalide/sift/issues/41 · actionable 0.93, kind question, urgency now
+  by alice · https://github.com/octalide/sift/issues/41 · actionable 0.93, kind question, urgency now · s1
 deferred meanwhile: 2 housekeeping, 1 ci success
 ```
 
@@ -311,16 +336,16 @@ A settled PR is one line with the aggregate verdict, so a steward waiting to gra
 
 ```
 [sift watch octalide/sift]
-ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks)
-  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
+ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks) · now: open, head unchanged
+  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
 ```
 
-A failure carries the `ci` pack's report on each failed check, one job per check, read from its log through the forge, so the session that pushed the commit reads why it failed without opening the log:
+A failure carries the `ci` pack's report on each failed check, one job per check, read from its log through the forge, so the session that pushed the commit reads why it failed without opening the log. A check that failed only because a job it needs failed is named in one line instead (`gate: failed because docs failed`), since that job has its own report:
 
 ```
 [sift watch octalide/sift]
-ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test)
-  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr
+ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test) · now: open, head unchanged
+  by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
   sift ci octalide/sift job 106195824649: PASS (judge: jev)
     [info] log.trimmed: 212 of 212 lines read from the failing step Run npm test
     lines: top 40 of 212, 40 not ruled out
@@ -335,27 +360,62 @@ The verdict counts every check run and commit status on the PR's head, so it wai
 
 ```
 [sift watch octalide/sift]
-ci stalled: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (1 of 3 checks pending: deploy-preview)
-  by octalide · https://github.com/octalide/sift/pull/14 · ci stalled on pr
+ci stalled: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (1 of 3 checks pending: deploy-preview) · now: open, head unchanged
+  by octalide · https://github.com/octalide/sift/pull/14 · ci stalled on pr · s1
 ```
 
-`watchCi` sets what CI reaches you: `failures` (the default) delivers each open PR once when every check on its head has finished, pass or fail, and failed runs on protected branches, `all` delivers every completed run as well, `none` delivers no CI. Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache, open PR heads and deferred list live in the plugin store, so a restart picks up where it left off.
+CI news that a newer result has made old is dropped rather than delivered late. Each CI event reports on a subject, `pr:<n>` when it ran on a head of that PR (the current head or one it has since moved from) and `branch:<name>` otherwise, and a run is keyed by its subject and its workflow, so a docs run is superseded only by a newer docs run. When a run completes, every held or undelivered event of an older run with the same key is dropped, as is an earlier completion of the same run when it completes again, and a settled verdict on a PR head drops everything held for the PR's older heads and the runs held for that head. Each drop is logged as `drop: superseded by ...`. A run on a tag reports on `tag:<name>`: the forge says whether a run's ref is a tag (GitHub, whose runs name the ref alone, by one tag lookup per ref name, remembered for the session). An event that ages out is read again first: a run held on a PR head that has since moved is dropped, a head whose checks have all finished since delivers its `ci settled` line in place of the runs held for it (one checks read per head), and a run on a branch with a newer completed run of its workflow is dropped (one run listing per branch). Only what survives is delivered.
+
+Every CI line ends with where its subject stands at delivery rather than at the event: `now: open, head unchanged`, `now: open, head @<sha> (moved)`, `now: merged`, `now: closed` (or `not open` when the watch never saw the PR's state) for a PR, and the newest completed run of the event's workflow for a branch, `now: dev @9f8e7d6, docs success`. It is read from the open PR heads and the item cache the poll already holds, so it costs no request:
+
+```
+[sift watch octalide/sift]
+ci failure: docs on dev @1a2b3c4 (push) · now: dev @1a2b3c4, docs failure
+  by octalide · https://github.com/octalide/sift/actions/runs/17 · ci failure on watched branch · s1
+```
+
+A subscription's `ci` sets what CI reaches it: `failures` (the default, from `watchCi`) delivers each open PR once when every check on its head has finished, pass or fail, and failed runs (on a `repo` subscription, only those on protected branches or branches matching the work pattern), `settled` delivers the verdicts and, on a `branch`, `tag` or `run` subscription, every completed run, `all` delivers every completed run as well, `none` delivers no CI. A `run` subscription takes its run's completion under any of them but `none`, and nothing newer supersedes it. Deferred events ride along as a digest on the next delivery, and any deferred event older than `watchDeferMaxAgeHours` that is not superseded is delivered on its own. `watchDelivery: "log"` writes transcript lines instead of prompts. The cursor, item cache, open PR heads and deferred list live in the plugin store, so a restart picks up where it left off.
 
 ## Tools and command
 
-The tools are registered under the plugin's name, so the model sees `mcp__sift__grade`, `mcp__sift__judge`, `mcp__sift__rank`, `mcp__sift__watch` and `mcp__sift__status`.
+The tools are registered under the plugin's name, so the model sees `mcp__sift__grade`, `mcp__sift__judge`, `mcp__sift__rank`, `mcp__sift__watch`, `mcp__sift__prune` and `mcp__sift__status`.
 
 | tool | takes | returns |
 |---|---|---|
-| `grade` | `pack`, `subject`, optional `repo`, `text`, `ref`, `top` | the pack's report as text |
+| `grade` | `pack`, `subject`, optional `repo`, `cwd`, `text`, `ref`, `top` | the pack's report as text |
 | `judge` | `state`, `questions` | the answers |
 | `rank` | `items`, `questions`, optional `mode`, `context`, `by`, `choice`, `fields` | the items with their answers, and the sorted view |
-| `watch` | `action`: `status`, `start`, `poll`, `pause`, `resume`, `reset`, `deferred`; `for`: on a `start` from a subagent, the PR it waits on, its number or head branch | the watch's state |
-| `status` | nothing | backend (for jev, where its key came from and the key's last four characters), modules, whether the watch runs, decision counts |
+| `watch` | `action`: `subscribe`, `unsubscribe`, `list`, `start`, `status`, `poll`, `pause`, `resume`, `reset`, `deferred`; `repo`, `scope`, `items`, `ci`, `stall`, `until` on `subscribe`; `id` on `unsubscribe`; `for` on `start`; `repo` narrows `poll`, `pause`, `resume`, `reset` and `deferred` | the subscription made, the list, or the pollers' state |
+| `prune` | `action`: `off` or `on`; `calls` on `off` | what now holds for the calling loop |
+| `status` | nothing | backend (for jev, where its key came from, the key's last four characters, a shadowed key and a rejected key), modules, whether the watch runs, decision counts |
 
-`grade`, `judge` and `rank` are registered when the `grade` option is on, `watch` and `status` always. `watch start` arms the watch in a session that came up without the `watch` option, `poll` polls once now, `reset` forgets the cursor and reseeds. Deliveries are prompts to the session's main loop, whichever loop armed the watch: a `watch start` from a subagent records that agent's name, says so in the tool result (deliveries reach the agent only when the session relays them), and every delivery header names it (`[sift watch o/r for issue-113]`) so the relay is one `SendMessage`. A later `watch start` replaces the name, one from the main loop clears it. Several subagents waiting on one watch each pass `for`, the PR number or head branch they wait on, and the watch keeps the set of `{ agent, ref }` pairs beside the name: a `ci settled` or `ci stalled` line whose PR number or head branch matches a pair is written as `for issue-113: ci settled success: pr #113 ...`, naming the agent whose PR it is. Once the set holds any pair, a ci event that matches none names no agent, neither on its line nor in the header, so a verdict for a PR nobody armed for is never relayed to an unrelated agent. Only a watch armed without any `for` falls back to the agent that armed last. Deliveries of issue and PR events keep the header name either way. A `start` from the main loop clears the set with the name. One ref names one agent: a later `start` for the same PR replaces the entry, the newest arm winning as the name does. A leading `#` on a PR number is stripped when the ref is stored, so `#42` and `42` are the same PR. Nothing else about agent names or branch conventions is inferred. A session that will act on repository events calls `status` at start to learn whether they will arrive as prompts.
+`grade`, `judge` and `rank` are registered when the `grade` option is on, `prune` when the `prune` option is on, `watch` and `status` always. `prune off` keeps the calling loop's Bash and Read output whole until that loop's next task, or for `calls` outputs over the floor, and `on` turns pruning back on there; no other loop is touched (see Prune). `watch subscribe` adds a subscription and returns its id (the same subscription again returns the one already there), `unsubscribe` removes one, and `list` and `status` show every subscription with its scope, filter, owner and until. `start` subscribes to the caller's repository with the configured filter, or to one pull request when `for` names it (a number, `#` optional) or one branch (anything else). From a subagent, a `start` with `for` lasts `until: settled` unless it says otherwise. The caller's repository, for `start` and for a `subscribe` that names none, is the one checked out in the directory the calling subagent was spawned in (as for `grade`), else the session's. `poll` polls once now, `reset` forgets a repository's cursor and reseeds.
 
-`/sift` prints status and per-module decision counts (the same text as the `status` tool), a judge line naming the backend and, for jev, where its key came from and the key's last four characters (never the key), with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, and `/sift watch status|start|poll|pause|resume|reset|deferred` controls the watch as the tool does.
+```
+s1 octalide/sift repo · items, ci failures, stall
+s2 briar-systems/mach run 17736210453 · items, ci settled, stall · for a1122ff9d641774ba · until settled
+s3 briar-systems/mach-http tag v* · items, ci settled, stall
+```
+
+Each poll's deliveries are split by recipient. Events matched by subscriptions that no agent owns go to the session's main loop as one prompt. Events matched by an agent's subscriptions go to that agent, which is addressed by its agentId. An event that several recipients' subscriptions match goes to each of them. Each delivery lists only its recipient's subscription ids and the digest of that recipient's held events. The recipient is named by the channel alone, never in the text, so a delivery's header is always `[sift watch <repo>]`.
+
+A subagent's delivery reaches it by one of three channels, in this order:
+
+1. **Its next tool call.** The delivery is attached to the result of the next tool call the agent makes, whichever tool it is, as context the agent reads after that result. Taken this way, it goes nowhere else.
+2. **A SendMessage.** If the agent makes no tool call within 60 s, or has already ended its turn (the engine lists it as completed, failed or killed, or not at all), the plugin raises a SendMessage to its agentId. The engine queues it for a running agent's next tool round, and resumes an agent that has finished. Deliveries that waited together go as one message.
+3. **A relay.** Only when the engine refuses that SendMessage does the delivery go to the main loop, in a fixed block. The block names the recipient, says why the SendMessage was refused, and carries the delivery complete. The agent's subscriptions are then retired, since nothing can reach it:
+
+```
+[sift watch relay] to: a1122ff9d641774ba
+SendMessage refused: <the engine's reason>
+[sift watch briar-systems/mach]
+ci settled success: pr #3770 feat/3770 @3f2a9c1: ... (4 checks) · now: open, head unchanged
+  by octalide · https://github.com/briar-systems/mach/pull/3770 · ci settled on pr · s2
+```
+
+So a subagent that waits on CI subscribes (`watch start` with `for`, or `subscribe`), then carries on or ends its turn: the verdict resumes it. It never blocks or polls. A tool call cannot wait for it anyway, since the engine caps a hook at 10 s. The `watch` tool's answer to a subagent's subscribe says this. Deliveries still waiting for their agent are kept in the plugin store, so a reload loses none, and `status` lists them. Under `watchDelivery: log`, every delivery is written to the transcript instead, an agent's under a `sift watch to <agentId>:` line. Nothing about agent names or branch conventions is inferred. A session that will act on repository events calls `status` at start to learn whether they will arrive as prompts.
+
+`/sift` prints status and per-module decision counts (the same text as the `status` tool), a judge line naming the backend and, for jev, where its key came from and the key's last four characters (never the key), any other source holding a different key as set but shadowed, and whether jev has rejected the key, with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, `/sift prune off [n]` and `/sift prune on` turn pruning off and on for the main loop as the tool does for its caller, and `/sift watch status|list|start|poll|pause|resume|reset|deferred [repo]`, `/sift watch subscribe <repo> [scope]` and `/sift watch unsubscribe <id>` control the watch as the tool does.
 
 ## Options
 
@@ -364,26 +424,26 @@ Every option, with its default. The same descriptions are in `.claude-plugin/plu
 | option | default | what it does |
 |---|---|---|
 | `backend` | `auto` | `auto` uses Jev when a key is present and the session's small model otherwise. `jev` and `model` force one. `off` disables every judged feature and leaves only mechanical checks |
-| `apiKey` | unset | Jev key. Leave unset to read `TYPESAFE_API_KEY` from the environment or the settings `env` block. The option wins over both, and as a sensitive option it is stored in `~/.claude/.credentials.json`, not a settings file, so a jev failure refused as http 401 or 403 names the source the key came from |
+| `apiKey` | unset | Jev key. Leave unset to read `TYPESAFE_API_KEY` from the environment or the settings `env` block. The option wins over both, and as a sensitive option it is stored in `~/.claude/.credentials.json`, not a settings file. When another source holds a different key, status and every key rejection name it by its last four characters as set but shadowed. A jev refusal with http 401 or 403 reads `jev rejected the key from <source> (ending XXXX); fix: <what to change for that source>`, and after it the jev judge fails every later call with the same text and sends no request until the session restarts, which is also when a new key is read. Status then reads `judge: jev, key rejected` |
 | `jevModel` | `jev-latest` | TypeSafe model name sent with every Jev request |
 | `jevBaseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. Change it only for a proxy or a compatible local server |
 | `fallbackModel` | `haiku` | model used by the model backend, an alias or a full id |
 | `shadow` | `false` | every module logs what it would have done and does nothing |
-| `prune` | `true` | score long tool outputs before the model reads them and drop the chunks the judge marks unneeded |
+| `prune` | `true` | score long tool outputs against the calling loop's task before the model reads them and drop the chunks the judge marks unneeded. Targeted reads, repeats of pruned output and reads of paths the task names pass whole, and `# sift: full` or the `prune` tool keep output whole on purpose |
 | `pruneFloorTokens` | `4000` | tool outputs under this estimated size pass through untouched |
 | `pruneChunkLines` | `25` | lines per scored chunk |
 | `pruneKeepThreshold` | `0.5` | minimum probability that a chunk is needed. Below it the chunk is replaced by an omission note |
 | `pruneTools` | `Bash,Read` | comma separated tool names whose output is pruned. Bash and Read are supported |
-| `watch` | `false` | poll a repository for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts |
-| `watchRepo` | empty | `owner/name`. Empty watches the session's own repository |
+| `watch` | `false` | subscribe to the repositories in `watchRepos` at boot: poll them for issues, PRs, comments, edits, labels and CI, and deliver actionable events as prompts |
+| `watchRepos` | empty | comma separated `owner/name` list, each subscribed whole at boot. Empty subscribes the session's own repository |
 | `watchMinInterval` | `60` | seconds between polls while the repository is changing |
 | `watchMaxInterval` | `300` | seconds between polls once it is idle. Idle polls are conditional requests and cost no API quota |
 | `watchDelivery` | `prompt` | `prompt` submits each actionable event as a user turn, `log` only writes transcript lines |
 | `watchIgnoreSelf` | `true` | events authored by the login this session runs as are deferred, not delivered |
 | `watchIgnoreBots` | `true` | events authored by bot accounts are dropped |
-| `watchCi` | `failures` | `failures` delivers each open PR once when every check on its head has finished and failed runs on protected branches, `all` every completed run as well, `none` no CI |
+| `watchCi` | `failures` | the `ci` filter of a subscription that sets none: `settled` delivers each open PR once when every check on its head has finished and every completed run on a branch, tag or run subscription, `failures` the verdicts and failed runs (on a whole repository, those on protected or work pattern branches), `all` every completed run as well, `none` no CI |
 | `watchTriage` | `true` | run the triage pack on issue and PR events. Off delivers everything the rules do not defer |
-| `watchDeferMaxAgeHours` | `24` | a deferred event older than this is delivered on its own so nothing waits forever |
+| `watchDeferMaxAgeHours` | `24` | a deferred event older than this is delivered on its own so nothing waits forever, unless a newer result has superseded it |
 | `watchStallHours` | `1` | a PR head whose checks have not all finished within this many hours is delivered once as `ci stalled`, naming the pending checks |
 | `grade` | `true` | register the `grade`, `judge` and `rank` tools |
 | `config` | empty | conventions in the shape of `.sift/config.json`, as inline JSON or a path relative to the repo root, taking the global file's place |
@@ -412,6 +472,28 @@ CI runs the same three commands on every pull request and reports them through a
 
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
 - The prune module estimates tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT).
+
+## Changes in 0.11.0
+
+This release drops judged review of diffs and is breaking. The judged diff questions caught nothing the repositories' own checks did not, raised false positives, and often could not run from another repository's worktree.
+
+Removed: the `hunks` pack. The `pr` pack's judged questions (`addresses_issue`, `scope_creep`, `workaround`, `contract_change`, `tests_cover`, `risk`) and its `drift_collides` rank step: `pr` now runs its mechanical checks and asks the judge nothing, and `pr.drift` reports that the base moved under the PR without judging whether the patches collide. The `commit` pack's judged questions (`type_matches`, `describes_change`, `breaking_missed`): `commit` runs `commit.format` alone. Pull requests and commits as `rules` subjects: `rules` takes an issue or free text and refuses a pull request or a commit with the forms it takes named. A bare number now names an issue for `rules`, where it named a pull request. The `diff`, `changes` and `hunks` fields of a `pr` subject and the `diff` and `has_diff` fields of a `commit` subject, so a repo pack can no longer judge a diff either. `drift` on a `pr` subject is a list of paths.
+
+Changed: the watch is a set of subscriptions, several repositories at once, each scoped to the whole repository, one PR, one branch, one run or tag pushes matching a glob, with its own filter (`items`, `ci`, `stall`) and an optional `until`, added and removed at runtime with `watch subscribe`, `unsubscribe` and `list`. One poller runs per repository, from its first subscription to its last, and the rate floor holds every poller on the token. A `run` subscription reads its run by id, so a run paged out of the newest 30 still delivers. A subscription made from a subagent belongs to it, and each delivered event names the subscriptions it matched. `watch start` subscribes to the session's repository, or to one PR or branch when `for` names it. The `watchRepo` option is replaced by `watchRepos`, a list subscribed at boot, and `watchCi` gains `settled`. The armed name and the per-PR `{ agent, ref }` set are gone: ownership is the subscription's. A run on a tag keys as `tag:<name>`, not `branch:<tag>`. The `Forge` interface gains `run` (one run by id) and `Run.tag`. The stored watch state changes shape again, so the first poll after the upgrade reseeds.
+
+Changed: a watch delivery reaches the subagent that subscribed, where before it went to the main loop and waited for someone to relay it. The delivery rides the agent's next tool call. If the agent makes none within 60 s, or has ended its turn, a SendMessage the plugin raises carries it and resumes a finished agent. Only a SendMessage the engine refuses reaches the main loop, as a `[sift watch relay] to: <agentId>` block that states the refusal. Deliveries are split per recipient, and the `for <agent>:` prefixes on the header and on each line are gone. A subagent's subscriptions outlive its turn, where before they were removed once it finished: they go by `until`, `unsubscribe`, or a refused SendMessage. A subagent's `start` with `for` lasts `until: settled`, and a `run` subscription goes once its run's completion is delivered. A subscription's owner is the agentId, not the agent's name. A subagent's `subscribe` or `start` that names no repository takes the one checked out where the agent was spawned. The registry's host no longer takes `agents`.
+
+Changed: the `issue` pack judges an issue as it stands, its body amended by later comments of its author and maintainers, and names the comment it turns on in `ruling`. The `issue` and `pr` subjects carry the whole comment thread as `comments` (`{ by, association, at, text }`, oldest first, under a budget that keeps the author's and maintainers' comments first), replacing `recent_comments`, which held the five oldest comments rather than the five newest: GitHub's issue comment list takes no sort order, so a capped read now keeps the tail.
+
+Fixed: the watch drops superseded CI news. A newer completed run of the same workflow on the same PR or branch drops the older ones still held or about to be delivered, and a settled verdict on a PR head drops what was held for its older heads. An event that ages out is read again first (the PR's head and checks, or the branch's runs), so a failure since fixed or a run on a head that has since moved is no longer delivered hours late. Every CI delivery line ends with `now:`, the PR's state (open with its head unchanged or moved, merged, closed) or the branch's newest result of that workflow. The `Forge` interface gains `branchRuns`, the newest runs on one branch. The stored watch state changes shape, so the first poll after the upgrade reseeds and a backlog held by an older version is dropped.
+
+Added: `grade` takes `cwd` and reads the checkout of that directory, or of the directory the calling subagent was spawned in, instead of always the session's main working tree: its HEAD, working tree, repository, conventions and packs. A `commit`, `pr` range or `locate` grade whose `repo` is not its checkout's repository is refused, where `commit` ignored `repo` and `locate` read the session's checkout. A grade of an issue, PR, plan or ci log in another repository applies that repository's conventions, where it applied the session's.
+
+Changed: prune judges output against the calling loop's own task, a subagent's spawn prompt or the main loop's newest prompt from a person, where it read the newest user-role message of the main conversation, which inside a subagent was the main session's and in the main loop could be a watch delivery or a task notification. A loop with no recorded task is not pruned. A Read with `offset` or `limit`, a repeat of a Read or Bash command whose output was pruned in the same task, and a Read of a path the task names pass untouched with no judge call, each logged as `prune none` with its reason. The omission note names the opt-out.
+
+Fixed: a pruned Read shows only true file line numbers. The engine numbers a Read's content from its one `startLine`, so every line after an omission note sat at the wrong number. A Read is now pruned only at its tail: it keeps every chunk up to its last needed one and the single note goes last, a Read whose low chunks all sit in front of a needed one passes whole (`prune none`, `gap would misnumber lines`), and `numLines` is the number of lines returned. Its last chunk is no longer kept unconditionally.
+
+Added: the `prune` tool (`off`, `on`) and `/sift prune off [n]|on`, which turn pruning off for one loop until its next task or for a number of outputs, and the `# sift: full` marker, which keeps one Bash command's output whole.
 
 ## Changes in 0.10.0
 

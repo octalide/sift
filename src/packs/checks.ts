@@ -101,8 +101,8 @@ export const CHECKS: Record<string, Check> = {
     ];
   },
   'pr.drift': (s) => {
-    const drift = (s.facts['drift'] as { path: string }[] | undefined) ?? [];
-    return drift.length > 0 ? [warn('pr.drift', `also changed on the base since the branch point: ${drift.map((d) => d.path).join(', ')}`)] : [];
+    const drift = (s.facts['drift'] as string[] | undefined) ?? [];
+    return drift.length > 0 ? [warn('pr.drift', `also changed on the base since the branch point: ${drift.join(', ')}`)] : [];
   },
   'pr.commits': (s, c) => commitFindings('pr.commits', ((s.facts['commits'] as { sha: string; message: string }[]) ?? []).map((x) => parseCommit(x.sha, x.message, c.commits.format)), c),
   'commit.format': (s, c) => commitFindings('commit.format', (s.facts['commits'] as ParsedCommit[]) ?? [], c),
@@ -158,6 +158,8 @@ export const CHECKS: Record<string, Check> = {
     const where = typeof step === 'string' ? `the failing step ${step}` : 'the whole log, no step marked failed';
     return [info('log.trimmed', `${lines} of ${total} lines read from ${where}`)];
   },
+  // the downstream jobs named instead of judged, a job followed to the one that failed on its own, and the others left unjudged
+  'log.followed': (s) => ((s.facts['followed'] as string[] | undefined) ?? []).map((line) => info('log.followed', line)),
   'rules.present': (s, c) => {
     const docs = (s.facts['docs'] as string[] | undefined) ?? [];
     const candidates = Number(s.facts['candidates'] ?? 0);

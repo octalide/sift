@@ -15,6 +15,7 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     openIssues: async () => [],
     parent: async () => undefined,
     comments: async () => [],
+    maintains: (a) => a === 'OWNER' || a === 'MEMBER' || a === 'COLLABORATOR',
     pull: async (_r, n) => pull(n),
     diff: async () => '',
     pullCommits: async () => [],
@@ -32,6 +33,8 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     contents: async () => [],
     items: async () => ({ changed: false, rate: {} }),
     runs: async () => ({ changed: false, rate: {} }),
+    branchRuns: async () => [],
+    run: async (_r, id) => ({ id, name: 'ci', branch: 'main', sha: 'abc1234def', tag: false, event: 'push', done: false, conclusion: null, ok: false, actor: 'alice', url: `https://x/runs/${id}`, updatedAt: '1' }),
     pulls: async () => ({ changed: true, rate: {}, value: [] }),
     parseUrl: (url) => {
       const m = /^https:\/\/fake\/([^/]+\/[^/]+)\/(issue|pr)\/(\d+)$/.exec(url);

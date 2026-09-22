@@ -3,22 +3,30 @@ import type { Git } from '../src/forge/git.ts';
 import { CONVENTIONAL_BUMPS, parseCommit, parseLog, requiredBump } from '../src/repo/commits.ts';
 import { bumpBetween, bumpVersion, compareVersions, parseTag, parseVersion, SEMVER_PATTERN, CALVER_PATTERN } from '../src/repo/version.ts';
 import { flattenManifest, manifestChanges, parseToml, parseYaml } from '../src/repo/manifest.ts';
-import { driftOf, hunksOf, lineDiff, splitDiff } from '../src/repo/diff.ts';
+import { driftOf, lineDiff } from '../src/repo/diff.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import { splitResponse } from '../src/forge/gh.ts';
-import { branchIssue, lastReleaseTag, linkedIssues, linkedOf, planSubject, prRangeSubject, prSubject, releaseSubject, sectionsOf } from '../src/repo/subjects.ts';
+import { branchIssue, commitSubject, lastReleaseTag, linkedIssues, linkedOf, planSubject, prRangeSubject, prSubject, releaseSubject, sectionsOf } from '../src/repo/subjects.ts';
 import { localSource, remoteSource } from '../src/repo/source.ts';
 import type { Answers, Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
-import { validatePack } from '../src/packs/load.ts';
+import { loadPacks, validatePack } from '../src/packs/load.ts';
 import { formatReport, materialize, runChecks, runPack, verdictOf } from '../src/packs/run.ts';
 import { fakeForge } from './fake-forge.ts';
-import type { Subject } from '../src/packs/types.ts';
+import type { Pack, Subject } from '../src/packs/types.ts';
 
 const answering = (answers: Answers): Judge => ({
   name: 'fake',
   ask: async () => ({ ok: true, answers, backend: 'fake', latencyMs: 1 }),
 });
+
+// a judge a mechanical pack must never reach
+const unreachable: Judge = {
+  name: 'unreachable',
+  ask: async () => {
+    throw new Error('judge called');
+  },
+};
 
 describe('conventional commits', () => {
   it('parses type, scope, breaking marker and trailers', () => {
@@ -402,28 +410,33 @@ describe('pack materialization', () => {
   });
 
   it('inverts bad-outcome nouls and grades the verdict', async () => {
-    const subject: Subject = { kind: 'pr', ref: 'p', state: {}, facts: { has_issue: true, has_diff: true }, options: {} };
+    const pack: Pack = {
+      name: 'bands',
+      subject: 'text',
+      description: '',
+      checks: [],
+      questions: {
+        does_it: { type: 'noul', instructions: 'x', severity: 'fail' },
+        creeps: { type: 'noul', instructions: 'x', inverted: true, severity: 'warn' },
+        patches: { type: 'noul', instructions: 'x', inverted: true, severity: 'warn' },
+        breaks: { type: 'noul', instructions: 'x', inverted: true, severity: 'info' },
+      },
+    };
+    const subject: Subject = { kind: 'text', ref: 't', state: {}, facts: {}, options: {} };
     const report = await runPack(
-      BUILTIN_PACKS['pr']!,
+      pack,
       subject,
-      answering({
-        addresses_issue: { type: 'noul', p: 0.95 },
-        scope_creep: { type: 'noul', p: 0.9 },
-        workaround: { type: 'noul', p: 0.1 },
-        contract_change: { type: 'noul', p: 0.5 },
-        tests_cover: { type: 'noul', p: 0.8 },
-        risk: { type: 'score', score: 0, expected: 0, legend: 'low', probabilities: [1, 0, 0], confidence: 1 },
-      }),
+      answering({ does_it: { type: 'noul', p: 0.95 }, creeps: { type: 'noul', p: 0.9 }, patches: { type: 'noul', p: 0.1 }, breaks: { type: 'noul', p: 0.5 } }),
       DEFAULT_CONFIG,
     );
     const bands = Object.fromEntries(report.judged.map((j) => [j.id, j.band]));
-    expect(bands).toMatchObject({ addresses_issue: 'satisfied', scope_creep: 'violated', workaround: 'satisfied', contract_change: 'unclear' });
+    expect(bands).toMatchObject({ does_it: 'satisfied', creeps: 'violated', patches: 'satisfied', breaks: 'unclear' });
     expect(report.verdict).toBe('warn');
   });
 
   it('reports unknown when the judge is unavailable and validates pack files', async () => {
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
-    const report = await runPack(BUILTIN_PACKS['pr']!, { kind: 'pr', ref: 'p', state: {}, facts: { has_diff: true }, options: {} }, off, DEFAULT_CONFIG);
+    const report = await runPack(BUILTIN_PACKS['plan']!, { kind: 'plan', ref: 'p', state: {}, facts: {}, options: {} }, off, DEFAULT_CONFIG);
     expect(report.verdict).toBe('unknown');
     expect(() => validatePack({ subject: 'issue', questions: { q: { type: 'nope', instructions: 'x' } } }, 'bad')).toThrow(/unknown type/);
     expect(validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x' } } }, 'ok').name).toBe('ok');
@@ -441,8 +454,16 @@ describe('pack materialization', () => {
         latencyMs: 1,
       }),
     };
-    const s: Subject = { kind: 'pr', ref: 'p', state: {}, facts: { has_diff: true, has_drift: true, drift: [{ path: 'y.ts', pr: '+b', base: '+c' }] }, options: {} };
-    const report = await runPack(BUILTIN_PACKS['pr']!, s, judge, DEFAULT_CONFIG);
+    const pack: Pack = {
+      name: 'both',
+      subject: 'text',
+      description: '',
+      checks: [],
+      questions: { creeps: { type: 'noul', instructions: 'x', inverted: true } },
+      rank: [{ from: 'files', label: 'path', list: 'each', questions: { collides: { type: 'noul', instructions: '{path} collides', inverted: true } } }],
+    };
+    const s: Subject = { kind: 'text', ref: 'p', state: {}, facts: { files: [{ path: 'y.ts' }] }, options: {} };
+    const report = await runPack(pack, s, judge, DEFAULT_CONFIG);
     expect(report.judged.map((j) => j.id)).not.toContain('unasked');
     expect(report.ranked[0]!.items).toHaveLength(1);
     expect(report.dropped).toBe(2);
@@ -450,7 +471,7 @@ describe('pack materialization', () => {
     expect(report.verdict).toBe('warn');
     expect(formatReport(report)).toContain('2 answers dropped: unasked or missing');
     const exact: Judge = { name: 'fake', ask: async (_state, questions) => ({ ok: true, answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: 'noul', p: 0.9 }])), backend: 'fake', latencyMs: 1 }) };
-    const clean = await runPack(BUILTIN_PACKS['pr']!, s, exact, DEFAULT_CONFIG);
+    const clean = await runPack(pack, s, exact, DEFAULT_CONFIG);
     expect(clean.dropped).toBeUndefined();
   });
 
@@ -566,70 +587,74 @@ describe('github helpers', () => {
     expect((s.state as { linked_issue: { number: number } }).linked_issue.number).toBe(8);
   });
 
-  it('splits a unified diff per file and pairs the files two diffs both touch', () => {
+  it('names the files two diffs both touch by their path after the change', () => {
     const a = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\ndiff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts\n';
     const b = 'diff --git a/new.ts b/new.ts\n@@ -1 +1 @@\n-p\n+q\ndiff --git a/other.ts b/other.ts\n@@ -1 +1 @@\n-1\n+2\n';
-    expect(splitDiff(a).map((f) => f.path)).toEqual(['src/a.ts', 'new.ts']);
-    expect(splitDiff(a)[0]!.patch).toBe('diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y');
-    expect(splitDiff('')).toEqual([]);
-    expect(driftOf(a, b)).toEqual([{ path: 'new.ts', pr: 'diff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts', base: 'diff --git a/new.ts b/new.ts\n@@ -1 +1 @@\n-p\n+q' }]);
+    expect(driftOf(a, b)).toEqual(['new.ts']);
+    expect(driftOf(a, '')).toEqual([]);
+    expect(driftOf('', b)).toEqual([]);
   });
 
-  it('splits a diff into hunks, a hunkless file being one hunk of its own', () => {
-    const diff = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@ export function f() {\n-x\n+y\n@@ -9 +9 @@\n+@@ not a header\ndiff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts\n';
-    expect(hunksOf(diff)).toEqual([
-      { file: 'src/a.ts', header: '@@ -1,2 +1,2 @@ export function f() {', text: '-x\n+y' },
-      { file: 'src/a.ts', header: '@@ -9 +9 @@', text: '+@@ not a header' },
-      { file: 'new.ts', header: '', text: 'diff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts' },
-    ]);
-    expect(hunksOf('')).toEqual([]);
-  });
-
-  it('judges every hunk of a pull request alone against its purpose and the map of the change', async () => {
-    const diff = 'diff --git a/src/x.ts b/src/x.ts\n@@ -1 +1 @@ f\n-a\n+b\n@@ -5 +5 @@ g\n-c\n+d\ndiff --git a/tests/x.test.ts b/tests/x.test.ts\n@@ -1 +1 @@ it\n-e\n+f\n';
-    const s = await prSubject(fakeForge({ diff: async () => diff }), 'o/r', 7, DEFAULT_CONFIG);
-    expect((s.state as { changes: unknown }).changes).toEqual([
-      { file: 'src/x.ts', header: '@@ -1 +1 @@ f' },
-      { file: 'src/x.ts', header: '@@ -5 +5 @@ g' },
-      { file: 'tests/x.test.ts', header: '@@ -1 +1 @@ it' },
-    ]);
-    expect((s.facts['hunks'] as { text: string }[]).map((h) => h.text)).toEqual(['-a\n+b', '-c\n+d', '-e\n+f']);
-    const { steps } = materialize(BUILTIN_PACKS['hunks']!, s);
-    expect(steps.map((st) => [st.step.from, st.items.length, st.by])).toEqual([['hunks', 3, 'unrelated']]);
-    // one request per hunk carrying the purpose fields and the hunk, never the diff; the second hunk is a workaround, the third untested
+  it('runs an isolated step against its context fields and lists only the items it ruled out', async () => {
+    const pack: Pack = {
+      name: 'isolated',
+      subject: 'text',
+      description: '',
+      checks: [],
+      questions: {},
+      rank: [
+        {
+          from: 'parts',
+          mode: 'isolated',
+          list: 'violated',
+          label: '{file} {name}',
+          context: ['title', 'map'],
+          questions: {
+            off_topic: { type: 'noul', instructions: '{name} of {file} is off topic', inverted: true },
+            patched: { type: 'noul', instructions: '{name} of {file} patches a symptom', inverted: true },
+          },
+        },
+      ],
+    };
+    const parts = [
+      { file: 'a.ts', name: 'f' },
+      { file: 'a.ts', name: 'g' },
+      { file: 'b.ts', name: 'h' },
+    ];
+    const s: Subject = { kind: 'text', ref: 't', state: { title: 'purpose', map: ['a.ts', 'b.ts'], ignored: 'never sent' }, facts: { parts }, options: {} };
     const states: Record<string, unknown>[] = [];
     const judge: Judge = {
       name: 'fake',
       ask: async (state, questions) => {
         states.push(state as Record<string, unknown>);
-        const item = (state as { item: { header: string } }).item;
-        const p = (id: string) => (id === 'workaround' && item.header.endsWith('g') ? 0.9 : id === 'untested' && item.header.endsWith('it') ? 0.8 : 0.1);
+        const item = (state as { item: { name: string } }).item;
+        const p = (id: string) => (id === 'patched' && item.name === 'g' ? 0.9 : id === 'off_topic' && item.name === 'h' ? 0.8 : 0.1);
         return { ok: true, answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: 'noul', p: p(id) }])), backend: 'fake', latencyMs: 1 };
       },
     };
-    const report = await runPack(BUILTIN_PACKS['hunks']!, s, judge, DEFAULT_CONFIG);
+    const report = await runPack(pack, s, judge, DEFAULT_CONFIG);
+    // one request per item, carrying the context fields and the item alone
     expect(states).toHaveLength(3);
-    expect(Object.keys(states[0]!).sort()).toEqual(['body', 'changes', 'commits', 'item', 'linked_issue', 'title']);
-    expect(states[1]!['item']).toEqual({ k: 1, file: 'src/x.ts', header: '@@ -5 +5 @@ g', text: '-c\n+d' });
-    expect(report.mechanical).toEqual([]);
+    expect(Object.keys(states[0]!).sort()).toEqual(['item', 'map', 'title']);
+    expect(states[1]!['item']).toEqual({ k: 1, file: 'a.ts', name: 'g' });
     const step = report.ranked[0]!;
     expect([step.list, step.total, step.kept]).toEqual(['violated', 3, 1]);
-    expect(step.items.map((i) => i.label)).toEqual(['src/x.ts @@ -5 +5 @@ g', 'tests/x.test.ts @@ -1 +1 @@ it']);
-    expect(step.items[0]!.asked.map((j) => [j.id, j.band])).toEqual([['hunks_2.unrelated', 'satisfied'], ['hunks_2.workaround', 'violated'], ['hunks_2.untested', 'satisfied']]);
-    expect(step.items[0]!).toMatchObject({ id: 'hunks_2', band: 'satisfied', instructions: expect.stringContaining('@@ -5 +5 @@ g of src/x.ts does not serve') });
+    expect(step.items.map((i) => i.label)).toEqual(['a.ts g', 'b.ts h']);
+    expect(step.items[0]!.asked.map((j) => [j.id, j.band])).toEqual([['parts_2.off_topic', 'satisfied'], ['parts_2.patched', 'violated']]);
+    expect(step.items[0]!).toMatchObject({ id: 'parts_2', band: 'satisfied', instructions: 'g of a.ts is off topic' });
     expect(report.verdict).toBe('warn');
-    expect(formatReport(report).split('\n').slice(1)).toEqual(['  hunks: 2 of 3 ruled out', '    [violated] src/x.ts @@ -5 +5 @@ g: workaround = 0.90', '    [violated] tests/x.test.ts @@ -1 +1 @@ it: untested = 0.80']);
+    expect(formatReport(report).split('\n').slice(1)).toEqual(['  parts: 2 of 3 ruled out', '    [violated] a.ts g: patched = 0.90', '    [violated] b.ts h: off_topic = 0.80']);
     // an each list prints every question of every item
-    const each = { ...BUILTIN_PACKS['hunks']!, rank: [{ ...BUILTIN_PACKS['hunks']!.rank![0]!, list: 'each' as const }] };
+    const each: Pack = { ...pack, rank: [{ ...pack.rank![0]!, list: 'each' }] };
     const lines = formatReport(await runPack(each, s, judge, DEFAULT_CONFIG)).split('\n');
-    expect(lines).toHaveLength(10);
-    expect(lines[5]).toMatch(/^  \[violated\] hunks_2\.workaround = 0\.90: The hunk @@ -5 \+5 @@ g of src\/x\.ts patches a symptom/);
+    expect(lines).toHaveLength(7);
+    expect(lines[4]).toBe('  [violated] parts_2.patched = 0.90: g of a.ts patches a symptom');
     // a step context names fields the state does not have without sending them
-    expect(validatePack({ subject: 'pr', rank: [{ from: 'hunks', context: ['title'], questions: { q: { type: 'noul', instructions: 'x' } } }] }, 'ok').rank![0]!.context).toEqual(['title']);
-    expect(() => validatePack({ subject: 'pr', rank: [{ from: 'hunks', context: 'title', questions: { q: { type: 'noul', instructions: 'x' } } }] }, 'bad')).toThrow(/context must be an array/);
+    expect(validatePack({ subject: 'text', rank: [{ from: 'parts', context: ['title'], questions: { q: { type: 'noul', instructions: 'x' } } }] }, 'ok').rank![0]!.context).toEqual(['title']);
+    expect(() => validatePack({ subject: 'text', rank: [{ from: 'parts', context: 'title', questions: { q: { type: 'noul', instructions: 'x' } } }] }, 'bad')).toThrow(/context must be an array/);
   });
 
-  it('reads the drift of a pull request from the base since the branch point and asks about each file', async () => {
+  it('reads the drift of a pull request from the base since the branch point as the files both changed', async () => {
     const calls: string[] = [];
     const forge = fakeForge({
       diff: async () => 'diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/y.ts b/y.ts\n@@ -1 +1 @@\n-a\n+b\n',
@@ -641,19 +666,63 @@ describe('github helpers', () => {
     const s = await prSubject(forge, 'o/r', 7, DEFAULT_CONFIG);
     expect(calls).toEqual(['abc1234def...dev']);
     expect(s.facts['has_drift']).toBe(true);
+    expect(s.facts['drift']).toEqual(['y.ts']);
     expect((s.state as { drift: string[] }).drift).toEqual(['y.ts']);
+    // the patches never reach the state: no diff is judged
+    for (const key of ['diff', 'changes']) expect(s.state[key]).toBeUndefined();
+    expect(s.facts['hunks']).toBeUndefined();
     expect(runChecks(BUILTIN_PACKS['pr']!, s, DEFAULT_CONFIG).filter((f) => f.check === 'pr.drift')).toEqual([{ check: 'pr.drift', severity: 'warn', message: 'also changed on the base since the branch point: y.ts' }]);
-    const { steps } = materialize(BUILTIN_PACKS['pr']!, s);
-    expect(steps.map((st) => [st.step.from, st.items.length])).toEqual([['drift', 1]]);
-    expect(steps[0]!.items[0]).toMatchObject({ path: 'y.ts', pr: expect.stringContaining('+b'), base: expect.stringContaining('+c') });
-    // answers every question it is asked as a noul at 0.9: the pack's own pass, then the drift rank
-    const judge: Judge = { name: 'fake', ask: async (_state, questions) => ({ ok: true, answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: 'noul', p: 0.9 }])), backend: 'fake', latencyMs: 1 }) };
-    const report = await runPack(BUILTIN_PACKS['pr']!, s, judge, DEFAULT_CONFIG);
-    expect(report.ranked[0]!.items[0]).toMatchObject({ label: 'y.ts', band: 'violated', severity: 'warn', instructions: expect.stringContaining('y.ts') });
-    expect(report.verdict).toBe('warn');
     const clean = await prSubject(fakeForge({ diff: async () => 'diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-a\n+b\n' }), 'o/r', 7, DEFAULT_CONFIG);
     expect(clean.facts['has_drift']).toBe(false);
     expect(runChecks(BUILTIN_PACKS['pr']!, clean, DEFAULT_CONFIG).filter((f) => f.check === 'pr.drift')).toEqual([]);
+  });
+
+  it('grades a pull request with its mechanical checks alone and never calls the judge', async () => {
+    const pack = BUILTIN_PACKS['pr']!;
+    expect(pack.checks).toEqual(['pr.linked', 'pr.target', 'pr.branch', 'pr.ci', 'pr.template', 'pr.commits', 'pr.drift']);
+    expect(pack.questions).toEqual({});
+    expect(pack.rank).toBeUndefined();
+    const forge = fakeForge({
+      pull: async (_r, n) => ({ ...(await fakeForge().pull('o/r', n)), body: 'no link', base: 'main', head: { branch: 'scratch', sha: 'h' } }),
+      diff: async () => 'diff --git a/y.ts b/y.ts\n@@ -1 +1 @@\n-a\n+b\n',
+      compareDiff: async () => 'diff --git a/y.ts b/y.ts\n@@ -1 +1 @@\n-a\n+c\n',
+    });
+    const config = resolveConfig({ branches: { pattern: '^feat/\\d+$' }, prs: { linkIssue: true, targets: ['dev'] } });
+    const s = await prSubject(forge, 'o/r', 7, config);
+    const report = await runPack(pack, s, unreachable, config);
+    expect(report.mechanical.map((f) => f.check)).toEqual(['pr.linked', 'pr.target', 'pr.branch', 'pr.drift']);
+    expect(report.judged).toEqual([]);
+    expect(report.ranked).toEqual([]);
+    expect(report.judgeError).toBeUndefined();
+    expect(report.verdict).toBe('fail');
+  });
+
+  it('grades commits with the format check alone and never calls the judge', async () => {
+    const pack = BUILTIN_PACKS['commit']!;
+    expect(pack.checks).toEqual(['commit.format']);
+    expect(pack.questions).toEqual({});
+    expect(pack.rank).toBeUndefined();
+    const calls: string[] = [];
+    const git: Git = async (argv) => {
+      calls.push(argv.join(' '));
+      return `\u001e${'a'.repeat(40)}\nwat: y\n`;
+    };
+    const config = resolveConfig({ commits: { convention: 'conventional' } });
+    const s = await commitSubject(git, 'abc1234', config);
+    // the commit is read as its message, never as its diff
+    expect(calls.every((c) => c.startsWith('log '))).toBe(true);
+    expect(s.state['diff']).toBeUndefined();
+    const report = await runPack(pack, s, unreachable, config);
+    expect(report.mechanical.map((f) => f.message)).toEqual(['aaaaaaa uses unknown type wat']);
+    expect(report.judged).toEqual([]);
+    expect(report.judgeError).toBeUndefined();
+    expect(report.verdict).toBe('fail');
+  });
+
+  it('ships no hunks pack', async () => {
+    expect(BUILTIN_PACKS['hunks']).toBeUndefined();
+    const packs = await loadPacks({ read: async () => '', exists: async () => false, list: async () => [] }, '/r');
+    expect(Object.keys(packs)).not.toContain('hunks');
   });
 
   it('grades a local base..head range as the pr it would open, skipping the checks only a forge answers', async () => {
@@ -676,8 +745,8 @@ describe('github helpers', () => {
     expect((s.state as { linked_issue: { number: number } }).linked_issue.number).toBe(12);
     expect((s.state as { commits: string[] }).commits).toEqual(['feat(#12): twelve']);
     expect(s.facts['has_drift']).toBe(true);
-    expect(s.facts['hunks']).toEqual([{ file: 'x.ts', header: '@@ -1 +1 @@', text: '-a\n+b' }]);
-    expect((s.state as { changes: unknown }).changes).toEqual([{ file: 'x.ts', header: '@@ -1 +1 @@' }]);
+    expect(s.facts['drift']).toEqual(['x.ts']);
+    for (const key of ['diff', 'changes']) expect(s.state[key]).toBeUndefined();
     for (const key of ['linked', 'base', 'checks_failed', 'sections']) expect(s.facts[key]).toBeUndefined();
     const findings = runChecks(BUILTIN_PACKS['pr']!, s, config);
     expect(findings.map((f) => f.check)).toEqual(['pr.drift']);

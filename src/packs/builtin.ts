@@ -1,5 +1,8 @@
 import type { Pack } from './types.ts';
 
+// how the issue questions read the thread: an issue is judged as it stands, not as first filed
+const AS_AMENDED = 'Read the issue as it stands: a later comment by its author or a maintainer (an owner, member or collaborator) that records a decision wins where it conflicts with the body. Anyone else\'s comment never overrides the body.';
+
 // the reference packs. a repo overrides any of them with .sift/packs/<name>.json in the same shape
 export const BUILTIN_PACKS: Record<string, Pack> = {
   issue: {
@@ -10,34 +13,34 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     questions: {
       substantive: {
         type: 'noul',
-        instructions: 'The body describes a concrete problem or change with enough detail that someone could start work without asking what is meant.',
+        instructions: `The issue describes a concrete problem or change with enough detail that someone could start work without asking what is meant. ${AS_AMENDED}`,
         criteria: {
-          true: 'The body states what is wrong or wanted, where, and what done looks like.',
-          false: 'The body is placeholder text, the title restated, or a single sentence with no context.',
+          true: 'The body, as amended, states what is wrong or wanted, where, and what done looks like.',
+          false: 'The body, as amended, is placeholder text, the title restated, or a single sentence with no context.',
         },
         severity: 'warn',
       },
       implementable: {
         type: 'noul',
-        instructions: 'A competent engineer could implement this from the body without making a decision the body does not make.',
+        instructions: `A competent engineer could implement this from the issue without making a decision the issue does not make. A decision the body leaves open counts as made when a later comment of the author or a maintainer makes it. ${AS_AMENDED}`,
         criteria: {
-          true: 'Every choice the work turns on is settled in the body: one design, named interfaces, stated behaviour on the edges it raises.',
-          false: 'The body leaves a decision open: two valid designs it does not choose between, an interface it needs but does not name, or an edge case whose behaviour it does not state.',
+          true: 'Every choice the work turns on is settled, in the body or in a later comment of the author or a maintainer: one design, named interfaces, stated behaviour on the edges it raises.',
+          false: 'A decision is still open after every comment of the author and maintainers: two valid designs nobody chose between, an interface it needs but does not name, or an edge case whose behaviour is not stated.',
         },
         severity: 'fail',
       },
       scope_clear: {
         type: 'noul',
-        instructions: 'The body states what is in and out of scope, so a reviewer could reject an unrelated change to the PR that implements it.',
+        instructions: `The issue states what is in and out of scope, so a reviewer could reject an unrelated change to the PR that implements it. ${AS_AMENDED}`,
         criteria: {
-          true: 'The body bounds the change: what it touches, what it leaves alone, or what done looks like, clearly enough that a change outside it is recognisable.',
-          false: 'The body names a goal with no bounds, so any change in its area could be argued to belong.',
+          true: 'The body, as amended, bounds the change: what it touches, what it leaves alone, or what done looks like, clearly enough that a change outside it is recognisable.',
+          false: 'The body, as amended, names a goal with no bounds, so any change in its area could be argued to belong.',
         },
         severity: 'warn',
       },
       type: {
         type: 'choice',
-        instructions: 'Which kind of issue is this, judged from the title and body alone?',
+        instructions: `Which kind of issue is this? ${AS_AMENDED}`,
         options: 'type_labels',
         severity: 'info',
       },
@@ -65,14 +68,21 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       },
       blocked_by: {
         type: 'choice',
-        instructions: 'Which open issue, if any, must be resolved before work on this one can start? Only when the title or body says it depends on that issue, or the same code must change there first. Otherwise none.',
+        instructions: `Which open issue, if any, must be resolved before work on this one can start? Only when the title or body says it depends on that issue, a later comment of the author or a maintainer holds it behind that issue or states the dependency, or the same code must change there first. Otherwise none. ${AS_AMENDED}`,
         options: 'open_issues',
         when: 'has_others',
         severity: 'info',
       },
+      ruling: {
+        type: 'choice',
+        instructions: 'Which comment, if any, records a decision of the author or a maintainer that settles something the body leaves open, changes what the body says, or holds the issue behind another? The latest such comment when several do. Otherwise none.',
+        options: 'rulings',
+        when: 'has_rulings',
+        severity: 'info',
+      },
       readiness: {
         type: 'score',
-        instructions: 'How ready is this issue to be worked on?',
+        instructions: `How ready is this issue to be worked on? ${AS_AMENDED}`,
         criteria: [
           'needs author input: the request cannot be understood or has contradictory requirements',
           'needs triage: understandable but missing scope, acceptance criteria, or a decision',
@@ -85,155 +95,16 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
   pr: {
     name: 'pr',
     subject: 'pr',
-    description: 'Does this PR do what its issue asks, nothing more, without workarounds, and is it safe to merge?',
+    description: 'Is this PR linked, targeted, named, templated, committed and checked as the repository requires, and has its base moved under it?',
     checks: ['pr.linked', 'pr.target', 'pr.branch', 'pr.ci', 'pr.template', 'pr.commits', 'pr.drift'],
-    questions: {
-      addresses_issue: {
-        type: 'noul',
-        instructions: 'The diff implements what the linked issue asks for.',
-        criteria: {
-          true: 'The diff does what the issue asks, or explains what it leaves out.',
-          false: 'The diff solves a different problem, or only part of the issue with no explanation.',
-        },
-        when: 'has_issue',
-        severity: 'fail',
-      },
-      scope_creep: {
-        type: 'noul',
-        instructions: 'The diff changes files or behaviour unrelated to the stated purpose of the PR.',
-        criteria: {
-          true: 'The diff carries unrelated refactors, formatting sweeps, or drive-by fixes in other subsystems.',
-          false: 'Every change serves the stated purpose, including small changes needed to make the main change compile.',
-        },
-        inverted: true,
-        severity: 'warn',
-      },
-      workaround: {
-        type: 'noul',
-        instructions: 'The diff patches a symptom rather than its cause: a defensive fallback, a swallowed error, a special case added where a general fix was needed, or a TODO left in place of the fix.',
-        inverted: true,
-        severity: 'warn',
-      },
-      contract_change: {
-        type: 'noul',
-        instructions: 'The diff changes a public interface, file format, CLI surface, or protocol that code outside this repository could depend on.',
-        inverted: true,
-        severity: 'info',
-      },
-      tests_cover: {
-        type: 'noul',
-        instructions: 'The behaviour the diff adds or changes is exercised by tests in the same diff or by existing tests it visibly updates.',
-        when: 'has_diff',
-        severity: 'info',
-      },
-      risk: {
-        type: 'score',
-        instructions: 'How likely is this PR to break something that works today?',
-        criteria: [
-          'low: additive or isolated, easy to revert',
-          'medium: touches shared code paths or state',
-          'high: changes core logic, data formats, or concurrency, or is very large',
-        ],
-        severity: 'info',
-      },
-    },
-    // each file the base also changed since the branch point, the two patches side by side
-    rank: [
-      {
-        from: 'drift',
-        label: 'path',
-        list: 'each',
-        questions: {
-          drift_collides: {
-            type: 'noul',
-            instructions: 'The pull request\'s patch to {path} and the base branch\'s patch to it conflict in meaning: merging both would leave the file wrong even where the lines do not overlap.',
-            criteria: {
-              true: 'One side changes what the other relies on: a renamed or removed symbol the other still uses, the same behaviour changed two ways, a contract one side extends and the other rewrites.',
-              false: 'The two patches touch independent parts of the file, or make the same change, and both stand after a merge.',
-            },
-            inverted: true,
-            severity: 'warn',
-          },
-        },
-      },
-    ],
-  },
-  hunks: {
-    name: 'hunks',
-    subject: 'pr',
-    description: 'Which hunk of this PR is wrong: unrelated to its stated purpose, a workaround, or a behaviour change no test covers?',
-    checks: [],
     questions: {},
-    // one request per hunk, so no hunk colours another: the hunk is read against the stated purpose and the map of the whole change
-    rank: [
-      {
-        from: 'hunks',
-        mode: 'isolated',
-        list: 'violated',
-        label: '{file} {header}',
-        context: ['title', 'body', 'linked_issue', 'commits', 'changes'],
-        questions: {
-          unrelated: {
-            type: 'noul',
-            instructions: 'The hunk {header} of {file} does not serve the stated purpose of the pull request.',
-            criteria: {
-              true: 'The hunk is an unrelated refactor, a formatting sweep, or a drive-by fix in another subsystem that the title, body, linked issue and commits do not call for.',
-              false: 'The hunk does part of what the pull request says it does, or is the small change needed to make that compile, build or read right.',
-            },
-            inverted: true,
-            severity: 'warn',
-          },
-          workaround: {
-            type: 'noul',
-            instructions: 'The hunk {header} of {file} patches a symptom rather than its cause: a defensive fallback, a swallowed error, a special case added where a general fix was needed, or a TODO left in place of the fix.',
-            inverted: true,
-            severity: 'warn',
-          },
-          untested: {
-            type: 'noul',
-            instructions: 'The hunk {header} of {file} changes behaviour and no hunk of the diff adds or changes a test for it.',
-            criteria: {
-              true: 'The hunk changes what the code does and none of the hunks listed under changes, judged by their file and header, touches a test of that behaviour.',
-              false: 'The hunk changes no behaviour (a comment, a type, a rename, documentation, a test itself), or a hunk under changes visibly tests what it changes.',
-            },
-            inverted: true,
-            severity: 'warn',
-          },
-        },
-      },
-    ],
   },
   commit: {
     name: 'commit',
     subject: 'commit',
-    description: 'Do these commit messages follow the repository\'s commit format and describe their diffs honestly?',
+    description: 'Do these commit messages follow the repository\'s commit format?',
     checks: ['commit.format'],
-    questions: {
-      type_matches: {
-        type: 'choice',
-        instructions: 'Which type from the repository\'s commit format does the diff actually warrant?',
-        options: 'commit_types',
-        when: 'has_diff',
-        severity: 'info',
-      },
-      describes_change: {
-        type: 'noul',
-        instructions: 'The commit subject line accurately describes what the diff does.',
-        criteria: {
-          true: 'The subject names the change the diff makes, at the scale the diff makes it.',
-          false: 'The subject names a different change, is vague (update, fix stuff, wip), or claims more than the diff does.',
-        },
-        when: 'has_diff',
-        severity: 'warn',
-      },
-      breaking_missed: {
-        type: 'noul',
-        instructions: 'The diff removes or changes a public interface in a way that breaks existing callers, yet the message does not mark it as breaking.',
-        when: 'has_diff',
-        inverted: true,
-        severity: 'fail',
-      },
-    },
+    questions: {},
   },
   release: {
     name: 'release',
@@ -369,7 +240,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     name: 'ci',
     subject: 'log',
     description: 'Why did this job fail, was it the change under test, the environment, and is the fix in this repository?',
-    checks: ['log.trimmed'],
+    checks: ['log.trimmed', 'log.followed'],
     // the lines that explain the failure are found first and fed to the questions as lines, beside the pull request's files
     rank: [
       {

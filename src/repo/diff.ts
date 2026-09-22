@@ -52,47 +52,6 @@ function lcsOps(a: string[], b: string[]): Op[] {
   return ops;
 }
 
-export type FilePatch = { path: string; patch: string };
-
-// a unified diff split per file, each named by its path after the change (the new name of a rename)
-export function splitDiff(diff: string): FilePatch[] {
-  const out: FilePatch[] = [];
-  for (const chunk of diff.split(/^(?=diff --git )/m)) {
-    const header = /^diff --git a\/(.+?) b\/(.+)$/m.exec(chunk);
-    if (!header) continue;
-    out.push({ path: header[2]!, patch: chunk.trimEnd() });
-  }
-  return out;
-}
-
-export type Hunk = { file: string; header: string; text: string };
-
-// a unified diff split per hunk: the file it lands in, its @@ header line, and the lines under it.
-// a file with no hunk (a rename, a mode change, a binary) is one hunk with an empty header and the whole patch as text
-export function hunksOf(diff: string): Hunk[] {
-  const out: Hunk[] = [];
-  for (const file of splitDiff(diff)) {
-    const parts = file.patch.split(/^(?=@@ )/m).slice(1);
-    if (parts.length === 0) {
-      out.push({ file: file.path, header: '', text: file.patch });
-      continue;
-    }
-    for (const part of parts) {
-      const nl = part.indexOf('\n');
-      out.push(nl < 0 ? { file: file.path, header: part, text: '' } : { file: file.path, header: part.slice(0, nl), text: part.slice(nl + 1).replace(/\n$/, '') });
-    }
-  }
-  return out;
-}
-
-export type Drift = { path: string; pr: string; base: string };
-
-// the files both diffs touch, each with its patch from either side, in the order the pr diff lists them
-export function driftOf(prDiff: string, baseDiff: string): Drift[] {
-  const base = new Map(splitDiff(baseDiff).map((f) => [f.path, f.patch]));
-  return splitDiff(prDiff).flatMap((f) => (base.has(f.path) ? [{ path: f.path, pr: f.patch, base: base.get(f.path)! }] : []));
-}
-
 export type DiffFile = { path: string; additions: number; deletions: number };
 
 // the files a unified diff touches with the lines added and removed in each, in diff order
@@ -111,4 +70,10 @@ export function diffFiles(diff: string): DiffFile[] {
     else if (line.startsWith('-') && !line.startsWith('---')) current.deletions++;
   }
   return out;
+}
+
+// the files both diffs touch, in the order the first diff lists them, each by its path after the change
+export function driftOf(prDiff: string, baseDiff: string): string[] {
+  const base = new Set(diffFiles(baseDiff).map((f) => f.path));
+  return diffFiles(prDiff).flatMap((f) => (base.has(f.path) ? [f.path] : []));
 }

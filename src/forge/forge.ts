@@ -30,7 +30,13 @@ export type PullRequest = Issue & {
 
 export type IssueSummary = { number: number; title: string };
 
-export type Comment = { author: ForgeUser; body: string; createdAt: string };
+export type Comment = {
+  author: ForgeUser;
+  body: string;
+  createdAt: string;
+  // the commenter's standing in the repository in the forge's own words, as Issue.association
+  association?: string;
+};
 
 export type Review = { author: ForgeUser; state: string; body: string };
 
@@ -53,6 +59,8 @@ export type Run = Check & {
   id: string;
   branch: string;
   sha: string;
+  // the ref it ran on is a tag, not a branch; branch then holds the tag's name
+  tag: boolean;
   // what started it (push, pull_request, schedule) in the forge's words
   event: string;
   actor: string;
@@ -61,7 +69,14 @@ export type Run = Check & {
 };
 
 // one job of a ci run: what jobLog reads by id
-export type Job = Check & { id: string; run: string; sha: string; url: string };
+export type Job = Check & {
+  id: string;
+  run: string;
+  sha: string;
+  url: string;
+  // the ids of the jobs in the same run this one waits on; undefined when the forge cannot tell, and the job reads as a leaf
+  needs?: string[];
+};
 
 // one step of a job's log as the forge marks it; a forge that marks no steps hands the whole log as one step
 export type LogStep = { name: string; ok: boolean; text: string };
@@ -127,8 +142,10 @@ export interface Forge {
   openIssues(repo: string): Promise<IssueSummary[]>;
   // the parent of an issue in the forge's own hierarchy (sub-issues, epics), undefined without one
   parent(repo: string, number: number): Promise<number | undefined>;
-  // the newest comments on an issue or pull request, oldest first; last caps how many
+  // every comment on an issue or pull request, oldest first; last keeps only the newest that many
   comments(repo: string, kind: 'issue' | 'pr', number: number, last?: number): Promise<Comment[]>;
+  // whether a standing in the forge's own words (an association) is one that maintains the repository
+  maintains(association: string | undefined): boolean;
 
   pull(repo: string, number: number): Promise<PullRequest>;
   diff(repo: string, number: number): Promise<string>;
@@ -163,9 +180,13 @@ export interface Forge {
   items(repo: string, since: string, token?: string): Promise<Conditional<WatchItem[]>>;
   // the newest ci runs; a repository without ci is unchanged forever
   runs(repo: string, token?: string): Promise<Conditional<Run[]>>;
+  // the newest ci runs on one branch, empty for a repository without ci
+  branchRuns(repo: string, branch: string): Promise<Run[]>;
+  // one ci run by its id, however far it has paged out of the newest runs
+  run(repo: string, id: string): Promise<Run>;
   // the open pull request heads; without a token the read always answers changed
   pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>>;
-  // the jobs of a ci run
+  // the jobs of a ci run, each with the jobs it needs when the forge can tell
   jobs(repo: string, run: string): Promise<Job[]>;
   // a job's log split at the forge's own step marks
   jobLog(repo: string, job: string): Promise<JobLog>;

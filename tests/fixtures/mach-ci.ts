@@ -1,0 +1,518 @@
+// briar-systems/mach .github/workflows/ci.yml at 40d6264, the sha of its run 35781279928, where docs failed and gate failed
+// because docs did; and that run's jobs as the jobs api listed them
+export const MACH_CI = `name: CI
+
+# a pull request proves the primary hosts: the self-host fixpoint, the unit suite
+# in both profiles, the formatter, the cross-compiles, the golden disassembly of
+# every ISA, the differential execution on the host, the warm build path, the
+# doc/language code blocks and the docs checks. a pull request into main proves
+# everything else as well:
+# qemu, spirv, riscv32, the link cases on every leg, the dwarf verify, the darwin
+# hosts natively and the release-profile fixpoint that cd.yml ships. every change
+# reaches a branch through a pull request, so nothing runs on push, and nothing
+# runs on a schedule. \`workflow_dispatch\` pulls one heavy job onto a dev build
+# when a change touched it.
+#
+# \`gate\` needs every job and is the one required check: a job skipped by its tier
+# passes, a failed or cancelled one does not. a new job joins \`gate\`'s needs.
+#
+# every host seeds from the published release .github/actions/seed-mach pins,
+# downloaded and verified against SHA256SUMS in one step.
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      heavy:
+        description: run one of the main-only jobs on this ref
+        type: choice
+        default: none
+        options: [none, qemu, spirv, riscv32, link, dwarf, darwin, release, all]
+
+permissions:
+  contents: read
+
+env:
+  # apt.llvm.org serves one build per major on amd64 and arm64; the goldens are
+  # blessed with this major and test/run.sh warns on any other
+  LLVM_MAJOR: 22
+
+jobs:
+  # what the docs claim, checked against the tree (#3582):
+  # - changelog headings: the #3039 invariant, invisible in any one diff. a pull
+  #   request that adds its own \`## [Unreleased]\` looks right alone and strands a
+  #   heading inside the next release once merged. at most one, it leads, and no
+  #   release repeats a \`###\`.
+  # - documented flags: a flag doc/ attaches to a command that \`mach help\` does
+  #   not list for it (#3579). only two shapes are read, a \`mach <cmd> [<action>]
+  #   ... --flag\` spelling and a paragraph led by **\`--flag\`.** that names the
+  #   commands taking it. a flag documented in any other prose shape is not
+  #   checked. CHANGELOG is history and is not read.
+  # - reference drift: doc/mach and doc/README.md are what \`mach doc .\` writes
+  #   from the fixpoint compiler (#3458). a doc-comment edit whose page was not
+  #   regenerated, and a page whose module is gone, both fail here.
+  # - unshipped markers: a doc/language sentence saying phase N, not yet, a later
+  #   release or planned must cite an open issue (#3581). a closed issue, no
+  #   citation and an unreachable API each fail. a stale marker whose issue stays
+  #   open for an unrelated reason is not caught.
+  # the flag check reads the x86_64-linux fixpoint compiler instead of building
+  # one, so this job waits for that build.
+  docs:
+    name: docs
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-x86_64-linux
+          path: artifact
+      - name: documented flags are accepted
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach
+          python3 .github/scripts/doc-flags.py artifact/mach doc
+      - name: the committed reference is what mach doc generates
+        run: |
+          set -euo pipefail
+          ./artifact/mach dep pull .
+          ./artifact/mach doc . --out out/docgen -q
+          diff -r out/docgen/mach doc/mach
+          diff out/docgen/README.md doc/README.md
+      - name: unshipped markers cite open issues
+        env:
+          GH_TOKEN: \${{ github.token }}
+          GH_REPO: \${{ github.repository }}
+        run: python3 .github/scripts/doc-markers.py doc/language
+      - name: one [Unreleased], first, no repeated subsection
+        run: |
+          set -euo pipefail
+          status=0
+          count=$(grep -c '^## \\[Unreleased\\]$' CHANGELOG.md || true)
+          if [ "$count" -gt 1 ]; then
+            echo "::error file=CHANGELOG.md::$count '## [Unreleased]' headings, fold the later ones into the first"
+            grep -n '^## \\[Unreleased\\]$' CHANGELOG.md
+            status=1
+          fi
+          first=$(grep -m1 '^## \\[' CHANGELOG.md || true)
+          if [ "$count" -gt 0 ] && [ "$first" != '## [Unreleased]' ]; then
+            echo "::error file=CHANGELOG.md::'## [Unreleased]' sits below '$first'"
+            status=1
+          fi
+          dupes=$(awk '/^## \\[/ { section = $0; delete seen; next } /^### / { if ($0 in seen) print section " repeats \\x27" $0 "\\x27"; seen[$0] = 1 }' CHANGELOG.md)
+          if [ -n "$dupes" ]; then
+            echo "::error file=CHANGELOG.md::a release repeats a subsection"
+            echo "$dupes"
+            status=1
+          fi
+          exit $status
+
+  build:
+    name: build \${{ matrix.target }}
+    runs-on: \${{ matrix.runs-on }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-linux,   runs-on: ubuntu-latest }
+          - { target: aarch64-linux,  runs-on: ubuntu-24.04-arm }
+          - { target: x86_64-windows, runs-on: windows-latest }
+    steps:
+      - uses: actions/checkout@v6
+      - name: seed
+        uses: ./.github/actions/seed-mach
+      - name: fixpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=; [ "$RUNNER_OS" = Windows ] && exe=.exe
+          mach dep pull .
+          mach build . -o a$exe
+          ./a$exe build . -o b$exe
+          ./b$exe build . -o c$exe
+          cmp b$exe c$exe || { echo "::error::build did not converge to the fixpoint"; exit 1; }
+          mkdir -p artifact && cp c$exe artifact/mach$exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mach-\${{ matrix.target }}
+          path: artifact/mach*
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    name: test \${{ matrix.target }}
+    needs: build
+    runs-on: \${{ matrix.runs-on }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-linux,   runs-on: ubuntu-latest }
+          - { target: aarch64-linux,  runs-on: ubuntu-24.04-arm }
+          - { target: x86_64-windows, runs-on: windows-latest }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-\${{ matrix.target }}
+          path: artifact
+      - name: unit suite, debug and release
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach*
+          m=$PWD/artifact/mach; [ "$RUNNER_OS" = Windows ] && m=$m.exe
+          "$m" dep pull .
+          "$m" test .
+          "$m" test . --profile release
+      - name: formatter
+        shell: bash
+        run: |
+          m=$PWD/artifact/mach; [ "$RUNNER_OS" = Windows ] && m=$m.exe
+          "$m" fmt --check .
+      - name: cross-compile the compiler
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          for t in darwin-aarch64 darwin-x86_64 linux-riscv64; do
+            ./artifact/mach build . --target "$t" --profile release -o "out/cross-$t"
+          done
+
+  # the warm build path against clean builds, which the from-scratch fixpoint
+  # never reaches (#2045)
+  incremental:
+    name: incremental \${{ matrix.target }}
+    needs: build
+    runs-on: \${{ matrix.runs-on }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-linux,  runs-on: ubuntu-latest }
+          - { target: aarch64-linux, runs-on: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-\${{ matrix.target }}
+          path: artifact
+      - name: warm rebuilds match clean
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach
+          ./artifact/mach dep pull .
+          MACH=$PWD/artifact/mach bash test/run.sh --incremental
+      # here rather than in docs: this job runs on both linux hosts, so the example mains execute on x86_64 and aarch64
+      - name: doc/language code blocks compile and run
+        run: |
+          set -euo pipefail
+          MACH=$PWD/artifact/mach bash test/run.sh --docs
+
+  # the golden disassembly of every ISA and the differential execution on the
+  # host. one linux runner decodes every column; the arm runner adds the aarch64
+  # differential natively, since qemu is compute evidence and not ABI evidence.
+  codegen:
+    name: codegen \${{ matrix.target }}
+    needs: build
+    runs-on: \${{ matrix.runs-on }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-linux,  runs-on: ubuntu-latest,    targets: "--target x86_64-linux --target aarch64-linux --target riscv64-linux --target riscv64zkt-linux --target x86_64-windows --target x86_64-darwin --target aarch64-darwin --target riscv32" }
+          - { target: aarch64-linux, runs-on: ubuntu-24.04-arm, targets: "--target aarch64-linux" }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-\${{ matrix.target }}
+          path: artifact
+      - name: install llvm
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_MAJOR
+          echo "/usr/lib/llvm-$LLVM_MAJOR/bin" >> "$GITHUB_PATH"
+      - name: goldens and differential
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach
+          ./artifact/mach dep pull .
+          MACH=$PWD/artifact/mach bash test/run.sh \${{ matrix.targets }}
+
+  # the riscv64 differential under qemu-user
+  qemu:
+    name: qemu riscv64
+    needs: build
+    if: github.base_ref == 'main' || inputs.heavy == 'qemu' || inputs.heavy == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-x86_64-linux
+          path: artifact
+      - name: install llvm and qemu
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_MAJOR
+          echo "/usr/lib/llvm-$LLVM_MAJOR/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y qemu-user
+      - name: riscv64 differential
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach
+          ./artifact/mach dep pull .
+          MACH=$PWD/artifact/mach bash test/run.sh --qemu --target riscv64-linux --target riscv64zkt-linux
+
+  # the spirv column: build, spirv-val, spirv-dis golden. the pinned spirv-tools
+  # (2026.3) ships in the Vulkan SDK for linux x86_64 only, which bounds this job
+  # to that runner.
+  spirv:
+    name: spirv
+    needs: build
+    if: github.base_ref == 'main' || inputs.heavy == 'spirv' || inputs.heavy == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      VULKAN_SDK_VERSION: 1.4.357.0
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-x86_64-linux
+          path: artifact
+      - name: install spirv-tools from the Vulkan SDK
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz" \\
+            | sudo tar -xJf - -C /usr/local/bin --strip-components=3 "$VULKAN_SDK_VERSION/x86_64/bin/spirv-dis" "$VULKAN_SDK_VERSION/x86_64/bin/spirv-val"
+          spirv-val --version
+      - name: spirv goldens and the debug model
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach
+          ./artifact/mach dep pull .
+          MACH=$PWD/artifact/mach bash test/run.sh --target spirv --dwarf
+
+  # the riscv32 differential under qemu-user: the freestanding column's run bins,
+  # re-laid for the loader by test/lib/elf_loadable.py. the goldens run on every
+  # pull request in codegen; golden/riscv32/NORUN lists the cases whose
+  # differential is known wrong today and SKIPS the ones that do not build.
+  riscv32:
+    name: qemu riscv32
+    needs: build
+    if: github.base_ref == 'main' || inputs.heavy == 'riscv32' || inputs.heavy == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-x86_64-linux
+          path: artifact
+      - name: install llvm and qemu
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_MAJOR
+          echo "/usr/lib/llvm-$LLVM_MAJOR/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y qemu-user
+      - name: riscv32 differential
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach
+          ./artifact/mach dep pull .
+          MACH=$PWD/artifact/mach bash test/run.sh --qemu --target riscv32
+
+  # the link cases on every leg. the linux x86_64 leg carries every cross-built
+  # format (PE, Mach-O, raw, spirv) and the riscv64 cases under qemu; the arm and
+  # windows legs run what executes natively there.
+  link:
+    name: link \${{ matrix.target }}
+    needs: build
+    if: github.base_ref == 'main' || inputs.heavy == 'link' || inputs.heavy == 'all'
+    runs-on: \${{ matrix.runs-on }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-linux,   runs-on: ubuntu-latest }
+          - { target: aarch64-linux,  runs-on: ubuntu-24.04-arm }
+          - { target: x86_64-windows, runs-on: windows-latest }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-\${{ matrix.target }}
+          path: artifact
+      - name: install the readers
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_MAJOR
+          echo "/usr/lib/llvm-$LLVM_MAJOR/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y binutils gdb
+      - name: install qemu, the riscv64 libc headers and spirv-tools
+        if: matrix.target == 'x86_64-linux'
+        env:
+          VULKAN_SDK_VERSION: 1.4.357.0
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y qemu-user libc6-dev-riscv64-cross
+          curl -fsSL "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz" \\
+            | sudo tar -xJf - -C /usr/local/bin --strip-components=3 "$VULKAN_SDK_VERSION/x86_64/bin/spirv-dis" "$VULKAN_SDK_VERSION/x86_64/bin/spirv-val"
+          spirv-val --version
+      - name: link cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach*
+          m=$PWD/artifact/mach; [ "$RUNNER_OS" = Windows ] && m=$m.exe
+          "$m" dep pull .
+          qemu=; [ "\${{ matrix.target }}" = x86_64-linux ] && qemu=--qemu
+          MACH=$m bash test/run.sh --link $qemu
+
+  # every case built with -g through llvm-dwarfdump --verify on the ELF and
+  # Mach-O targets
+  dwarf:
+    name: dwarf
+    needs: build
+    if: github.base_ref == 'main' || inputs.heavy == 'dwarf' || inputs.heavy == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: mach-x86_64-linux
+          path: artifact
+      - name: install llvm
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_MAJOR
+          echo "/usr/lib/llvm-$LLVM_MAJOR/bin" >> "$GITHUB_PATH"
+      - name: dwarf verify
+        run: |
+          set -euo pipefail
+          chmod +x artifact/mach
+          ./artifact/mach dep pull .
+          MACH=$PWD/artifact/mach bash test/run.sh --dwarf --target x86_64-linux --target aarch64-linux --target riscv64-linux --target riscv64zkt-linux --target x86_64-windows --target x86_64-darwin --target aarch64-darwin
+
+  # the darwin hosts natively, on the metered runners: each host seeds from its
+  # own published archive, reaches its own fixpoint and runs the unit suite.
+  # this is the release gate.
+  darwin:
+    name: darwin \${{ matrix.target }}
+    needs: build
+    if: github.base_ref == 'main' || inputs.heavy == 'darwin' || inputs.heavy == 'all'
+    runs-on: \${{ matrix.runs-on }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64-darwin must self-host on real Intel silicon: under Rosetta 2
+          # mach's raw bsdthread_create worker threads crash (#2104)
+          - { target: aarch64-darwin, runs-on: macos-15,       machine: arm64 }
+          - { target: x86_64-darwin,  runs-on: macos-15-intel, machine: x86_64 }
+    steps:
+      - uses: actions/checkout@v6
+      - name: seed
+        uses: ./.github/actions/seed-mach
+      - name: fixpoint and unit suite
+        env:
+          WANT: \${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          got=$(uname -m); translated=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
+          [ "$got" = "$WANT" ] && [ "$translated" = 0 ] || { echo "::error::the $WANT lane landed on a $got host (proc_translated=$translated)"; exit 1; }
+          mach dep pull .
+          mach build . -o a
+          ./a build . -o b
+          ./b build . -o c
+          cmp b c || { echo "::error::darwin build did not converge to the fixpoint"; exit 1; }
+          ./c test .
+          ./c test . --profile release
+
+  # the binary cd.yml ships is the release-profile build, so it must reach its
+  # own fixpoint and pass the unit suite before main takes the change
+  release:
+    name: release \${{ matrix.target }}
+    if: github.base_ref == 'main' || inputs.heavy == 'release' || inputs.heavy == 'all'
+    runs-on: \${{ matrix.runs-on }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-linux,   runs-on: ubuntu-latest }
+          - { target: aarch64-linux,  runs-on: ubuntu-24.04-arm }
+          - { target: x86_64-windows, runs-on: windows-latest }
+    steps:
+      - uses: actions/checkout@v6
+      - name: seed
+        uses: ./.github/actions/seed-mach
+      - name: release fixpoint and unit suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=; [ "$RUNNER_OS" = Windows ] && exe=.exe
+          mach dep pull .
+          mach build . --profile release -o a$exe
+          ./a$exe build . --profile release -o b$exe
+          ./b$exe build . --profile release -o c$exe
+          cmp b$exe c$exe || { echo "::error::release build did not converge to the fixpoint"; exit 1; }
+          ./c$exe test .
+          ./c$exe test . --profile release
+
+  # the one required check. skipped is a pass, so a tier that leaves a job out
+  # does not block, and a failed or cancelled job does.
+  gate:
+    name: gate
+    if: always()
+    needs: [docs, build, test, incremental, codegen, qemu, spirv, riscv32, link, dwarf, darwin, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every needed job passed or was skipped
+        env:
+          NEEDS: \${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS" | jq -r 'to_entries[] | "\\(.value.result)\\t\\(.key)"' | sort
+          bad=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key] | join(" ")')
+          [ -z "$bad" ] || { echo "::error::gate: not passed: $bad"; exit 1; }
+`;
+
+export const MACH_RUN = 35781279928;
+
+export const MACH_JOBS = [
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927085973", "id": 106927085973, "name": "build x86_64-windows", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927086217", "id": 106927086217, "name": "build aarch64-linux", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927086404", "id": 106927086404, "name": "build x86_64-linux", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "skipped", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927087437", "id": 106927087437, "name": "release ${{ matrix.target }}", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "failure", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927768531", "id": 106927768531, "name": "docs", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927768569", "id": 106927768569, "name": "codegen x86_64-linux", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927768585", "id": 106927768585, "name": "test x86_64-linux", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927768590", "id": 106927768590, "name": "test aarch64-linux", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927768595", "id": 106927768595, "name": "incremental aarch64-linux", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927768674", "id": 106927768674, "name": "test x86_64-windows", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927768727", "id": 106927768727, "name": "incremental x86_64-linux", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "success", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927768850", "id": 106927768850, "name": "codegen aarch64-linux", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "skipped", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927770217", "id": 106927770217, "name": "darwin ${{ matrix.target }}", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "skipped", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927770735", "id": 106927770735, "name": "dwarf", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "skipped", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927770751", "id": 106927770751, "name": "link ${{ matrix.target }}", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "skipped", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927770798", "id": 106927770798, "name": "qemu riscv64", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "skipped", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927770828", "id": 106927770828, "name": "qemu riscv32", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "skipped", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106927771065", "id": 106927771065, "name": "spirv", "run_id": 35781279928, "status": "completed"},
+  {"conclusion": "failure", "head_sha": "40d626492bb65d0cbe06344b258df3510a84923a", "html_url": "https://github.com/briar-systems/mach/actions/runs/35781279928/job/106931349266", "id": 106931349266, "name": "gate", "run_id": 35781279928, "status": "completed"},
+];

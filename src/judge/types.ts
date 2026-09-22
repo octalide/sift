@@ -52,20 +52,47 @@ export const KEY_SOURCE_LABEL: Record<KeySource, string> = {
   settings: 'TYPESAFE_API_KEY in the settings env block',
 };
 
+// what to change when jev rejects the key from each source
+export const KEY_SOURCE_FIX: Record<KeySource, string> = {
+  option:
+    "set a new key in the plugin's options, or clear the option to fall back to TYPESAFE_API_KEY (the option is stored in ~/.claude/.credentials.json, not in a settings file)",
+  env: 'export a valid TYPESAFE_API_KEY',
+  settings: 'update env.TYPESAFE_API_KEY in the settings file',
+};
+
+// a key named without its value: where it came from and its last four characters
+export type KeyRef = { source: KeySource; ending: string };
+
+// the key in use, and every other source that holds a key, marked when that key is the same one
+export type KeyOrigin = KeyRef & { others: (KeyRef & { same: boolean })[] };
+
+export function keyRefText(k: KeyRef): string {
+  return `${KEY_SOURCE_LABEL[k.source]} (ending ${k.ending})`;
+}
+
+// the sources holding a different key than the one in use, as one clause each, empty when they agree
+export function shadowedText(origin: KeyOrigin): string[] {
+  return origin.others.filter((o) => !o.same).map((o) => `${keyRefText(o)} is set but shadowed`);
+}
+
 // what a call cost: the backend's own count when it reports one, else an estimate from the bytes sent and received
 export type Usage = { requestTokens: number; responseTokens: number; source: 'backend' | 'estimate' };
 
 export type Judgement =
   | { ok: true; answers: Answers; backend: string; latencyMs: number; usage?: Usage }
-  | { ok: false; reason: JudgeFailure; message: string; backend: string; status?: number; keySource?: KeySource; usage?: Usage };
+  | { ok: false; reason: JudgeFailure; message: string; backend: string; status?: number; key?: KeyOrigin; usage?: Usage };
 
-// a failure as one line; keySource is set only when the backend refused the key
-export function failureText(f: { reason: JudgeFailure; message: string; keySource?: KeySource }): string {
-  return f.keySource ? `${f.reason} (key from ${KEY_SOURCE_LABEL[f.keySource]}): ${f.message}` : `${f.reason}: ${f.message}`;
+// a failure as one line; key is set only when the backend rejected the key, and then the line names it and the fix
+export function failureText(f: { reason: JudgeFailure; message: string; key?: KeyOrigin }): string {
+  if (!f.key) return `${f.reason}: ${f.message}`;
+  const clauses = [`jev rejected the key from ${keyRefText(f.key)}`, `fix: ${KEY_SOURCE_FIX[f.key.source]}`, ...shadowedText(f.key), f.message];
+  return `${f.reason}: ${clauses.join('; ')}`;
 }
 
 export interface Judge {
   readonly name: string;
+  // true once the backend has rejected its key; every later call fails without a request
+  readonly keyRejected?: boolean;
   ask(state: unknown, questions: Questions): Promise<Judgement>;
 }
 
