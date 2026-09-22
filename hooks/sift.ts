@@ -11,9 +11,9 @@ import { localSource, remoteSource } from '../src/repo/source.ts';
 import { ciSubject } from '../src/ci/log.ts';
 import { indexTree, treeSubject } from '../src/locate/tree.ts';
 import { checkoutSource, forgeSource, type RuleSource } from '../src/rules/discover.ts';
-import { digestOf, JUDGE_DEFAULTS, LoggedJudge, makeJudge, type Backend, type Decision } from '../src/judge/index.ts';
+import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
 import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
-import type { Answer, Judge, Questions } from '../src/judge/types.ts';
+import { failureText, type Answer, type Judge, type Questions } from '../src/judge/types.ts';
 import { DecisionLog, type Cost, type StoreLike } from '../src/log.ts';
 import { loadPacks } from '../src/packs/load.ts';
 import { formatReport, runPack } from '../src/packs/run.ts';
@@ -97,6 +97,8 @@ export function resolveOptions(raw: PluginOptions): Options {
 // everything the hooks share once the session is bound
 type Runtime = {
   judge: Judge;
+  // the jev key and its source, for the status line
+  apiKey?: ApiKey;
   log: DecisionLog;
   config: RepoConfig;
   packs: Record<string, Pack>;
@@ -129,13 +131,8 @@ async function readJson($: EngineInterface, path: string | undefined): Promise<u
   return JSON.parse(await $.fs.read(path));
 }
 
-async function apiKeyOf($: EngineInterface, options: Options): Promise<string | undefined> {
-  if (options.apiKey) return options.apiKey;
-  const env = await $.env.get('TYPESAFE_API_KEY');
-  if (env) return env;
-  const settings = await $.settings.read();
-  const fromSettings = (settings['env'] as Record<string, unknown> | undefined)?.['TYPESAFE_API_KEY'];
-  return typeof fromSettings === 'string' && fromSettings ? fromSettings : undefined;
+async function apiKeyOf($: EngineInterface, options: Options): Promise<ApiKey | undefined> {
+  return resolveApiKey({ option: options.apiKey, env: () => $.env.get('TYPESAFE_API_KEY'), settings: () => $.settings.read() });
 }
 
 async function lastUserText($: EngineInterface): Promise<string> {
@@ -296,7 +293,7 @@ export const register: Register = (on, rawOptions) => {
     const log = new DecisionLog(store, sessionId);
     const apiKey = await apiKeyOf($, options);
     const inner = makeJudge(
-      { backend: options.backend, apiKey, jevModel: options.jevModel, jevBaseUrl: options.jevBaseUrl, fallbackModel: options.fallbackModel },
+      { backend: options.backend, apiKey: apiKey?.key, keySource: apiKey?.source, jevModel: options.jevModel, jevBaseUrl: options.jevBaseUrl, fallbackModel: options.fallbackModel },
       {
         fetch: (url, init) => $.http.fetch(url, init),
         complete: (request) => $.model.complete(request),
@@ -372,7 +369,7 @@ export const register: Register = (on, rawOptions) => {
       await watcher.start();
       return undefined;
     };
-    runtime = { judge, log, config, packs, repo: checkout?.repo, root, forge, git, store, channels: channelTable(defaultChannels(forge), config.outbound.channels), startWatch, sessionId };
+    runtime = { judge, apiKey, log, config, packs, repo: checkout?.repo, root, forge, git, store, channels: channelTable(defaultChannels(forge), config.outbound.channels), startWatch, sessionId };
     $.ui.log(`sift: judge ${judge.name}, repo ${runtime.repo ?? 'none'}, packs ${Object.keys(packs).join(' ')}`);
 
     if (options.grade) {
@@ -468,7 +465,7 @@ export const register: Register = (on, rawOptions) => {
     record('judge-tool', result.ok ? 'answered' : 'failed');
     const text = result.ok
       ? Object.entries(result.answers).map(([id, a]) => `${id}: ${answerLabel(a)}`).join('\n')
-      : `judge unavailable: ${result.reason}: ${result.message}`;
+      : `judge unavailable: ${failureText(result)}`;
     return result.ok ? { result: [{ type: 'text', text }] } : { deny: text };
   });
 
@@ -476,7 +473,7 @@ export const register: Register = (on, rawOptions) => {
     const input = e as unknown as { items: RankItem[]; questions: Questions; mode?: RankOptions['mode']; context?: Record<string, unknown>; by?: string; choice?: string; fields?: string[] };
     const result = await rank(input.items, input.questions, ready().judge, { mode: input.mode ?? 'batched', context: input.context, by: input.by, choice: input.choice, fields: input.fields });
     record('rank-tool', result.ok ? 'ranked' : 'failed', { digest: `${input.items.length} items, ${result.requests} requests` });
-    if (!result.ok) return { deny: `rank unavailable: ${result.reason}: ${result.message}` };
+    if (!result.ok) return { deny: `rank unavailable: ${failureText(result)}` };
     const lines = result.sorted.map((r) => `${r.index}: ${r.value.toFixed(3)} ${Object.entries(r.answers).map(([id, a]) => `${id}=${answerLabel(a)}`).join(' ')} ${digestOf(r.item)}`);
     return { result: [{ type: 'text', text: [`${result.items.length} items in ${result.requests} request${result.requests === 1 ? '' : 's'}, sorted by ${input.by ?? Object.keys(input.questions)[0]}`, ...lines].join('\n') }] };
   });
@@ -570,6 +567,7 @@ export const register: Register = (on, rawOptions) => {
     const watch = !rt.watcher ? 'watch: off' : `watch: ${w!.paused ? 'paused' : 'running'} on ${options.watchRepo || rt.repo}, ${w!.deferred.length} deferred, last poll ${w!.lastPoll ? new Date(w!.lastPoll).toISOString() : 'never'}`;
     return [
       `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${rt.repo ?? 'none'}`,
+      judgeLine(rt.judge.name, rt.apiKey),
       `enabled: ${enabled}`,
       watch,
       `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,
