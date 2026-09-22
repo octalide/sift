@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GitHubForge, splitJobLog, templateKind } from '../src/forge/github.ts';
+import { MACH_CI, MACH_JOBS, MACH_RUN } from './fixtures/mach-ci.ts';
 
 type Reply = { status?: number; body?: unknown; etag?: string; headers?: string[] };
 
@@ -158,6 +159,8 @@ describe('github forge', () => {
         'repos/o/r/actions/jobs/7/logs': { body: log, headers: ['Content-Type: text/plain', 'Content-Length: 19481', 'Server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0'] },
         'repos/o/r/actions/jobs/7': { body: { id: 7, run_id: 3, head_sha: 'abc', name: 'codegen', status: 'completed', conclusion: 'failure', html_url: 'https://x/job/7' } },
         'repos/o/r/actions/runs/3/jobs': { body: [{ id: 7, run_id: 3, head_sha: 'abc', name: 'codegen', status: 'completed', conclusion: 'failure', html_url: 'https://x/job/7' }] },
+        // a run record without a workflow path: nothing to read needs from
+        'repos/o/r/actions/runs/3': { body: { id: 3, head_sha: 'abc' } },
       },
       calls,
     );
@@ -176,5 +179,43 @@ describe('github forge', () => {
     expect(logsCall).not.toContain('Accept:');
     expect(await forge.jobs('o/r', '3')).toEqual([{ id: '7', name: 'codegen', run: '3', sha: 'abc', done: true, conclusion: 'failure', ok: false, url: 'https://x/job/7' }]);
     expect(splitJobLog('')).toEqual([]);
+  });
+
+  it('fills each job\'s needs from the workflow file at the run\'s sha, matrix and skipped jobs included', async () => {
+    const calls: string[] = [];
+    const sha = '40d626492bb65d0cbe06344b258df3510a84923a';
+    const forge = github(
+      {
+        [`repos/o/r/actions/runs/${MACH_RUN}/jobs`]: { body: MACH_JOBS },
+        [`repos/o/r/actions/runs/${MACH_RUN}`]: { body: { id: MACH_RUN, head_sha: sha, path: '.github/workflows/ci.yml' } },
+        [`repos/o/r/contents/.github/workflows/ci.yml?ref=${sha}`]: { body: MACH_CI },
+      },
+      calls,
+    );
+    const jobs = await forge.jobs('o/r', String(MACH_RUN));
+    const ids = (...names: string[]): string[] => jobs.filter((j) => names.includes(j.name)).map((j) => j.id);
+    const needs = (name: string): string[] | undefined => jobs.find((j) => j.name === name)!.needs;
+    const builds = ids('build x86_64-windows', 'build aarch64-linux', 'build x86_64-linux');
+    expect(builds).toHaveLength(3);
+    expect(needs('build x86_64-linux')).toEqual([]);
+    expect(needs('docs')).toEqual(builds);
+    expect(needs('test aarch64-linux')).toEqual(builds);
+    // a skipped matrix job keeps its name unrendered
+    expect(needs('darwin ${{ matrix.target }}')).toEqual(builds);
+    expect(needs('release ${{ matrix.target }}')).toEqual([]);
+    expect(needs('qemu riscv32')).toEqual(builds);
+    const gate = needs('gate')!;
+    expect(gate).toHaveLength(jobs.length - 1);
+    expect(gate).toContain(ids('docs')[0]);
+    expect(new Set(gate)).toEqual(new Set(jobs.filter((j) => j.name !== 'gate').map((j) => j.id)));
+    expect(calls.some((c) => c.includes(`contents/.github/workflows/ci.yml?ref=${sha}`))).toBe(true);
+  });
+
+  it('leaves needs unset when the workflow file cannot be read', async () => {
+    const forge = github({
+      'repos/o/r/actions/runs/3/jobs': { body: [{ id: 7, run_id: 3, head_sha: 'abc', name: 'gate', status: 'completed', conclusion: 'failure', html_url: 'u' }] },
+      'repos/o/r/actions/runs/3': { body: { id: 3, head_sha: 'abc', path: '.github/workflows/gone.yml' } },
+    });
+    expect((await forge.jobs('o/r', '3'))[0]!.needs).toBeUndefined();
   });
 });
