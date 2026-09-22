@@ -1,4 +1,4 @@
-import type { Answer, Answers, Judge, Judgement, KeySource, Questions, Usage } from './types.ts';
+import type { Answer, Answers, Judge, Judgement, KeyOrigin, Questions, Usage } from './types.ts';
 import { estimateTokens } from '../tokens.ts';
 
 export type FetchLike = (
@@ -10,7 +10,8 @@ export type JevConfig = {
   apiKey: string;
   model: string;
   baseUrl: string;
-  keySource?: KeySource;
+  // where the key came from, named on a rejection; never the key
+  keyOrigin?: KeyOrigin;
 };
 
 export const JEV_DEFAULTS = {
@@ -117,13 +118,20 @@ export function parseResponse(text: string, questions: Questions): Answers | str
 
 export class JevJudge implements Judge {
   readonly name = 'jev';
+  // the failure of the call that had the key rejected; the key is resolved once per session, so it stays rejected
+  private rejection?: Judgement & { ok: false };
   constructor(
     private readonly config: JevConfig,
     private readonly fetchFn: FetchLike,
     private readonly now: () => number = () => Date.now(),
   ) {}
 
+  get keyRejected(): boolean {
+    return this.rejection !== undefined;
+  }
+
   async ask(state: unknown, questions: Questions): Promise<Judgement> {
+    if (this.rejection) return this.rejection;
     const request = buildRequest(this.config, state, questions);
     const started = this.now();
     let response: { status: number; ok: boolean; text: string };
@@ -137,10 +145,13 @@ export class JevJudge implements Judge {
     if (response.status === 422) {
       return { ok: false, reason: 'rejected', message: response.text.slice(0, 300), backend: this.name, usage };
     }
+    if (response.status === 401 || response.status === 403) {
+      const message = `http ${response.status}: ${response.text.slice(0, 300)}`;
+      this.rejection = { ok: false, reason: 'unavailable', message, backend: this.name, status: response.status, key: this.config.keyOrigin };
+      return { ...this.rejection, usage };
+    }
     if (!response.ok) {
-      // an authentication refusal names where the key came from, since the key that was sent may not be the one in view
-      const keySource = response.status === 401 || response.status === 403 ? this.config.keySource : undefined;
-      return { ok: false, reason: 'unavailable', message: `http ${response.status}: ${response.text.slice(0, 300)}`, backend: this.name, status: response.status, keySource, usage };
+      return { ok: false, reason: 'unavailable', message: `http ${response.status}: ${response.text.slice(0, 300)}`, backend: this.name, status: response.status, usage };
     }
     const answers = parseResponse(response.text, questions);
     if (typeof answers === 'string') {
