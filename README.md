@@ -262,14 +262,24 @@ Three modules act inside the session without being asked.
 
 ### Prune
 
-Output over `pruneFloorTokens` (estimated) from the tools in `pruneTools` is split into chunks of `pruneChunkLines` lines and ranked, batched, against the last user prompt: is this chunk needed for the current task. A chunk below `pruneKeepThreshold` is dropped. Nothing is kept on disk. In its place stands a one-line note with the omitted line range and how to get it back:
+Output over `pruneFloorTokens` (estimated) from the tools in `pruneTools` is split into chunks of `pruneChunkLines` lines and ranked, batched, against the calling loop's task: is this chunk needed for the current task. A chunk below `pruneKeepThreshold` is dropped. Nothing is kept on disk. In its place stands a one-line note with the omitted line range, how to get it back, and how to keep such output whole:
 
 ```
-[sift: lines 51-75 (25 lines) omitted as not needed for the current task, re-read src/watch/watcher.ts with offset 51 limit 25]
-[sift: lines 120-180 (61 lines) omitted as not needed for the current task, rerun the command for the full output]
+[sift: lines 51-75 (25 lines) omitted as not needed for the current task, re-read src/watch/watcher.ts with offset 51 limit 25, or call mcp__sift__prune off to read files whole]
+[sift: lines 120-180 (61 lines) omitted as not needed for the current task, rerun the command for the full output, or end a command with # sift: full to keep its output whole]
 ```
 
 For a Read the range is in file lines (the call's offset is applied), so the re-read named by the note lands on the omitted text. A judge failure passes the output through untouched.
+
+The task is the calling loop's own. In a subagent it is the prompt the subagent was spawned with, recorded by the `agent.spawn` hook under its agentId. In the main loop it is the newest prompt a person submitted (origin `composer`, `bridge` or `sdk`); a plugin's prompt such as a watch delivery, a task notification, a peer session's message and `/sift` itself leave it as it was. A loop with no recorded task (a subagent spawned before the plugin loaded) is not pruned.
+
+Before any judge call, prune backs off mechanically, at no cost, and passes the output untouched when:
+
+1. a Read has `offset` or `limit`: the read is targeted,
+2. a Read of a path, or a Bash command, had output dropped earlier in this loop's task: a re-read means the prune was wrong for this task, so it stays whole for the rest of the task,
+3. a Read is of a path the loop's task names, whole or as a path's tail (`hooks/sift.ts`, `README.md`, a `:line` suffix ignored).
+
+Each back-off is logged as `prune none` with its reason, so `/sift log` shows why. To keep output whole on purpose, a Bash command that carries the marker `# sift: full` is not pruned, and the `prune` tool turns pruning `off` for the calling loop alone, until its next task (for a subagent, the rest of its run) or, with `calls`, for that many outputs over the floor, and `on` again. `/sift prune off [n]` and `/sift prune on` do the same for the main loop from the prompt.
 
 ### Outbound text
 
@@ -366,7 +376,7 @@ A subscription's `ci` sets what CI reaches it: `failures` (the default, from `wa
 
 ## Tools and command
 
-The tools are registered under the plugin's name, so the model sees `mcp__sift__grade`, `mcp__sift__judge`, `mcp__sift__rank`, `mcp__sift__watch` and `mcp__sift__status`.
+The tools are registered under the plugin's name, so the model sees `mcp__sift__grade`, `mcp__sift__judge`, `mcp__sift__rank`, `mcp__sift__watch`, `mcp__sift__prune` and `mcp__sift__status`.
 
 | tool | takes | returns |
 |---|---|---|
@@ -374,9 +384,10 @@ The tools are registered under the plugin's name, so the model sees `mcp__sift__
 | `judge` | `state`, `questions` | the answers |
 | `rank` | `items`, `questions`, optional `mode`, `context`, `by`, `choice`, `fields` | the items with their answers, and the sorted view |
 | `watch` | `action`: `subscribe`, `unsubscribe`, `list`, `start`, `status`, `poll`, `pause`, `resume`, `reset`, `deferred`; `repo`, `scope`, `items`, `ci`, `stall`, `until` on `subscribe`; `id` on `unsubscribe`; `for` on `start`; `repo` narrows `poll`, `pause`, `resume`, `reset` and `deferred` | the subscription made, the list, or the pollers' state |
+| `prune` | `action`: `off` or `on`; `calls` on `off` | what now holds for the calling loop |
 | `status` | nothing | backend (for jev, where its key came from, the key's last four characters, a shadowed key and a rejected key), modules, whether the watch runs, decision counts |
 
-`grade`, `judge` and `rank` are registered when the `grade` option is on, `watch` and `status` always. `watch subscribe` adds a subscription and returns its id (the same subscription again returns the one already there), `unsubscribe` removes one, and `list` and `status` show every subscription with its scope, filter, owner and until. `start` subscribes to the caller's repository with the configured filter, or to one pull request when `for` names it (a number, `#` optional) or one branch (anything else). From a subagent, a `start` with `for` lasts `until: settled` unless it says otherwise. The caller's repository, for `start` and for a `subscribe` that names none, is the one checked out in the directory the calling subagent was spawned in (as for `grade`), else the session's. `poll` polls once now, `reset` forgets a repository's cursor and reseeds.
+`grade`, `judge` and `rank` are registered when the `grade` option is on, `prune` when the `prune` option is on, `watch` and `status` always. `prune off` keeps the calling loop's Bash and Read output whole until that loop's next task, or for `calls` outputs over the floor, and `on` turns pruning back on there; no other loop is touched (see Prune). `watch subscribe` adds a subscription and returns its id (the same subscription again returns the one already there), `unsubscribe` removes one, and `list` and `status` show every subscription with its scope, filter, owner and until. `start` subscribes to the caller's repository with the configured filter, or to one pull request when `for` names it (a number, `#` optional) or one branch (anything else). From a subagent, a `start` with `for` lasts `until: settled` unless it says otherwise. The caller's repository, for `start` and for a `subscribe` that names none, is the one checked out in the directory the calling subagent was spawned in (as for `grade`), else the session's. `poll` polls once now, `reset` forgets a repository's cursor and reseeds.
 
 ```
 s1 octalide/sift repo · items, ci failures, stall
@@ -402,7 +413,7 @@ ci settled success: pr #3770 feat/3770 @3f2a9c1: ... (4 checks) · now: open, he
 
 So a subagent that waits on CI subscribes (`watch start` with `for`, or `subscribe`), then carries on or ends its turn: the verdict resumes it. It never blocks or polls. A tool call cannot wait for it anyway, since the engine caps a hook at 10 s. The `watch` tool's answer to a subagent's subscribe says this. Deliveries still waiting for their agent are kept in the plugin store, so a reload loses none, and `status` lists them. Under `watchDelivery: log`, every delivery is written to the transcript instead, an agent's under a `sift watch to <agentId>:` line. Nothing about agent names or branch conventions is inferred. A session that will act on repository events calls `status` at start to learn whether they will arrive as prompts.
 
-`/sift` prints status and per-module decision counts (the same text as the `status` tool), a judge line naming the backend and, for jev, where its key came from and the key's last four characters (never the key), any other source holding a different key as set but shadowed, and whether jev has rejected the key, with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, and `/sift watch status|list|start|poll|pause|resume|reset|deferred [repo]`, `/sift watch subscribe <repo> [scope]` and `/sift watch unsubscribe <id>` control the watch as the tool does.
+`/sift` prints status and per-module decision counts (the same text as the `status` tool), a judge line naming the backend and, for jev, where its key came from and the key's last four characters (never the key), any other source holding a different key as set but shadowed, and whether jev has rejected the key, with this session's decisions and failures separate from the ring shared by every session running the plugin, and a cost line: judge tokens in and out (the backend's own count when it reports one, an estimate otherwise) against context tokens removed by pruning, per session and per module. A module that fell back to the built-in behaviour since the last prompt says so once as context beside the next prompt, so a failing backend is visible while it fails and not as a count afterwards. `/sift log [n]` prints the recent decisions with their scores, `/sift clear` clears them, `/sift prune off [n]` and `/sift prune on` turn pruning off and on for the main loop as the tool does for its caller, and `/sift watch status|list|start|poll|pause|resume|reset|deferred [repo]`, `/sift watch subscribe <repo> [scope]` and `/sift watch unsubscribe <id>` control the watch as the tool does.
 
 ## Options
 
@@ -416,7 +427,7 @@ Every option, with its default. The same descriptions are in `.claude-plugin/plu
 | `jevBaseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint. Change it only for a proxy or a compatible local server |
 | `fallbackModel` | `haiku` | model used by the model backend, an alias or a full id |
 | `shadow` | `false` | every module logs what it would have done and does nothing |
-| `prune` | `true` | score long tool outputs before the model reads them and drop the chunks the judge marks unneeded |
+| `prune` | `true` | score long tool outputs against the calling loop's task before the model reads them and drop the chunks the judge marks unneeded. Targeted reads, repeats of pruned output and reads of paths the task names pass whole, and `# sift: full` or the `prune` tool keep output whole on purpose |
 | `pruneFloorTokens` | `4000` | tool outputs under this estimated size pass through untouched |
 | `pruneChunkLines` | `25` | lines per scored chunk |
 | `pruneKeepThreshold` | `0.5` | minimum probability that a chunk is needed. Below it the chunk is replaced by an omission note |
@@ -475,6 +486,10 @@ Changed: the `issue` pack judges an issue as it stands, its body amended by late
 Fixed: the watch drops superseded CI news. A newer completed run of the same workflow on the same PR or branch drops the older ones still held or about to be delivered, and a settled verdict on a PR head drops what was held for its older heads. An event that ages out is read again first (the PR's head and checks, or the branch's runs), so a failure since fixed or a run on a head that has since moved is no longer delivered hours late. Every CI delivery line ends with `now:`, the PR's state (open with its head unchanged or moved, merged, closed) or the branch's newest result of that workflow. The `Forge` interface gains `branchRuns`, the newest runs on one branch. The stored watch state changes shape, so the first poll after the upgrade reseeds and a backlog held by an older version is dropped.
 
 Added: `grade` takes `cwd` and reads the checkout of that directory, or of the directory the calling subagent was spawned in, instead of always the session's main working tree: its HEAD, working tree, repository, conventions and packs. A `commit`, `pr` range or `locate` grade whose `repo` is not its checkout's repository is refused, where `commit` ignored `repo` and `locate` read the session's checkout. A grade of an issue, PR, plan or ci log in another repository applies that repository's conventions, where it applied the session's.
+
+Changed: prune judges output against the calling loop's own task, a subagent's spawn prompt or the main loop's newest prompt from a person, where it read the newest user-role message of the main conversation, which inside a subagent was the main session's and in the main loop could be a watch delivery or a task notification. A loop with no recorded task is not pruned. A Read with `offset` or `limit`, a repeat of a Read or Bash command whose output was pruned in the same task, and a Read of a path the task names pass untouched with no judge call, each logged as `prune none` with its reason. The omission note names the opt-out.
+
+Added: the `prune` tool (`off`, `on`) and `/sift prune off [n]|on`, which turn pruning off for one loop until its next task or for a number of outputs, and the `# sift: full` marker, which keeps one Bash command's output whole.
 
 ## Changes in 0.10.0
 
