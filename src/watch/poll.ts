@@ -231,9 +231,17 @@ export function formatEvent(e: WatchEvent): string {
   return head;
 }
 
-// the agent a ci verdict is for: the one armed for the pr's number or head branch, else whoever armed the watch last
+// the agent a ci verdict is for: the one armed for the pr's number or head branch. once any agent is armed for a pr,
+// a verdict matching none is for nobody; only a watch armed without refs falls back to whoever armed it last
 export function armedAgent(e: WatchEvent, state: Pick<WatchState, 'armedBy' | 'armedFor'>): string | undefined {
   if (e.kind !== 'ci' || !(e.settled || e.stalled)) return undefined;
-  const match = (state.armedFor ?? []).find((a) => a.ref === String(e.number) || a.ref === e.branch);
-  return match?.agent ?? state.armedBy;
+  if (!state.armedFor?.length) return state.armedBy;
+  return state.armedFor.find((a) => a.ref === String(e.number) || a.ref === e.branch)?.agent;
+}
+
+// the agent a delivery's header names: whoever armed the watch last, unless the delivery carries a ci event that
+// names no agent while agents are armed for prs, which would otherwise be relayed to an agent it has nothing to do with
+export function deliveryAgent(events: WatchEvent[], state: Pick<WatchState, 'armedBy' | 'armedFor'>): string | undefined {
+  if (!state.armedFor?.length) return state.armedBy;
+  return events.some((e) => e.kind === 'ci' && !armedAgent(e, state)) ? undefined : state.armedBy;
 }

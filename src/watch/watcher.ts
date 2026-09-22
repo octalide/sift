@@ -6,7 +6,7 @@ import { formatReport, runChecks, runPack } from '../packs/run.ts';
 import { issueSubject } from '../repo/subjects.ts';
 import { ciSubject } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
-import { armedAgent, diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
+import { armedAgent, deliveryAgent, diffItems, diffRuns, formatEvent, initialState, pendingChecks, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type WatchEvent, type WatchState } from './poll.ts';
 import { eventSubject, judgeEvent, routeByRules, type EventDetail, type WatchRules } from './triage.ts';
 
 export type WatchOptions = {
@@ -434,7 +434,8 @@ export class Watcher {
   }
 
   private render(items: { event: WatchEvent; label: string }[]): string {
-    const lines = [`[sift watch ${this.options.repo}${this.state.armedBy ? ` for ${this.state.armedBy}` : ''}]`];
+    const by = deliveryAgent(items.map((i) => i.event), this.state);
+    const lines = [`[sift watch ${this.options.repo}${by ? ` for ${by}` : ''}]`];
     for (const { event, label } of items) {
       const agent = armedAgent(event, this.state);
       lines.push(`${agent ? `for ${agent}: ` : ''}${formatEvent(event)}`);
@@ -481,7 +482,7 @@ export function armingAgent(agentId: string | undefined, agents: { id: string; n
 
 // what a subagent that armed the watch is told: the plugin submits prompts to the session's main loop only
 export function armedNotice(by: string): string {
-  return `armed from agent ${by}: deliveries are submitted to the session's main loop, not to this agent. Nothing reaches you unless the session relays it (each delivery names you as \`for ${by}\`), so do not end your turn expecting a delivery to arrive on its own.`;
+  return `armed from agent ${by}: deliveries are submitted to the session's main loop, not to this agent. Nothing reaches you unless the session relays it (each delivery for you names you as \`for ${by}\`), so do not end your turn expecting a delivery to arrive on its own.`;
 }
 
 export function summarize(deferred: Deferred[]): string {

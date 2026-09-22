@@ -435,7 +435,7 @@ export const register: Register = (on, rawOptions) => {
         type: 'object',
         properties: {
           action: { type: 'string', enum: ['status', 'start', 'poll', 'pause', 'resume', 'reset', 'deferred'] },
-          for: { type: 'string', description: 'start from a subagent only: the pull request that agent waits on, its number or head branch. A ci settled or ci stalled line on that pull request then names this agent rather than whichever agent armed the watch last' },
+          for: { type: 'string', description: 'start from a subagent only: the pull request that agent waits on, its number or head branch. A ci settled or ci stalled line on that pull request then names this agent, and once any agent has passed for, a ci line on a pull request no agent passed for names none' },
         },
       },
     });
