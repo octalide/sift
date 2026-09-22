@@ -28,7 +28,7 @@ claude plugin marketplace add octalide/sift
 claude plugin install sift@sift
 ```
 
-Options live in `/config` under the plugin, or in `settings.json` under `pluginConfigs.sift.options` (`pluginConfigs["sift@inline"]` for a `--plugin-dir` load). To give one kind of session different options (a watcher session, say), pass a settings file at launch:
+Options live in `/config` under the plugin, or in `settings.json` under `pluginConfigs`, keyed by the full plugin id: `pluginConfigs["sift@sift"].options` for a marketplace install, `pluginConfigs["sift@inline"].options` for a `--plugin-dir` load. A key that names no installed plugin is read by nothing and reports no error, so `/sift` listing fewer modules than you set means the key is wrong. To give one kind of session different options (a watcher session, say), pass a settings file at launch:
 
 ```sh
 claude --plugin-dir ./sift --settings '{"pluginConfigs":{"sift@inline":{"options":{"watch":true}}}}'
