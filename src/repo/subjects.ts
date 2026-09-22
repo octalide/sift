@@ -1,6 +1,6 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
-import type { Check, Forge } from '../forge/forge.ts';
+import type { Check, Comment, Forge } from '../forge/forge.ts';
 import type { Git } from '../forge/git.ts';
 import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, splitLog, type Bump, type ParsedCommit } from './commits.ts';
 import { compareVersions, parseTag, SEMVER_PATTERN, type Version } from './version.ts';
@@ -14,6 +14,8 @@ import type { StoreLike } from '../log.ts';
 
 const BODY_CAP = 20_000;
 const COMMENT_CAP = 6_000;
+// what a thread may add to the state: the body's cap twice over, so a long discussion cannot crowd out the rest
+const THREAD_BUDGET = 40_000;
 
 
 export function sectionsOf(markdown: string): Record<string, string> {
@@ -55,9 +57,46 @@ export function linkedOf(relation: number[], body: string, branch: string, patte
   return fromBranch === undefined ? [] : [fromBranch];
 }
 
+// one comment as the judge reads it: who, their standing in the forge's words, when, and what they said
+export type ThreadComment = { by: string; association: string | null; at: string; text: string };
+
+// the comments that can amend an issue or pull request: its author's and its maintainers'
+export function amends(forge: Pick<Forge, 'maintains'>, author: string, by: string, association: string | undefined): boolean {
+  return by === author || forge.maintains(association);
+}
+
+// the thread under a budget: the author's and maintainers' comments first, newest first, then the newest of
+// the rest; what is kept goes out oldest first, so a later ruling reads as later
+export function threadOf(forge: Pick<Forge, 'maintains'>, author: string, comments: Comment[], budget = THREAD_BUDGET): ThreadComment[] {
+  const order = comments.map((c, i) => ({ c, i })).reverse();
+  const standing = ({ c }: { c: Comment }) => amends(forge, author, c.author.login, c.association);
+  const ranked = [...order.filter(standing), ...order.filter((x) => !standing(x))];
+  const kept: { c: Comment; i: number; text: string }[] = [];
+  let left = budget;
+  for (const { c, i } of ranked) {
+    const text = truncate(c.body, COMMENT_CAP);
+    if (text.length > left) continue;
+    left -= text.length;
+    kept.push({ c, i, text });
+  }
+  return kept.sort((a, b) => a.i - b.i).map(({ c, text }) => ({ by: c.author.login, association: c.association ?? null, at: c.createdAt, text }));
+}
+
+// the author's and maintainers' comments a judge can name as the one that settles something, keyed by who and when
+export function rulingsOf(forge: Pick<Forge, 'maintains'>, author: string, thread: ThreadComment[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const c of thread) {
+    if (!amends(forge, author, c.by, c.association ?? undefined)) continue;
+    out[`${c.by} at ${c.at}`] = truncate(c.text.replace(/\s+/g, ' ').trim(), 160);
+  }
+  return out;
+}
+
 export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig): Promise<Subject> {
   const issue = await forge.issue(repo, n);
-  const [recent, open, parent] = await Promise.all([forge.comments(repo, 'issue', n, 5), forge.openIssues(repo), forge.parent(repo, n)]);
+  const [all, open, parent] = await Promise.all([forge.comments(repo, 'issue', n), forge.openIssues(repo), forge.parent(repo, n)]);
+  const comments = threadOf(forge, issue.author.login, all);
+  const rulings = rulingsOf(forge, issue.author.login, comments);
   const body = issue.body;
   const sections = sectionsOf(body);
   const labels = issue.labels;
@@ -75,7 +114,7 @@ export async function issueSubject(forge: Forge, repo: string, n: number, config
       author: issue.author.login,
       association: issue.association ?? null,
       sections: Object.keys(sections),
-      recent_comments: recent.map((c) => ({ by: c.author.login, text: truncate(c.body, COMMENT_CAP) })),
+      comments,
       conventions: {
         template_sections: config.issues.templateSections,
         required_label_groups: config.issues.requiredLabelGroups,
@@ -86,10 +125,12 @@ export async function issueSubject(forge: Forge, repo: string, n: number, config
       milestone: issue.milestone,
       sections,
       parent,
-      is_new: recent.length === 0,
+      is_new: all.length === 0,
       has_others: others.length > 0,
+      has_rulings: Object.keys(rulings).length > 0,
     },
     options: {
+      rulings,
       open_issues: Object.fromEntries(others.slice(0, 200).map((i) => [`#${i.number}`, truncate(i.title, 120)])),
       type_labels: Object.fromEntries((config.issues.requiredLabelGroups[0] ?? []).map((l) => [l, `the ${l} label`])),
     },
@@ -99,9 +140,9 @@ export async function issueSubject(forge: Forge, repo: string, n: number, config
 export async function prSubject(forge: Forge, repo: string, n: number, config: RepoConfig): Promise<Subject> {
   const pr = await forge.pull(repo, n);
   const body = pr.body;
-  const [diff, recent, checks, log, relation, baseDiff] = await Promise.all([
+  const [diff, all, checks, log, relation, baseDiff] = await Promise.all([
     forge.diff(repo, n).catch(() => ''),
-    forge.comments(repo, 'pr', n, 5),
+    forge.comments(repo, 'pr', n),
     forge.checks(repo, pr.head.sha).catch(() => [] as Check[]),
     forge.pullCommits(repo, n).catch(() => []),
     forge.closingIssues(repo, n).catch(() => [] as number[]),
@@ -130,7 +171,7 @@ export async function prSubject(forge: Forge, repo: string, n: number, config: R
       linked_issue: issue ? { number: issue.number, title: issue.title, body: truncate(issue.body, BODY_CAP) } : null,
       commits: commits.map((c) => c.message.split('\n')[0]),
       checks: { failed: failed.map((c) => c.name), pending: pending.map((c) => c.name), total: checks.length },
-      recent_comments: recent.map((c) => ({ by: c.author.login, text: truncate(c.body, COMMENT_CAP) })),
+      comments: threadOf(forge, pr.author.login, all),
       drift,
     },
     facts: {

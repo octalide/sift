@@ -30,7 +30,13 @@ export type PullRequest = Issue & {
 
 export type IssueSummary = { number: number; title: string };
 
-export type Comment = { author: ForgeUser; body: string; createdAt: string };
+export type Comment = {
+  author: ForgeUser;
+  body: string;
+  createdAt: string;
+  // the commenter's standing in the repository in the forge's own words, as Issue.association
+  association?: string;
+};
 
 export type Review = { author: ForgeUser; state: string; body: string };
 
@@ -129,8 +135,10 @@ export interface Forge {
   openIssues(repo: string): Promise<IssueSummary[]>;
   // the parent of an issue in the forge's own hierarchy (sub-issues, epics), undefined without one
   parent(repo: string, number: number): Promise<number | undefined>;
-  // the newest comments on an issue or pull request, oldest first; last caps how many
+  // every comment on an issue or pull request, oldest first; last keeps only the newest that many
   comments(repo: string, kind: 'issue' | 'pr', number: number, last?: number): Promise<Comment[]>;
+  // whether a standing in the forge's own words (an association) is one that maintains the repository
+  maintains(association: string | undefined): boolean;
 
   pull(repo: string, number: number): Promise<PullRequest>;
   diff(repo: string, number: number): Promise<string>;
