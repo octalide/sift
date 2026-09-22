@@ -4,10 +4,10 @@ import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { currentState, diffItems, diffRuns, hashOf, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
-import { Watches, type AgentLike, type WatchesHost } from '../src/watch/registry.ts';
+import { Watches, type WatchesHost } from '../src/watch/registry.ts';
 import { formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, subscriptionOf, type CiFilter, type Scope, type Subscription } from '../src/watch/subscription.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
-import { agentName, ownerNotice, Watcher, summarize, type WatchDelivery, type WatchHost } from '../src/watch/watcher.ts';
+import { Watcher, summarize, type WatchDelivery, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
 import { MACH_CI, MACH_JOBS, MACH_RUN } from './fixtures/mach-ci.ts';
 import { fillNeeds, workflowJobs } from '../src/forge/workflow.ts';
@@ -113,9 +113,12 @@ describe('rules', () => {
     expect(subscriptionOf({ ci: 'some' }, how)).toEqual({ error: 'ci must be one of settled, failures, all, none' });
     expect(subscriptionOf({ scope: 'branch dev', until: 'closed' }, how)).toEqual({ error: 'until closed needs a pr scope' });
     expect(subscriptionOf({}, { ...how, repo: undefined })).toMatchObject({ error: expect.stringMatching(/no repository/) });
-    // start: the session's repository, scoped by for to a pull request or a branch
-    expect(subscriptionOf({ repo: 'o/x', for: '#12' }, { ...how, start: true })).toMatchObject({ repo: 'o/r', scope: { kind: 'pr', number: 12 }, for: 'issue-9' });
-    expect(subscriptionOf({ for: 'feat/12' }, { ...how, start: true })).toMatchObject({ scope: { kind: 'branch', name: 'feat/12' } });
+    // start: the caller's repository, scoped by for to a pull request or a branch; a subagent's lasts until settled
+    expect(subscriptionOf({ repo: 'o/x', for: '#12' }, { ...how, start: true })).toMatchObject({ repo: 'o/r', scope: { kind: 'pr', number: 12 }, for: 'issue-9', until: 'settled' });
+    expect(subscriptionOf({ for: 'feat/12' }, { ...how, start: true })).toMatchObject({ scope: { kind: 'branch', name: 'feat/12' }, until: 'settled' });
+    expect(subscriptionOf({ for: '12', until: 'merged' }, { ...how, start: true })).toMatchObject({ until: 'merged' });
+    expect(subscriptionOf({ for: '12' }, { ...how, start: true, owner: undefined })).not.toHaveProperty('until');
+    expect(subscriptionOf({}, { ...how, start: true })).toEqual({ repo: 'o/r', scope: { kind: 'repo' }, filter: how.filter, for: 'issue-9' });
     expect(subscriptionOf({}, { ...how, start: true, owner: undefined })).toEqual({ repo: 'o/r', scope: { kind: 'repo' }, filter: how.filter });
   });
 
@@ -445,18 +448,6 @@ describe('watcher', () => {
     expect(watcher.snapshot().pending['3@abc1234def']?.stalled).toBe(true);
   });
 
-  it('tells a subagent that subscribed where deliveries go, by the name SendMessage reaches it by', () => {
-    const agents = [{ id: 'a1', name: 'issue-113' }, { id: 'a2' }];
-    expect(agentName(undefined, agents)).toBeUndefined();
-    expect(agentName('a1', agents)).toBe('issue-113');
-    expect(agentName('a2', agents)).toBe('a2');
-    expect(agentName('a3', agents)).toBe('a3');
-    const notice = ownerNotice('issue-113');
-    expect(notice).toContain('subscribed for agent issue-113');
-    expect(notice).toContain("session's main loop");
-    expect(notice).toContain('for issue-113');
-  });
-
   it('checks a new issue against the issue pack, the filer\'s own included, and delivers its findings', async () => {
     const forge = fakeForge({
       login: async () => 'me',
@@ -767,28 +758,39 @@ describe('subscriptions', () => {
     expect((await deliveredFor([sub('s1', { kind: 'tag', glob: 'v2.*' }, 'all')])).urls).toEqual([]);
   });
 
-  it('delivers an event several subscriptions match once, naming each and the agents they belong to', async () => {
-    const subs = [sub('s1', { kind: 'pr', number: 3 }, 'settled', { for: 'issue-3' }), sub('s2', { kind: 'repo' }, 'failures'), sub('s3', { kind: 'branch', name: 'feat/3' }, 'failures', { for: 'lead' })];
+  it('delivers an event several subscriptions match once to each recipient, naming the recipient only on the channel', async () => {
+    const subs = [sub('s1', { kind: 'pr', number: 3 }, 'settled', { for: 'a3' }), sub('s2', { kind: 'repo' }, 'failures'), sub('s3', { kind: 'branch', name: 'feat/3' }, 'failures', { for: 'a1' }), sub('s4', { kind: 'pr', number: 3 }, 'all', { for: 'a3' })];
     const { deliveries } = await deliveredFor(subs);
-    expect(deliveries).toHaveLength(1);
-    const lines = deliveries[0]!.text.split('\n');
-    expect(lines[0]).toBe('[sift watch o/r]');
-    expect(lines).toContain('for issue-3, lead: ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged');
-    expect(lines).toContain('  by me · https://x/pull/3 · ci settled on pr · s1, s2, s3');
-    expect(lines.filter((l) => l.includes('https://x/pull/3'))).toHaveLength(1);
-    expect(deliveries[0]!.subscriptions.map((s) => s.id).sort()).toEqual(['s1', 's2', 's3']);
-    // one agent's subscriptions alone: the header names it
-    const own = await deliveredFor([sub('s1', { kind: 'pr', number: 3 }, 'settled', { for: 'issue-3' })]);
-    expect(own.deliveries[0]!.text.split('\n')[0]).toBe('[sift watch o/r for issue-3]');
+    // the main loop first, then each agent by agentId, each with its own subscriptions alone
+    expect(deliveries.map((d) => d.to)).toEqual([undefined, 'a1', 'a3']);
+    expect(deliveries.map((d) => d.subscriptions.map((s) => s.id))).toEqual([['s2'], ['s3'], ['s1', 's4']]);
+    const verdict = 'ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged';
+    expect(deliveries[1]!.text.split('\n')).toEqual(['[sift watch o/r]', verdict, '  by me · https://x/pull/3 · ci settled on pr · s3']);
+    for (const d of deliveries) {
+      expect(d.text.split('\n')[0]).toBe('[sift watch o/r]');
+      expect(d.text).not.toMatch(/\bfor a\d/);
+      expect(d.text.split('\n').filter((l) => l.includes('https://x/pull/3') && l.includes('ci settled'))).toHaveLength(1);
+    }
+    expect(deliveries[2]!.text).toContain('  by me · https://x/pull/3 · ci settled on pr · s1, s4');
+    // a3's pr subscription under all takes the build run on the pr head too; the main loop's repo subscription holds it
+    expect(deliveries[2]!.text).toContain('https://x/runs/10');
+    expect(deliveries[0]!.text).not.toContain('https://x/runs/10');
   });
 
-  const registry = (forge: ReturnType<typeof fakeForge>, agents: AgentLike[] = [], clock = { now: 1_000_000 }, store = memoryStore()) => {
+  it('summarizes each recipient\'s own held events and keeps the rest for their recipient', async () => {
+    // the docs failure on scratch is held for the main loop's repo subscription and for nobody else
+    const { deliveries } = await deliveredFor([sub('s1', { kind: 'repo' }, 'failures'), sub('s2', { kind: 'pr', number: 3 }, 'settled', { for: 'a3' })]);
+    expect(deliveries.map((d) => d.to)).toEqual([undefined, 'a3']);
+    expect(deliveries[0]!.text).toContain('deferred meanwhile: ');
+    expect(deliveries[1]!.text).not.toContain('deferred meanwhile');
+  });
+
+  const registry = (forge: ReturnType<typeof fakeForge>, clock = { now: 1_000_000 }, store = memoryStore()) => {
     const delivered: WatchDelivery[] = [];
     const logs: string[] = [];
     const host: WatchesHost = {
       store,
       key: 'watch-subs:test',
-      agents: async () => agents,
       now: () => clock.now,
       log: (t) => void logs.push(t),
       status: () => {},
@@ -801,8 +803,7 @@ describe('subscriptions', () => {
   it('starts a poller for each repository subscribed, shares it between subscriptions, and stops it with the last', async () => {
     let reads = 0;
     const forge = fakeForge({ items: async () => (reads++, { changed: false, rate: {} }) });
-    const agents = [{ id: 'a1', name: 'issue-3', status: 'running' }];
-    const { w, store } = registry(forge, agents);
+    const { w, store } = registry(forge);
     // a subscribe naming another repository than the session's
     const asked = subscriptionOf({ repo: 'o/other' }, { start: false, repo: 'o/r', filter });
     expect(asked).toEqual({ repo: 'o/other', scope: { kind: 'repo' }, filter });
@@ -825,7 +826,7 @@ describe('subscriptions', () => {
     await poller.tick();
     expect(reads).toBe(before);
     // a resumed session restores its subscriptions and their pollers
-    const again = registry(forge, agents, { now: 1_000_000 }, store);
+    const again = registry(forge, { now: 1_000_000 }, store);
     await again.w.load();
     expect(again.w.list()).toEqual([other.sub]);
     expect(again.w.poller('o/other')).toBeDefined();
@@ -869,6 +870,26 @@ describe('subscriptions', () => {
     expect(delivered[0]!.text).toContain('ci success: release on main @m700000');
   });
 
+  it('removes a run subscription once its run\'s completion is delivered, and not before', async () => {
+    let done = false;
+    const forge = fakeForge({ login: async () => 'me', items: script(changed([slim(1)])), run: async () => brun(8, 'release', 'main', done ? 'success' : null, 'm800000') });
+    const { w, delivered, logs } = registry(forge);
+    await w.subscribe({ repo: 'o/r', scope: { kind: 'run', id: '8' }, filter, for: 'a1' });
+    await w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
+    const poller = w.poller('o/r')!;
+    await poller.tick();
+    await poller.tick();
+    // still running: listed, nothing delivered
+    expect(delivered).toHaveLength(0);
+    expect(w.list().map(formatSubscription)).toContain('s1 o/r run 8 · items, ci failures, stall · for a1');
+    done = true;
+    await poller.tick();
+    expect(delivered.map((d) => d.to)).toEqual(['a1']);
+    expect(delivered[0]!.text).toContain('ci success: release on main @m800000');
+    expect(w.list().map((s) => s.id)).toEqual(['s2']);
+    expect(logs).toEqual(['sift watch: s1 on o/r run 8 removed, its run completed']);
+  });
+
   it('removes an until: settled pr subscription after its verdict, an until: merged one once merged, and an until time once passed', async () => {
     let done = false;
     const forge = fakeForge({
@@ -882,7 +903,7 @@ describe('subscriptions', () => {
       checks: async () => [check('build', done)],
     });
     const clock = { now: 1_000_000 };
-    const { w, delivered, logs } = registry(forge, [], clock);
+    const { w, delivered, logs } = registry(forge, clock);
     await w.subscribe({ repo: 'o/r', scope: { kind: 'pr', number: 3 }, filter, until: 'settled' });
     await w.subscribe({ repo: 'o/r', scope: { kind: 'pr', number: 3 }, filter: { ...filter, ci: 'none' }, until: 'merged' });
     await w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter: { ...filter, items: false }, until: new Date(clock.now + 60_000).toISOString() });
@@ -902,25 +923,25 @@ describe('subscriptions', () => {
     expect(logs).toEqual(['sift watch: s1 on o/r pr 3 removed, until settled reached', 'sift watch: s3 on o/r repo removed, until reached', 'sift watch: s2 on o/r pr 3 removed, until reached']);
   });
 
-  it('removes an agent\'s subscriptions once the agent finishes, before the next poll delivers anything', async () => {
-    const agents = [{ id: 'a1', name: 'issue-3', status: 'running' }, { id: 'a2', status: 'running' }];
+  it('keeps an agent\'s subscriptions past its turn, and retires them all once nothing can reach it', async () => {
     let polls = 0;
     const forge = fakeForge({ items: async () => (polls++, { changed: false, rate: {} }) });
-    const { w, logs } = registry(forge, agents);
-    await w.subscribe({ repo: 'o/r', scope: { kind: 'pr', number: 3 }, filter, for: 'issue-3' });
+    const { w, logs } = registry(forge);
+    await w.subscribe({ repo: 'o/r', scope: { kind: 'pr', number: 3 }, filter, for: 'a1' });
     await w.subscribe({ repo: 'o/r', scope: { kind: 'branch', name: 'dev' }, filter, for: 'a2' });
+    await w.subscribe({ repo: 'o/r', scope: { kind: 'branch', name: 'feat/3' }, filter, for: 'a1' });
     const poller = w.poller('o/r')!;
+    // the registry no longer asks who is running: a poll never removes an owned subscription
     await poller.tick();
-    expect(w.list()).toHaveLength(2);
-    agents[0]!.status = 'completed';
     await poller.tick();
-    expect(w.list().map((s) => s.for)).toEqual(['a2']);
-    expect(logs).toEqual(['sift watch: s1 on o/r pr 3 removed, its agent finished']);
-    // an agent the session no longer lists has finished too, and the poller goes with its last subscription
-    agents.pop();
+    expect(w.list().map((s) => s.id)).toEqual(['s1', 's2', 's3']);
+    await w.retireOwner('a1', 'SendMessage refused: no such agent');
+    expect(w.list().map((s) => s.id)).toEqual(['s2']);
+    expect(logs).toEqual(['sift watch: s1 on o/r pr 3 removed, SendMessage refused: no such agent', 'sift watch: s3 on o/r branch feat/3 removed, SendMessage refused: no such agent']);
+    // the poller goes with its last subscription
+    await w.retireOwner('a2', 'gone');
     const before = polls;
     await poller.tick();
-    expect(w.list()).toEqual([]);
     expect(w.poller('o/r')).toBeUndefined();
     expect(polls).toBe(before);
   });
