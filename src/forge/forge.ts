@@ -69,7 +69,14 @@ export type Run = Check & {
 };
 
 // one job of a ci run: what jobLog reads by id
-export type Job = Check & { id: string; run: string; sha: string; url: string };
+export type Job = Check & {
+  id: string;
+  run: string;
+  sha: string;
+  url: string;
+  // the ids of the jobs in the same run this one waits on; undefined when the forge cannot tell, and the job reads as a leaf
+  needs?: string[];
+};
 
 // one step of a job's log as the forge marks it; a forge that marks no steps hands the whole log as one step
 export type LogStep = { name: string; ok: boolean; text: string };
@@ -179,7 +186,7 @@ export interface Forge {
   run(repo: string, id: string): Promise<Run>;
   // the open pull request heads; without a token the read always answers changed
   pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>>;
-  // the jobs of a ci run
+  // the jobs of a ci run, each with the jobs it needs when the forge can tell
   jobs(repo: string, run: string): Promise<Job[]>;
   // a job's log split at the forge's own step marks
   jobLog(repo: string, job: string): Promise<JobLog>;

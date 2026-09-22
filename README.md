@@ -91,7 +91,7 @@ grade(pack: "issue", subject: "17")            # or "#17", or an issue URL, whic
 grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17
 grade(pack: "commit", subject: "main..HEAD")
 grade(pack: "ci", subject: "job:106195824649")  # a failed job by id
-grade(pack: "ci", subject: "35554549814")       # a run id (or run:<id>) reads its first failed job
+grade(pack: "ci", subject: "35554549814")       # a run id (or run:<id>) reads its first job that failed on its own
 grade(pack: "ci", subject: "x", text: "...")    # a log pasted as text
 grade(pack: "rules", subject: "17")            # issue 17 against the repo's rule documents
 grade(pack: "rules", subject: "x", text: "...") # free text against the rules, a commit message or PR body before it is written
@@ -124,7 +124,7 @@ The `plan` pack reads an issue and a plan for it from `text` and asks three ques
 
 ### ci
 
-The `ci` pack reads a failing job's log: a job id (`job:<id>`), a run id (its first failed job) read through the forge, or the text itself. The log is trimmed in code to the step the forge marks failed (the tail of the whole log when none is), stripped of timestamps, colours and group marks, and bounded at 300 lines. One `top` rank step over the lines keeps the ones that explain the failure and feeds them to the questions, so the judge reads the failure rather than the log. The pull request whose head the job ran on, when one is open, stands beside it with the files its diff touches, and `own_fault` (the failure is caused by the change under test) is asked only then. `environment` asks whether it is a flake, a runner or network problem or an external service, and `fixable_here` whether a change to this repository would make the job pass. The watch attaches this report to every settled CI failure, see [Watch](#watch).
+The `ci` pack reads a failing job's log: a job id (`job:<id>`), a run id (its first job that failed on its own) read through the forge, or the text itself. A job that failed only because a job it `needs` failed or was cancelled, such as an aggregate `gate` job, is downstream: it is never judged. A run names each downstream job in one `log.followed` line (`gate: failed because docs failed`), and `job:<id>` naming one follows it to the job that failed on its own and says so (`gate: failed because docs failed, followed to docs`). Any other job that failed on its own is named with its id, so one report hides no failure. Whether a job is downstream is decided in code from the forge's dependencies and the results: on GitHub the jobs API carries none, so they are read from the workflow file at the run's commit, each `jobs.<key>` mapped to the listed jobs by its name (a matrix job by the literal text of its `name` template). A job sift cannot map, or whose workflow cannot be read, is judged as a leaf. The log is trimmed in code to the step the forge marks failed (the tail of the whole log when none is), stripped of timestamps, colours and group marks, and bounded at 300 lines. One `top` rank step over the lines keeps the ones that explain the failure and feeds them to the questions, so the judge reads the failure rather than the log. The pull request whose head the job ran on, when one is open, stands beside it with the files its diff touches, and `own_fault` (the failure is caused by the change under test) is asked only then. `environment` asks whether it is a flake, a runner or network problem or an external service, and `fixable_here` whether a change to this repository would make the job pass. The watch attaches this report to every settled CI failure, see [Watch](#watch).
 
 ### rules
 
@@ -178,7 +178,7 @@ Subject kinds and the checks they support:
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
 | `tree` | `tree.indexed` |
-| `log` | `log.trimmed` |
+| `log` | `log.trimmed`, `log.followed` |
 | `plan`, `event`, `text` | none |
 
 ## Conventions
@@ -328,7 +328,7 @@ ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
 ```
 
-A failure carries the `ci` pack's report on each failed check, one job per check, read from its log through the forge, so the session that pushed the commit reads why it failed without opening the log:
+A failure carries the `ci` pack's report on each failed check, one job per check, read from its log through the forge, so the session that pushed the commit reads why it failed without opening the log. A check that failed only because a job it needs failed is named in one line instead (`gate: failed because docs failed`), since that job has its own report:
 
 ```
 [sift watch octalide/sift]

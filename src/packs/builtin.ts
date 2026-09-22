@@ -240,7 +240,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     name: 'ci',
     subject: 'log',
     description: 'Why did this job fail, was it the change under test, the environment, and is the fix in this repository?',
-    checks: ['log.trimmed'],
+    checks: ['log.trimmed', 'log.followed'],
     // the lines that explain the failure are found first and fed to the questions as lines, beside the pull request's files
     rank: [
       {

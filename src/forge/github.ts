@@ -1,5 +1,6 @@
 import { Gh, GhError, type ApiResponse } from './gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
+import { fillNeeds, workflowJobs } from './workflow.ts';
 import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgeUser, ForgeWrite, Issue, IssueSummary, Job, JobLog, LogStep, PullHead, PullRequest, Rate, Review, ReviewComment, Run, Template, WatchItem } from './forge.ts';
 
 type GhUser = { login: string; type?: string };
@@ -40,6 +41,8 @@ type GhRun = {
   conclusion: string | null;
   head_sha: string;
   html_url: string;
+  // the workflow file the run ran
+  path?: string;
   actor?: { login: string };
   updated_at: string;
 };
@@ -411,8 +414,15 @@ export class GitHubForge implements Forge {
     return { changed: true, token: probe.etag, rate: rate(probe), value: raw.map((p) => ({ number: p.number, title: p.title, branch: p.head.ref, sha: p.head.sha, url: p.html_url, user: p.user.login })) };
   }
 
+  // the jobs api carries no dependencies, so needs are read from the workflow file at the run's sha
   async jobs(repo: string, run: string): Promise<Job[]> {
-    return (await this.gh.pages<GhJob>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}/jobs`, '[.jobs[] | {id, run_id, head_sha, name, status, conclusion, html_url}]')).map(job);
+    const [record, jobs] = await Promise.all([
+      this.gh.json<GhRun>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}`),
+      this.gh.pages<GhJob>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}/jobs`, '[.jobs[] | {id, run_id, head_sha, name, status, conclusion, html_url}]'),
+    ]);
+    const text = record.path ? await this.file(repo, record.path, record.head_sha) : undefined;
+    const workflow = text === undefined ? undefined : workflowJobs(text);
+    return workflow ? fillNeeds(jobs.map(job), workflow) : jobs.map(job);
   }
 
   // the logs endpoint refuses any accept but json and answers a 302 to the log's download url, which gh follows
