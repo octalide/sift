@@ -71,7 +71,7 @@ export const PARAGRAPH_QUESTION: Questions = {
     instructions: 'This paragraph directs contributors, a rule a contribution can break, not a description of what the software does: {text}',
     criteria: {
       true: 'It tells a contributor what a change, a commit, a branch, an issue, a pull request or a message must or must not do: a convention, a requirement, a prohibition, a review or release process, or the form another project requires of code here (a migration guide\'s old and new forms).',
-      false: 'It describes what this repository\'s software does, offers, accepts or refuses (a feature, a command, an option, a config field, a pack, a check), even in words like may, must or is refused, since a contribution may change that behaviour; or it explains, introduces, records history or gives steps to run.',
+      false: 'It describes what this repository\'s software does, offers, accepts or refuses (a feature, a command, an option, a config field, a pack, a check), even in words like may, must or is refused, since a contribution may change that behaviour; or it explains, introduces, records history or gives setup, build or test steps to run: nothing a contribution could comply with or violate.',
     },
   },
 };
