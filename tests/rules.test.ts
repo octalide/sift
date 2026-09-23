@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { templateKind } from '../src/forge/github.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
-import { rulesSubject } from '../src/repo/subjects.ts';
+import { rulesSubject, textRulesSubjects } from '../src/repo/subjects.ts';
+import { gateOutbound } from '../src/gate/outbound.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { runPack } from '../src/packs/run.ts';
-import { candidate, checkoutSource, contributingGuide, discoverRules, excluded, forgeSource, ruleDoc } from '../src/rules/discover.ts';
+import { candidate, checkoutSource, contributingGuide, discoverRules, excluded, forgeSource, PARAGRAPH_QUESTION, ruleDoc } from '../src/rules/discover.ts';
 import { ruleParagraphs } from '../src/rules/paragraphs.ts';
 import { rulesKeys, STALE_MS, StoreKeys } from '../src/keys.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -27,7 +28,7 @@ function judgeBy(docs: (path: string) => number, paragraphs: (text: string) => n
       const answers = Object.fromEntries(
         Object.entries(q).map(([k, x]) => {
           const doc = /^The document (.+) states rules/.exec(x.instructions);
-          const p = doc ? docs(doc[1]!) : paragraphs(x.instructions.replace(/^.*not narrative or instruction: /, ''));
+          const p = doc ? docs(doc[1]!) : paragraphs(x.instructions.replace(/^.*not a description of what the software does: /, ''));
           return [k, { type: 'noul' as const, p }];
         }),
       );
@@ -100,8 +101,8 @@ describe('rule discovery', () => {
     expect(asked[0]!.instructions[3]).toBe('The document docs/style.md states rules contributors to this repository must follow.');
     const paragraphs = (asked[1]!.state as { items: Record<string, unknown>[] }).items;
     expect(paragraphs.map((p) => p['doc'])).toEqual(['CONTRIBUTING.md', 'CONTRIBUTING.md', 'CONTRIBUTING.md', 'docs/style.md', 'docs/style.md']);
-    expect(asked[1]!.instructions[0]).toBe('This paragraph is a rule a contribution can break, not narrative or instruction: Contributing: Thanks for helping out.');
-    expect(store.map.get('rules:mem')).toMatchObject({ version: 2, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
+    expect(asked[1]!.instructions[0]).toBe('This paragraph directs contributors, a rule a contribution can break, not a description of what the software does: Contributing: Thanks for helping out.');
+    expect(store.map.get('rules:mem')).toMatchObject({ version: 3, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
     // the kept set is in the session log by name; a cached answer logs nothing new
     expect(logged).toEqual(['sift rules mem: 5 candidates, kept CONTRIBUTING.md, docs/style.md; 3 rules from CONTRIBUTING.md, docs/style.md']);
     await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now, (t) => logged.push(t));
@@ -117,7 +118,7 @@ describe('rule discovery', () => {
     expect(found.rules).toEqual([{ source: '.github/CONTRIBUTING.md', text: 'Contributing: Commits must be signed.' }]);
     // no document question was asked, only the paragraphs
     expect(asked).toHaveLength(1);
-    expect(asked[0]!.instructions[0]).toMatch(/^This paragraph is a rule/);
+    expect(asked[0]!.instructions[0]).toMatch(/^This paragraph directs contributors/);
   });
 
   it('marks the scope read on every discovery, so the sweep keeps a cache in use and removes one no longer read', async () => {
@@ -270,6 +271,32 @@ describe('rule discovery', () => {
     const found = await discoverRules(memorySource(tree), rules(), judgeBy((p) => (p === 'docs/workflow.md' ? 0.63 : 0.21), isRule), memoryStore(), now, quiet);
     expect(found.kept).toEqual(['docs/workflow.md']);
     expect(found.rules).toEqual([{ source: 'docs/workflow.md', text: 'Commits: Commits must be small.' }]);
+  });
+
+  // #188's pull request body was refused for "breaking" the readme's description of the pack it removed
+  it('rules out a description of the software, so a pull request that removes a documented feature passes and the contributing rules still hold', async () => {
+    const tree = {
+      'README.md': '# sift\n\n## Packs\n\nA repo pack may declare `subject: log` to grade a failed job\'s log.\n',
+      'CONTRIBUTING.md': '# Contributing\n\n- Commits use conventional format.\n',
+    };
+    // the paragraph question separates what directs a contributor from what describes the software
+    expect(PARAGRAPH_QUESTION['rule']!.criteria).toMatchObject({ false: expect.stringContaining("describes what this repository's software does") });
+    // a judge that answers the question as asked: the readme's sentence describes the software, the contributing line directs
+    const directs = (t: string) => (/Commits use/.test(t) ? 0.9 : 0.1);
+    const host = { source: memorySource(tree), judge: judgeBy(() => 0.5, directs), store: memoryStore(), now, notice: quiet };
+    const config = resolveConfig(undefined);
+    const gate = async (text: string) => {
+      const subjects = await textRulesSubjects(host, { text, about: 'the title and body of a new pull request' }, config);
+      expect(subjects[0]!.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Contributing: Commits use conventional format.' }]);
+      // a gate judge that holds the removal against any rule naming the removed feature, and a bad commit subject against the format
+      const gateJudge: Judge = {
+        name: 'fake',
+        ask: async (_s, q) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.entries(q).map(([k, x]) => [k, { type: 'noul' as const, p: (/subject: log/.test(x.instructions) && /removes/.test(text)) || (/conventional format/.test(x.instructions) && !/^\w+(\(#\d+\))?!?: /.test(text)) ? 0.1 : 0.9 }])) }),
+      };
+      return gateOutbound({ channel: 'github-pr-create', text, kind: 'the title and body of a new pull request' }, subjects, BUILTIN_PACKS['rules']!, gateJudge, config);
+    };
+    expect(await gate('feat(#188)!: remove the ci pack\n\nThis removes the `log` subject kind: a repo pack may no longer declare `subject: log`.')).toMatchObject({ allow: true, reason: 'clear' });
+    expect(await gate('removed the ci pack')).toMatchObject({ allow: false, reason: 'breaks: Contributing: Commits use conventional format.' });
   });
 
   it('reads a checkout from git ls-files and the working tree, a repository from the forge tree', async () => {

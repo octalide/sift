@@ -6,6 +6,8 @@ Notes begin at 0.10.0. Earlier releases, and 0.10.1 and 0.10.2, have no recorded
 
 ## [Unreleased]
 
+Fixed: rule discovery kept descriptions of the software as rules. The paragraph question asked whether a paragraph constrains something a change could get wrong, and a readme's or reference doc's account of a feature ("a repo pack may declare `subject: log`") reads that way, so a pull request that removed the feature was refused for breaking its own description. The question now asks whether a paragraph directs contributors: what a change, commit, branch, issue, pull request or message must or must not do, a migration guide's old and new forms among them. A description of what the repository's own software does, offers, accepts or refuses is not a rule, even inside a kept document. The cache version is bumped, so every checkout rediscovers once.
+
 ## [0.14.0] - 2026-09-23
 
 This release removes the `ci` pack and is a minor bump on 0.x. Judging CI output cost more than it told: the pack scored every line of a failed job's log, env dumps and YAML keys included, and its headline `own_fault` answered unclear on a failure whose error text was the literal bug the PR fixed.
