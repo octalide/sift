@@ -46,7 +46,7 @@ export type Discovery = {
 };
 
 // what the store holds per scope; bump when the shape, the key, the questions or the keep policy change
-const VERSION = 4;
+const VERSION = 5;
 type Cached = { version: number; key: string; docs: string[]; rules: Rule[]; candidates: number; kept: string[] };
 
 export const PROSE = new Set(['md', 'mdx', 'markdown', 'txt', 'rst', 'org']);
@@ -69,14 +69,15 @@ export const DOC_QUESTION: Questions = {
   },
 };
 
-// a rule directs contributors; a description of what the repository's software does is not one, since a change may alter it
+// a rule directs contributors; a description of what the repository's software does is not one, since a change may alter it.
+// a paragraph is read beside its document, since a reference's "requires" reads as a rule on its own
 export const PARAGRAPH_QUESTION: Questions = {
   rule: {
     type: 'noul',
-    instructions: 'This paragraph directs contributors, a rule a contribution can break, not a description of what the software does: {text}',
+    instructions: 'Read as part of the document in the state, this paragraph directs contributors, a rule a contribution can break, not a description of what the software does: {text}',
     criteria: {
       true: 'It tells a contributor what a change, a commit, a branch, an issue, a pull request or a message must or must not do: a convention, a requirement, a prohibition, a review or release process, or the form another project requires of code here (a migration guide\'s old and new forms).',
-      false: 'It describes what this repository\'s software does, offers, accepts or refuses (a feature, a command, an option, a config field, a pack, a check), even in words like may, must or is refused, since a contribution may change that behaviour; or it explains, introduces, records history or gives setup, build or test steps to run: nothing a contribution could comply with or violate.',
+      false: 'It describes what this repository\'s software does, offers, accepts or refuses (a feature, a command, an option, a config field a user sets for their own repository, a pack, a check), even in words like may, must or is refused, since a contribution may change that behaviour; or it says what the project\'s maintainers or community leaders do, pledge or will do in response (enforcement, consequences, responsibilities); or it explains, introduces, records history or gives setup, build or test steps to run: nothing a contribution could comply with or violate.',
     },
   },
 };
@@ -178,14 +179,20 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
     if (unanswered.length > 0) return failed(kept, `malformed: no answer for ${unanswered.map((r) => judged[r.index]!.path).join(', ')}`);
     for (const r of ranked.items) if (bandOf(r.answers['rules']!, DEFAULT_THRESHOLDS) !== 'violated') kept.push(judged[r.index]!);
   }
-  const paragraphs = kept.flatMap((d) => ruleParagraphs(d.text).map((text) => ({ doc: d.path, text })));
+  // each document's paragraphs are ranked against that document, its opening and outline in the state
+  const ranks = await pool(kept, 4, async (d) => {
+    const paragraphs = ruleParagraphs(d.text);
+    if (paragraphs.length === 0) return { doc: d, paragraphs, ranked: undefined };
+    const context = { document: { path: d.path, excerpt: excerptOf(d.text, EXCERPT.lines, EXCERPT.width), headings: outlineOf(d.text) } };
+    return { doc: d, paragraphs, ranked: await rank(paragraphs, PARAGRAPH_QUESTION, judge, { mode: 'batched', context, concurrency: 2 }) };
+  });
   const rules: Rule[] = [];
-  if (paragraphs.length > 0) {
-    const ranked = await rank(paragraphs, PARAGRAPH_QUESTION, judge, { mode: 'batched', fields: ['doc'] });
+  for (const { doc, paragraphs, ranked } of ranks) {
+    if (!ranked) continue;
     if (!ranked.ok) return failed(kept, failureText(ranked));
     const unanswered = ranked.items.filter((r) => r.answers['rule'] === undefined);
-    if (unanswered.length > 0) return failed(kept, `malformed: no answer for ${unanswered.length} of ${paragraphs.length} paragraphs`);
-    for (const r of ranked.items) if (bandOf(r.answers['rule']!, DEFAULT_THRESHOLDS) === 'satisfied') rules.push({ source: paragraphs[r.index]!.doc, text: paragraphs[r.index]!.text });
+    if (unanswered.length > 0) return failed(kept, `malformed: no answer for ${unanswered.length} of ${paragraphs.length} paragraphs in ${doc.path}`);
+    for (const r of ranked.items) if (bandOf(r.answers['rule']!, DEFAULT_THRESHOLDS) === 'satisfied') rules.push({ source: doc.path, text: paragraphs[r.index]! });
   }
   const docs = kept.map((d) => d.path).filter((p) => rules.some((r) => r.source === p));
   const result: Cached = { version: VERSION, key, docs, rules, candidates: candidates.length, kept: kept.map((d) => d.path) };

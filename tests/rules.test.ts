@@ -92,17 +92,20 @@ describe('rule discovery', () => {
       kept: ['CONTRIBUTING.md', 'docs/style.md'],
       cached: false,
     });
-    // one batched request per rank: the judged documents with a path, an excerpt and their headings, then the paragraphs of the kept
-    expect(asked).toHaveLength(2);
+    // one batched request per rank: the judged documents with a path, an excerpt and their headings, then the paragraphs of
+    // each kept document beside that document
+    expect(asked).toHaveLength(3);
     const docs = (asked[0]!.state as { items: { k: number; path: string; excerpt: string; headings: string[] }[] }).items;
     expect(docs.map((d) => d.path)).toEqual(['.github/PULL_REQUEST_TEMPLATE.md', 'README.md', 'docs/design/notes.md', 'docs/style.md']);
     expect(docs[3]).toEqual({ k: 3, path: 'docs/style.md', excerpt: '# Style\nA few notes on style.\n- Never a semicolon.', headings: ['Style'] });
     expect(docs[0]!.headings).toEqual(['Summary', 'Testing']);
     expect(asked[0]!.instructions[3]).toBe('The document docs/style.md states rules contributors to this repository must follow.');
-    const paragraphs = (asked[1]!.state as { items: Record<string, unknown>[] }).items;
-    expect(paragraphs.map((p) => p['doc'])).toEqual(['CONTRIBUTING.md', 'CONTRIBUTING.md', 'CONTRIBUTING.md', 'docs/style.md', 'docs/style.md']);
-    expect(asked[1]!.instructions[0]).toBe('This paragraph directs contributors, a rule a contribution can break, not a description of what the software does: Contributing: Thanks for helping out.');
-    expect(store.map.get('rules:mem')).toMatchObject({ version: 4, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
+    const paragraphs = asked.slice(1).map((a) => a.state as { document: { path: string; excerpt: string; headings: string[] }; items: Record<string, unknown>[] });
+    expect(paragraphs.map((p) => p.document.path)).toEqual(['CONTRIBUTING.md', 'docs/style.md']);
+    expect(paragraphs[1]!.document).toEqual({ path: 'docs/style.md', excerpt: '# Style\nA few notes on style.\n- Never a semicolon.', headings: ['Style'] });
+    expect(paragraphs.map((p) => p.items.length)).toEqual([3, 2]);
+    expect(asked[1]!.instructions[0]).toBe('Read as part of the document in the state, this paragraph directs contributors, a rule a contribution can break, not a description of what the software does: Contributing: Thanks for helping out.');
+    expect(store.map.get('rules:mem')).toMatchObject({ version: 5, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
     // the kept set is in the session log by name; a cached answer logs nothing new
     expect(logged).toEqual(['sift rules mem: 5 candidates, kept CONTRIBUTING.md, docs/style.md; 3 rules from CONTRIBUTING.md, docs/style.md']);
     await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now, (t) => logged.push(t));
@@ -118,7 +121,7 @@ describe('rule discovery', () => {
     expect(found.rules).toEqual([{ source: '.github/CONTRIBUTING.md', text: 'Contributing: Commits must be signed.' }]);
     // no document question was asked, only the paragraphs
     expect(asked).toHaveLength(1);
-    expect(asked[0]!.instructions[0]).toMatch(/^This paragraph directs contributors/);
+    expect(asked[0]!.instructions[0]).toMatch(/^Read as part of the document in the state, this paragraph directs contributors/);
   });
 
   it('marks the scope read on every discovery, so the sweep keeps a cache in use and removes one no longer read', async () => {
@@ -148,16 +151,16 @@ describe('rule discovery', () => {
     const first = await discoverRules(memorySource(files), rules(), judge, store, now, quiet);
     const again = await discoverRules(memorySource(files), rules(), judge, store, now, quiet);
     expect(again).toEqual({ ...first, cached: true });
-    expect(asked).toHaveLength(2);
+    expect(asked).toHaveLength(3);
     const edited = { ...files, 'CONTRIBUTING.md': `${files['CONTRIBUTING.md']}- Tests must pass.\n` };
     const third = await discoverRules(memorySource(edited), rules(), judge, store, now, quiet);
     expect(third.cached).toBe(false);
     expect(third.rules.map((r) => r.text)).toContain('Contributing: Tests must pass.');
-    expect(asked).toHaveLength(4);
-    await discoverRules(memorySource(edited), rules({ exclude: ['README.md'] }), judge, store, now, quiet);
     expect(asked).toHaveLength(6);
+    await discoverRules(memorySource(edited), rules({ exclude: ['README.md'] }), judge, store, now, quiet);
+    expect(asked).toHaveLength(9);
     await discoverRules(memorySource(edited, { scope: 'other' }), rules({ exclude: ['README.md'] }), judge, store, now, quiet);
-    expect(asked).toHaveLength(8);
+    expect(asked).toHaveLength(12);
   });
 
   it('keys a source with content ids on the ids alone, reading no file on a hit, and reruns when an id changes', async () => {
@@ -175,10 +178,10 @@ describe('rule discovery', () => {
     reads.length = 0;
     expect(await discoverRules(ided(ids), rules(), judge, store, now, quiet)).toEqual({ ...first, cached: true });
     expect(reads).toEqual([]);
-    expect(asked).toHaveLength(2);
+    expect(asked).toHaveLength(3);
     const third = await discoverRules(ided({ ...ids, 'CONTRIBUTING.md': 'CONTRIBUTING.md-2' }), rules(), judge, store, now, quiet);
     expect(third.cached).toBe(false);
-    expect(asked).toHaveLength(4);
+    expect(asked).toHaveLength(6);
   });
 
   it('fails and caches nothing when a listed file cannot be read', async () => {
@@ -223,9 +226,9 @@ describe('rule discovery', () => {
   // an outage at either rank step, or a judge that answers ok with an item missing, leaves no cache, and the next call asks again
   it.each([
     ['an outage at the document step', (q: string) => q.startsWith('The document'), false],
-    ['an outage at the paragraph step', (q: string) => q.startsWith('This paragraph'), false],
+    ['an outage at the paragraph step', (q: string) => q.startsWith('Read as part of the document'), false],
     ['an answer missing at the document step', (q: string) => q.startsWith('The document'), true],
-    ['an answer missing at the paragraph step', (q: string) => q.startsWith('This paragraph'), true],
+    ['an answer missing at the paragraph step', (q: string) => q.startsWith('Read as part of the document'), true],
   ])('caches nothing after %s and rediscovers on the next call', async (_, hit, omit) => {
     const healthy = judgeBy(isRuleDoc, isRule);
     const failing: Judge = {
@@ -247,7 +250,7 @@ describe('rule discovery', () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
     const up = await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now, quiet);
     expect(up.cached).toBe(false);
-    expect(asked).toHaveLength(2);
+    expect(asked).toHaveLength(3);
     expect(up.docs).toEqual(['CONTRIBUTING.md', 'docs/style.md']);
     expect(store.map.get(rulesKeys('mem').cache)).toMatchObject({ docs: ['CONTRIBUTING.md', 'docs/style.md'] });
   });
