@@ -1,3 +1,5 @@
+import { prefixWithin } from '../judge/room.ts';
+
 // one part of a text too long to judge at once: its exact slice and the headings of the blocks it covers
 export type Part = { text: string; headings: string[] };
 
@@ -29,28 +31,37 @@ function blocksOf(text: string): Piece[] {
   return blocks;
 }
 
+// what a part's size is measured in: characters unless said
+export type Size = (text: string) => number;
+const chars: Size = (text) => text.length;
+
 // a piece over the cap split at paragraph boundaries, a paragraph over it at line boundaries, a line over it at the cap
-function splitPiece(piece: Piece, cap: number): Piece[] {
-  if (piece.text.length <= cap) return [piece];
+function splitPiece(piece: Piece, cap: number, size: Size): Piece[] {
+  if (size(piece.text) <= cap) return [piece];
   const paragraphs = piece.text.split(/(?<=\n[ \t]*\n)/);
-  const lines = paragraphs.flatMap((p) => (p.length <= cap ? [p] : linesOf(p)));
+  const lines = paragraphs.flatMap((p) => (size(p) <= cap ? [p] : linesOf(p)));
   const pieces = lines.flatMap((l) => {
     const out: string[] = [];
-    for (let at = 0; at < l.length; at += cap) out.push(l.slice(at, at + cap));
+    for (let rest = l; rest.length > 0; ) {
+      // a cap too small for one character still takes one, so the split always moves on
+      const head = prefixWithin(rest, cap, size) || rest.slice(0, 1);
+      out.push(head);
+      rest = rest.slice(head.length);
+    }
     return out;
   });
   return pieces.map((text) => ({ text, heading: piece.heading }));
 }
 
-// the text in parts of at most cap characters that concatenate back to it exactly: split at headings, then at
+// the text in parts of at most cap in size that concatenate back to it exactly: split at headings, then at
 // paragraphs, then at lines, adjacent pieces packed together while they fit. each part names the headings it covers,
 // a part that continues a block under the heading of that block
-export function partsOf(text: string, cap: number): Part[] {
-  if (text.length <= cap) return [{ text, headings: blocksOf(text).flatMap((b) => (b.heading ? [b.heading] : [])) }];
+export function partsOf(text: string, cap: number, size: Size = chars): Part[] {
+  if (size(text) <= cap) return [{ text, headings: blocksOf(text).flatMap((b) => (b.heading ? [b.heading] : [])) }];
   const parts: Part[] = [];
   let current: Part | undefined;
-  for (const piece of blocksOf(text).flatMap((b) => splitPiece(b, cap))) {
-    if (!current || current.text.length + piece.text.length > cap) {
+  for (const piece of blocksOf(text).flatMap((b) => splitPiece(b, cap, size))) {
+    if (!current || size(current.text + piece.text) > cap) {
       current = { text: '', headings: [] };
       parts.push(current);
     }

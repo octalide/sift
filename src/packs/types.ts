@@ -1,3 +1,4 @@
+import type { Cut } from '../judge/room.ts';
 import type { Answer, Answers, Band, Question } from '../judge/types.ts';
 import type { RankMode } from '../judge/rank.ts';
 
@@ -122,6 +123,8 @@ export type Subject = {
   facts: Record<string, unknown>;
   // runtime option sets for choice questions
   options: Record<string, Record<string, string>>;
+  // the texts the judge reads only part of, or none of, because the whole is more than its state holds
+  cuts?: Cut[];
   // a judge failure while the subject was built: the run asks nothing more and the report carries it
   judgeError?: string;
   // work the subject needs outlasted its wait and keeps running, so the same call made again can answer

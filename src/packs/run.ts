@@ -6,6 +6,7 @@ import { CHECKS } from './checks.ts';
 import { pool } from '../pool.ts';
 import type { Finding, Judged, Pack, PackQuestion, RankedItem, RankedStep, RankStep, Report, Subject, Verdict } from './types.ts';
 import { batchQuestions, estimateTokensOf, JEV_LIMITS } from '../tokens.ts';
+import { cutMessage } from '../judge/room.ts';
 
 type Meta = { lo: number; hi: number; severity: Judged['severity']; inverted: boolean; violates: (string | number)[] };
 
@@ -167,7 +168,8 @@ async function runStep(s: Step, items: Record<string, unknown>[], state: Record<
 }
 
 export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge, config: RepoConfig, options: RunOptions = {}): Promise<Report> {
-  const mechanical = runChecks(pack, subject, config);
+  // a cut is never silent: whatever pack reads the subject says what the judge did not read
+  const mechanical = [...runChecks(pack, subject, config), ...(subject.cuts?.length ? [{ check: 'subject.cut', severity: 'warn' as const, message: cutMessage(subject.cuts) }] : [])];
   const { questions, meta, steps } = materialize(pack, subject);
   const judged: Judged[] = [];
   const ranked: RankedStep[] = [];

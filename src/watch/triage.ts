@@ -2,7 +2,7 @@ import type { Judge } from '../judge/types.ts';
 import { runPack } from '../packs/run.ts';
 import type { Pack, Subject } from '../packs/types.ts';
 import type { RepoConfig } from '../repo/config.ts';
-import { truncate } from '../tokens.ts';
+import { fitTexts } from '../judge/room.ts';
 import type { WatchEvent } from './poll.ts';
 
 export type WatchRules = {
@@ -37,11 +37,17 @@ export type EventDetail = {
   latestReviewComment?: { by: string; path: string; text: string };
 };
 
+// an event as the triage pack reads it: its body and the latest comment, review and review comment, the body taking room first
 export function eventSubject(repo: string, e: WatchEvent, detail: EventDetail): Subject {
-  return {
-    kind: 'event',
-    ref: e.id,
-    state: {
+  const { latestComment: comment, latestReview: review, latestReviewComment: reviewComment } = detail;
+  const fit = fitTexts(
+    [
+      { name: 'the body', text: detail.body ?? '' },
+      { name: 'the latest comment', text: comment?.text ?? '', tier: 1 },
+      { name: 'the latest review', text: review?.text ?? '', tier: 1 },
+      { name: 'the latest review comment', text: reviewComment?.text ?? '', tier: 1 },
+    ],
+    ([body, c, r, rc]) => ({
       repo,
       kind: e.kind,
       number: e.number ?? null,
@@ -49,14 +55,20 @@ export function eventSubject(repo: string, e: WatchEvent, detail: EventDetail): 
       changes: e.changes,
       author: e.user,
       is_new: e.isNew,
-      body: truncate(detail.body ?? '', 8000),
+      body: body!,
       labels: detail.labels ?? [],
-      latest_comment: detail.latestComment ? { by: detail.latestComment.by, text: truncate(detail.latestComment.text, 4000) } : null,
-      latest_review: detail.latestReview ? { ...detail.latestReview, text: truncate(detail.latestReview.text, 4000) } : null,
-      latest_review_comment: detail.latestReviewComment ? { ...detail.latestReviewComment, text: truncate(detail.latestReviewComment.text, 4000) } : null,
-    },
+      latest_comment: comment ? { by: comment.by, text: c! } : null,
+      latest_review: review ? { ...review, text: r! } : null,
+      latest_review_comment: reviewComment ? { ...reviewComment, text: rc! } : null,
+    }),
+  );
+  return {
+    kind: 'event',
+    ref: e.id,
+    state: fit.state,
     facts: {},
     options: {},
+    ...(fit.cuts.length > 0 ? { cuts: fit.cuts } : {}),
   };
 }
 

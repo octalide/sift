@@ -1,4 +1,5 @@
 import { truncate } from '../tokens.ts';
+import { CONTEXT_ROOM, fitTexts } from '../judge/room.ts';
 import type { Subject } from '../packs/types.ts';
 import { pool } from '../pool.ts';
 
@@ -151,14 +152,15 @@ export async function indexTree(tree: Tree, options: Partial<IndexOptions> = {})
   return { dirs, files, skipped: paths.length - files.length };
 }
 
-const TEXT_CAP = 20_000;
-
-// the tree subject: the text is the state every rank reads against, the index is the facts the steps rank
+// the tree subject: the text is the state every rank reads against, as the context beside the items it ranks,
+// the index is the facts the steps rank
 export function treeSubject(text: string, ref: string, index: TreeIndex): Subject {
+  const fit = fitTexts([{ name: 'the text', text }], ([t]) => ({ text: t! }), CONTEXT_ROOM);
   return {
     kind: 'tree',
     ref,
-    state: { text: truncate(text, TEXT_CAP) },
+    ...(fit.cuts.length > 0 ? { cuts: fit.cuts } : {}),
+    state: fit.state,
     facts: { dirs: index.dirs, files: index.files, total_files: index.files.length, skipped_files: index.skipped, has_files: index.files.length > 0 },
     options: {},
   };

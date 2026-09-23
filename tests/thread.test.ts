@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Comment } from '../src/forge/forge.ts';
 import { DEFAULT_CONFIG } from '../src/repo/config.ts';
-import { ISSUE_STATE_TOKENS, issueSubject, prSubject, rulingsOf, threadOf, type ThreadComment } from '../src/repo/subjects.ts';
-import { CHECKS } from '../src/packs/checks.ts';
+import { issueSubject, prSubject, rulingsOf, threadOf, type ThreadComment } from '../src/repo/subjects.ts';
+import { STATE_ROOM } from '../src/judge/room.ts';
 import { estimateTokensOf } from '../src/tokens.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { formatReport, materialize, runPack } from '../src/packs/run.ts';
@@ -38,7 +38,7 @@ describe('issue thread', () => {
     expect(comments[0]).toMatchObject({ by: 'octalide', association: 'MEMBER', text: RULING.body });
   });
 
-  it('spends the budget on the author and maintainers first, then the newest of the rest', () => {
+  it('spends the room on the author and maintainers first, then the newest of the rest', () => {
     const long = (i: number) => 'x'.repeat(100 + i);
     const comments = [
       say('octalide', 'MEMBER', '1', long(1)),
@@ -48,9 +48,13 @@ describe('issue thread', () => {
       say('author', 'NONE', '5', long(5)),
       say('d', 'NONE', '6', long(6)),
     ];
-    // room for four comments of about a hundred characters: the three that amend, then the newest other
-    const kept = threadOf(fakeForge(), 'author', comments, 430);
-    expect(kept.map((c) => c.by)).toEqual(['octalide', 'b', 'author', 'd']);
+    // room for four whole comments: the three that amend, then the newest other; with less, that newest other is cut
+    const four = [comments[0]!, comments[2]!, comments[4]!, comments[5]!].map((c) => ({ by: c.author.login, association: c.association, at: c.createdAt, text: c.body }));
+    expect(threadOf(fakeForge(), 'author', comments, estimateTokensOf(four))).toEqual(four);
+    const less = threadOf(fakeForge(), 'author', comments, estimateTokensOf(four) - 5);
+    expect(less.slice(0, 3)).toEqual(four.slice(0, 3));
+    expect(less[3]!.text).toMatch(/^x+…$/);
+    expect(estimateTokensOf(less)).toBeLessThanOrEqual(estimateTokensOf(four) - 5);
     expect(threadOf(fakeForge(), 'author', comments).map((c) => c.at)).toEqual(['1', '2', '3', '4', '5', '6']);
   });
 
@@ -95,26 +99,28 @@ describe('issue thread', () => {
     const thread = Array.from({ length: 40 }, (_, i) => say('author', 'NONE', `2026-01-${String(i + 1).padStart(2, '0')}T00:00:00Z`, `Comment ${i}. `.repeat(400)));
     const s = await issueSubject(forgeFor({ ...OPEN_QUESTION, body }, thread), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     expect(s.state['body']).toBe(body);
-    expect(s.facts['body']).toEqual({ length: body.length, judged: body.length });
-    expect(CHECKS['issue.body']!(s, DEFAULT_CONFIG)).toEqual([]);
     const comments = s.state['comments'] as ThreadComment[];
     expect(comments.length).toBeGreaterThan(0);
     expect(comments.length).toBeLessThan(thread.length);
     expect(comments.at(-1)!.at).toBe(thread.at(-1)!.createdAt);
-    expect(estimateTokensOf(s.state)).toBeLessThanOrEqual(ISSUE_STATE_TOKENS);
+    expect(estimateTokensOf(s.state)).toBeLessThanOrEqual(STATE_ROOM);
+    expect(s.cuts!.filter((c) => c.name === 'the body')).toEqual([]);
+    expect(s.cuts!.every((c) => c.name.startsWith('the comment by author'))).toBe(true);
   });
 
   it('cuts a body too dense for the state alone to the room there is, and says so', async () => {
     const body = '{"k":[1,2]}'.repeat(6_000);
     const s = await issueSubject(forgeFor({ ...OPEN_QUESTION, body }, [RULING]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     const text = s.state['body'] as string;
-    const judged = (s.facts['body'] as { judged: number }).judged;
-    expect(text).toBe(`${body.slice(0, judged)}…`);
-    expect(judged).toBeGreaterThan(20_000);
-    expect(judged).toBeLessThan(body.length);
-    expect(estimateTokensOf(s.state)).toBeLessThanOrEqual(ISSUE_STATE_TOKENS);
-    expect(CHECKS['issue.body']!(s, DEFAULT_CONFIG)).toEqual([
-      { check: 'issue.body', severity: 'warn', message: `the judge read the first ${judged} of the body's ${body.length} characters: the rest is more than its state holds, so the questions did not read it` },
+    const cut = s.cuts!.find((c) => c.name === 'the body')!;
+    expect(text).toBe(`${body.slice(0, cut.judged)}…`);
+    expect(cut.judged).toBeGreaterThan(20_000);
+    expect(cut.length).toBe(body.length);
+    expect(estimateTokensOf(s.state)).toBeLessThanOrEqual(STATE_ROOM);
+    const judge: Judge = { name: 'none', ask: async () => ({ ok: false, reason: 'unavailable', message: 'offline', backend: 'none' }) };
+    const report = await runPack(BUILTIN_PACKS['issue']!, s, judge, DEFAULT_CONFIG);
+    expect(report.mechanical.filter((f) => f.check === 'subject.cut')).toEqual([
+      { check: 'subject.cut', severity: 'warn', message: expect.stringContaining(`the body (the first ${cut.judged} of ${body.length} characters)`) },
     ]);
   });
 

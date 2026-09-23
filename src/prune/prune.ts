@@ -1,6 +1,7 @@
 import { rank } from '../judge/rank.ts';
 import { failureText, type Judge, type Questions } from '../judge/types.ts';
-import { estimateTokens, JEV_LIMITS, truncate } from '../tokens.ts';
+import { estimateTokens, JEV_LIMITS } from '../tokens.ts';
+import { CONTEXT_ROOM, fitTexts, type Cut } from '../judge/room.ts';
 import { PRUNE_TOOL } from './loops.ts';
 
 export type PruneOptions = {
@@ -38,6 +39,8 @@ export type PruneResult = {
   requests: number;
   skipped?: string;
   error?: string;
+  // the context texts the judge read part of, the rest more than a rank's context holds
+  cuts?: Cut[];
 };
 
 // tools whose output may lose lines only at its end: the engine numbers a Read's content from its one startLine
@@ -135,21 +138,23 @@ export async function prune(text: string, context: PruneContext, judge: Judge, o
   const chunks = chunkText(text, options.chunkLines, options.maxChunks, !tailOnly);
   const judged = chunks.filter((c) => !c.protected);
   if (judged.length === 0) return none('every chunk protected');
+  const fit = contextOf(context);
+  const cut = fit.cuts.length > 0 ? { cuts: fit.cuts } : {};
   // every chunk rides in the state so the judge reads the whole output, protected ones are asked about and ignored
   const ranked = await rank(
     chunks.map((c) => ({ lines: `${c.from}-${c.to}`, text: c.text })),
     NEEDED,
     judge,
-    { mode: 'batched', context: { tool: context.tool, input: context.input, task: truncate(context.task, 2000) }, maxRequestTokens: options.maxRequestTokens },
+    { mode: 'batched', context: fit.state, maxRequestTokens: options.maxRequestTokens },
   );
-  if (!ranked.ok) return { ...none('judge failed'), skipped: undefined, error: failureText(ranked) };
+  if (!ranked.ok) return { ...none('judge failed'), skipped: undefined, error: failureText(ranked), ...cut };
   const scores: Record<number, number> = {};
   for (const r of ranked.items) if (!chunks[r.index]!.protected) scores[r.index] = r.value;
   const needed = (c: Chunk) => c.protected || (scores[c.k] ?? 1) >= options.keepThreshold;
   // a tail-only tool keeps everything up to its last needed chunk and omits only what follows it
   const last = chunks.findLastIndex(needed);
   const keep = tailOnly ? (c: Chunk) => c.k <= last : needed;
-  if (tailOnly && last === chunks.length - 1 && chunks.some((c) => !needed(c))) return { ...none('gap would misnumber lines'), chunks: chunks.length, kept: chunks.length, scores, requests: ranked.requests };
+  if (tailOnly && last === chunks.length - 1 && chunks.some((c) => !needed(c))) return { ...none('gap would misnumber lines'), chunks: chunks.length, kept: chunks.length, scores, requests: ranked.requests, ...cut };
   const kept = chunks.filter(keep).length;
   return {
     text: assemble(chunks, keep, omissionNote(context)),
@@ -158,5 +163,16 @@ export async function prune(text: string, context: PruneContext, judge: Judge, o
     dropped: chunks.length - kept,
     scores,
     requests: ranked.requests,
+    ...cut,
   };
+}
+
+// the context the chunks are read against: the task and the tool input's text fields share the room, a short field whole
+function contextOf(context: PruneContext) {
+  const fields = Object.entries(context.input).filter((e): e is [string, string] => typeof e[1] === 'string');
+  return fitTexts(
+    [{ name: 'the task', text: context.task }, ...fields.map(([k, v]) => ({ name: `the input ${k}`, text: v }))],
+    ([task, ...values]) => ({ tool: context.tool, input: { ...context.input, ...Object.fromEntries(fields.map(([k], i) => [k, values[i]!])) }, task: task! }),
+    CONTEXT_ROOM,
+  );
 }

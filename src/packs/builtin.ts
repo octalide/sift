@@ -15,7 +15,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
     name: 'issue',
     subject: 'issue',
     description: 'Is this issue well formed, correctly typed, scoped to this repo, and ready to work on?',
-    checks: ['issue.labels', 'issue.milestone', 'issue.template', 'issue.body', 'issue.parent'],
+    checks: ['issue.labels', 'issue.milestone', 'issue.template', 'issue.parent'],
     questions: {
       substantive: {
         type: 'noul',

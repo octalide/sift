@@ -1,4 +1,5 @@
-import { estimateTokensOf, JEV_LIMITS, prefixWithin, truncate } from '../tokens.ts';
+import { estimateTokensOf, truncate } from '../tokens.ts';
+import { CONTEXT_ROOM, fitTexts, STATE_ROOM, textTokens, type Cut, type Text } from '../judge/room.ts';
 import type { Subject } from '../packs/types.ts';
 import { refusal, type Asked } from '../packs/subject.ts';
 import type { Check, Comment, Forge } from '../forge/forge.ts';
@@ -12,12 +13,6 @@ import { tagPatternFor, type RepoConfig } from './config.ts';
 import type { Discoveries, Discovery, Rule, RuleSource } from '../rules/discover.ts';
 import { partName, partsOf } from './parts.ts';
 
-const BODY_CAP = 20_000;
-const COMMENT_CAP = 6_000;
-// what a thread may add to the state: the body's cap twice over, so a long discussion cannot crowd out the rest
-const THREAD_BUDGET = 40_000;
-// what an issue's state may cost: the judge's state limit, less room for the longest question asked beside it
-export const ISSUE_STATE_TOKENS = JEV_LIMITS.stateTokens - 2_000;
 
 
 export function sectionsOf(markdown: string): Record<string, string> {
@@ -67,24 +62,30 @@ export function amends(forge: Pick<Forge, 'maintains'>, author: string, by: stri
   return by === author || forge.maintains(association);
 }
 
-// the thread under a budget of characters and, where the state is tight, of tokens: the author's and maintainers' comments
-// first, newest first, then the newest of the rest; what is kept goes out oldest first, so a later ruling reads as later
-export function threadOf(forge: Pick<Forge, 'maintains'>, author: string, comments: Comment[], budget = THREAD_BUDGET, tokens = Infinity): ThreadComment[] {
+// a thread as texts that take room after the rest of its subject: the author's and maintainers' comments first, newest first,
+// then the newest of the rest, each its own tier from tier on, so a comment is cut only once every comment before it is whole.
+// of builds the thread from the fitted texts, oldest first so a later ruling reads as later, a comment left no room dropped
+export type Thread = { texts: Text[]; of: (fitted: string[]) => ThreadComment[] };
+
+export function threadTexts(forge: Pick<Forge, 'maintains'>, author: string, comments: Comment[], tier = 1): Thread {
   const order = comments.map((c, i) => ({ c, i })).reverse();
   const standing = ({ c }: { c: Comment }) => amends(forge, author, c.author.login, c.association);
   const ranked = [...order.filter(standing), ...order.filter((x) => !standing(x))];
-  const kept: { i: number; comment: ThreadComment }[] = [];
-  let left = budget;
-  let room = tokens;
-  for (const { c, i } of ranked) {
-    const comment = { by: c.author.login, association: c.association ?? null, at: c.createdAt, text: truncate(c.body, COMMENT_CAP) };
-    const cost = tokens === Infinity ? 0 : estimateTokensOf(comment) + 1;
-    if (comment.text.length > left || cost > room) continue;
-    left -= comment.text.length;
-    room -= cost;
-    kept.push({ i, comment });
-  }
-  return kept.sort((a, b) => a.i - b.i).map(({ comment }) => comment);
+  return {
+    texts: ranked.map(({ c }, r) => ({ name: `the comment by ${c.author.login} at ${c.createdAt}`, text: c.body, tier: tier + r })),
+    of: (fitted) =>
+      ranked
+        .map(({ c, i }, r) => ({ i, text: fitted[r]!, dropped: fitted[r] === '' && c.body !== '', c }))
+        .filter((x) => !x.dropped)
+        .sort((a, b) => a.i - b.i)
+        .map(({ c, text }) => ({ by: c.author.login, association: c.association ?? null, at: c.createdAt, text })),
+  };
+}
+
+// the thread alone in a room, the tokens of the state it may take
+export function threadOf(forge: Pick<Forge, 'maintains'>, author: string, comments: Comment[], room = STATE_ROOM): ThreadComment[] {
+  const thread = threadTexts(forge, author, comments);
+  return fitTexts(thread.texts, thread.of, room).state;
 }
 
 // the author's and maintainers' comments a judge can name as the one that settles something, keyed by who and when
@@ -97,21 +98,20 @@ export function rulingsOf(forge: Pick<Forge, 'maintains'>, author: string, threa
   return out;
 }
 
-// an issue graded for the pack that was asked; a number that names a pull request is refused with the pack and the forms of its kind named.
-// the body is whole in the state: fit to the judge's state limit, the thread taking the room left, when the pack reads it at once,
-// or whole whatever its length when the caller judges it in parts (the rules pack)
-export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, asked: Asked<'issue' | 'rules'>, body: 'fit' | 'parts' = 'fit'): Promise<Subject> {
+// an issue as its subjects read it: the state built from its body and thread, the texts those take room as, and what the checks read
+async function readIssue(forge: Forge, repo: string, n: number, config: RepoConfig, asked: Asked<'issue' | 'rules'>) {
   const issue = await forge.issue(repo, n);
   if (issue.pr) throw refusal(asked, `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
   const [all, open, parent] = await Promise.all([forge.comments(repo, 'issue', n), forge.openIssues(repo), forge.parent(repo, n)]);
   const sections = sectionsOf(issue.body);
   const labels = issue.labels;
   const others = open.filter((i) => i.number !== n);
-  const state = (text: string, comments: ThreadComment[]) => ({
+  const thread = threadTexts(forge, issue.author.login, all);
+  const state = (body: string, comments: ThreadComment[]) => ({
     repo,
     number: n,
     title: issue.title,
-    body: text,
+    body,
     labels,
     milestone: issue.milestone ?? null,
     author: issue.author.login,
@@ -123,32 +123,38 @@ export async function issueSubject(forge: Forge, repo: string, n: number, config
       required_label_groups: config.issues.requiredLabelGroups,
     },
   });
-  // the body first, then the thread in what room is left; a body too dense for the state alone is cut to it, and the cut marked
-  const fit = body === 'fit';
-  const kept = fit ? prefixWithin(issue.body, ISSUE_STATE_TOKENS - estimateTokensOf(state('', [])) - 1) : issue.body;
-  const text = kept.length < issue.body.length ? `${kept}…` : kept;
-  const comments = threadOf(forge, issue.author.login, all, THREAD_BUDGET, fit ? ISSUE_STATE_TOKENS - estimateTokensOf(state(text, [])) : Infinity);
-  const rulings = rulingsOf(forge, issue.author.login, comments);
-  return {
-    kind: 'issue',
-    ref: `${repo}#${n}`,
-    state: state(text, comments),
-    facts: {
-      labels,
-      milestone: issue.milestone,
-      sections,
-      body: { length: issue.body.length, judged: kept.length },
-      parent,
-      is_new: all.length === 0,
-      has_others: others.length > 0,
-      has_rulings: Object.keys(rulings).length > 0,
-    },
-    options: {
-      rulings,
-      open_issues: Object.fromEntries(others.slice(0, 200).map((i) => [`#${i.number}`, truncate(i.title, 120)])),
-      type_labels: Object.fromEntries((config.issues.requiredLabelGroups[0] ?? []).map((l) => [l, `the ${l} label`])),
-    },
+  const subject = (built: Record<string, unknown>, comments: ThreadComment[], cuts: Cut[]): Subject => {
+    const rulings = rulingsOf(forge, issue.author.login, comments);
+    return {
+      kind: 'issue',
+      ref: `${repo}#${n}`,
+      state: built,
+      facts: {
+        labels,
+        milestone: issue.milestone,
+        sections,
+        parent,
+        is_new: all.length === 0,
+        has_others: others.length > 0,
+        has_rulings: Object.keys(rulings).length > 0,
+      },
+      options: {
+        rulings,
+        open_issues: Object.fromEntries(others.slice(0, 200).map((i) => [`#${i.number}`, truncate(i.title, 120)])),
+        type_labels: Object.fromEntries((config.issues.requiredLabelGroups[0] ?? []).map((l) => [l, `the ${l} label`])),
+      },
+      ...(cuts.length > 0 ? { cuts } : {}),
+    };
   };
+  return { issue, thread, state, subject };
+}
+
+// an issue graded for the pack that was asked; a number that names a pull request is refused with the pack and the forms of its kind named.
+// the body and thread fit the state: the body takes room first, the thread what it leaves
+export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, asked: Asked<'issue' | 'rules'>): Promise<Subject> {
+  const { issue, thread, state, subject } = await readIssue(forge, repo, n, config, asked);
+  const fit = fitTexts([{ name: 'the body', text: issue.body, tier: 0 }, ...thread.texts], ([body, ...rest]) => state(body!, thread.of(rest)));
+  return subject(fit.state, fit.state.comments, fit.cuts);
 }
 
 export async function prSubject(forge: Forge, repo: string, n: number, config: RepoConfig): Promise<Subject> {
@@ -169,39 +175,52 @@ export async function prSubject(forge: Forge, repo: string, n: number, config: R
   const failed = checks.filter((c) => c.done && !c.ok);
   const pending = checks.filter((c) => !c.done);
   const drift = driftOf(diff, baseDiff);
-  return {
-    kind: 'pr',
-    ref: `${repo}#${n}`,
-    state: {
-      repo,
-      number: n,
-      title: pr.title,
-      body: truncate(body, BODY_CAP),
-      author: pr.author.login,
-      base: pr.base,
-      head: pr.head.branch,
-      draft: pr.draft,
-      stats: pr.stats,
-      linked_issue: issue ? { number: issue.number, title: issue.title, body: truncate(issue.body, BODY_CAP) } : null,
-      commits: commits.map((c) => c.message.split('\n')[0]),
-      checks: { failed: failed.map((c) => c.name), pending: pending.map((c) => c.name), total: checks.length },
-      comments: threadOf(forge, pr.author.login, all),
-      drift,
+  // the body and the linked issue's take room first, the thread what they leave
+  const thread = threadTexts(forge, pr.author.login, all, 1);
+  const fit = fitTexts(
+    [{ name: 'the body', text: body, tier: 0 }, ...(issue ? [{ name: `the body of #${issue.number}`, text: issue.body, tier: 0 }] : []), ...thread.texts],
+    (texts) => {
+      const [fitted, ...rest] = texts;
+      const linkedBody = issue ? rest.shift()! : '';
+      return {
+        repo,
+        number: n,
+        title: pr.title,
+        body: fitted!,
+        author: pr.author.login,
+        base: pr.base,
+        head: pr.head.branch,
+        draft: pr.draft,
+        stats: pr.stats,
+        linked_issue: issue ? { number: issue.number, title: issue.title, body: linkedBody } : null,
+        commits: commits.map((c) => c.message.split('\n')[0]),
+        checks: { failed: failed.map((c) => c.name), pending: pending.map((c) => c.name), total: checks.length },
+        comments: thread.of(rest),
+        drift,
+      };
     },
-    facts: {
-      linked,
-      base: pr.base,
-      head: pr.head.branch,
-      sections: sectionsOf(body),
-      checks_failed: failed.map((c) => c.name),
-      checks_pending: pending.map((c) => c.name),
-      commits,
-      drift,
-      has_issue: issue !== undefined,
-      has_drift: drift.length > 0,
+  );
+  return withCuts(
+    {
+      kind: 'pr',
+      ref: `${repo}#${n}`,
+      state: fit.state,
+      facts: {
+        linked,
+        base: pr.base,
+        head: pr.head.branch,
+        sections: sectionsOf(body),
+        checks_failed: failed.map((c) => c.name),
+        checks_pending: pending.map((c) => c.name),
+        commits,
+        drift,
+        has_issue: issue !== undefined,
+        has_drift: drift.length > 0,
+      },
+      options: {},
     },
-    options: {},
-  };
+    fit.cuts,
+  );
 }
 
 // where a range subject reads its issue from, when the checkout has a forge behind it
@@ -225,44 +244,61 @@ export async function prRangeSubject(git: Git, range: string, config: RepoConfig
   const number = branchIssue(branch, config.branches.pattern);
   const issue = number !== undefined && issues ? await issues.forge.issue(issues.repo, number).catch(() => undefined) : undefined;
   const drift = driftOf(diff, baseDiff);
-  return {
-    kind: 'pr',
-    ref: range,
-    state: {
-      range,
-      base,
-      head: branch,
-      linked_issue: issue ? { number: issue.number, title: issue.title, body: truncate(issue.body, BODY_CAP) } : null,
-      commits: commits.map((c) => c.message.split('\n')[0]),
-      drift,
+  const fit = fitTexts(issue ? [{ name: `the body of #${issue.number}`, text: issue.body }] : [], ([linkedBody]) => ({
+    range,
+    base,
+    head: branch,
+    linked_issue: issue ? { number: issue.number, title: issue.title, body: linkedBody! } : null,
+    commits: commits.map((c) => c.message.split('\n')[0]),
+    drift,
+  }));
+  return withCuts(
+    {
+      kind: 'pr',
+      ref: range,
+      state: fit.state,
+      facts: {
+        head: branch,
+        commits,
+        drift,
+        has_issue: issue !== undefined,
+        has_drift: drift.length > 0,
+      },
+      options: {},
     },
-    facts: {
-      head: branch,
-      commits,
-      drift,
-      has_issue: issue !== undefined,
-      has_drift: drift.length > 0,
-    },
-    options: {},
-  };
+    fit.cuts,
+  );
+}
+
+// the commits' subjects and bodies as primary texts: sharing the room evenly, a subject line stays whole
+function commitTexts(commits: ParsedCommit[]): Text[] {
+  return [
+    ...commits.map((c) => ({ name: `the subject of ${c.sha.slice(0, 7)}`, text: c.subject })),
+    ...commits.map((c) => ({ name: `the body of ${c.sha.slice(0, 7)}`, text: c.body })),
+  ];
 }
 
 export async function commitSubject(git: Git, range: string, config: RepoConfig): Promise<Subject> {
   const raw = await git(range.includes('..') ? ['log', LOG_FORMAT, '--no-merges', range] : ['log', LOG_FORMAT, '-1', range]);
   const commits = parseLog(raw, config.commits.format);
-  return {
-    kind: 'commit',
-    ref: range,
-    state: {
-      range,
-      commits: commits.map((c) => ({ sha: c.sha.slice(0, 7), subject: c.subject, body: truncate(c.body, 2000) })),
-      conventions: config.commits,
+  const k = commits.length;
+  const fit = fitTexts(commitTexts(commits), (texts) => ({
+    range,
+    commits: commits.map((c, i) => ({ sha: c.sha.slice(0, 7), subject: texts[i]!, body: texts[k + i]! })),
+    conventions: config.commits,
+  }));
+  return withCuts(
+    {
+      kind: 'commit',
+      ref: range,
+      state: fit.state,
+      facts: { commits, single: commits.length === 1 },
+      options: {
+        commit_types: Object.fromEntries(config.commits.types.map((t) => [t, `a ${t} change`])),
+      },
     },
-    facts: { commits, single: commits.length === 1 },
-    options: {
-      commit_types: Object.fromEntries(config.commits.types.map((t) => [t, `a ${t} change`])),
-    },
-  };
+    fit.cuts,
+  );
 }
 
 // the highest release tag, not the nearest ancestor: release tags sit on main and are unreachable from dev
@@ -298,16 +334,19 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
   const changelogBefore = changelogPath && lastTag ? await source.show(lastTag, changelogPath) : undefined;
   const diff = lineDiff(changelogBefore ?? '', changelog ?? '');
   const changelogAdded = diff.added.join('\n');
+  const k = commits.length;
+  const fit = fitTexts([{ name: 'the changelog diff', text: diff.text, tier: 0 }, ...commitTexts(commits)], ([changelogDiff, ...texts]) => ({
+    last_tag: lastTag ?? null,
+    commits: commits.map((c, i) => ({ sha: c.sha.slice(0, 7), subject: texts[i]!, breaking: c.breaking, body: texts[k + i]! })),
+    required_bump: bump,
+    manifest_changes: manifests.map((m) => ({ path: m.path, key: m.key, from: m.from, to: m.to })),
+    changelog_diff: changelogDiff!,
+  }));
   return {
     kind: 'release',
     ref: range,
-    state: {
-      last_tag: lastTag ?? null,
-      commits: commits.map((c) => ({ sha: c.sha.slice(0, 7), subject: c.subject, breaking: c.breaking, body: truncate(c.body, 1500) })),
-      required_bump: bump,
-      manifest_changes: manifests.map((m) => ({ path: m.path, key: m.key, from: m.from, to: m.to })),
-      changelog_diff: truncate(diff.text, 8000),
-    },
+    ...(fit.cuts.length > 0 ? { cuts: fit.cuts } : {}),
+    state: fit.state,
     facts: {
       lastTag,
       version,
@@ -333,40 +372,77 @@ export type RulesTarget = { number: number; pack: string };
 export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; discoveries: Discoveries };
 
 // an issue as the rules read it: its title and whole body through the parts free text takes, the rest of the issue beside the opening
-export async function rulesSubjects(host: RulesHost, target: RulesTarget, config: RepoConfig, cap = BODY_CAP): Promise<Subject[]> {
+export async function rulesSubjects(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject[]> {
   const { forge, repo } = host;
   const ref = `#${target.number}`;
   if (!forge || !repo) return [rulesOf(await rulesFound(host, config), `issue:${ref}`, { kind: 'issue', ref }, 'The subject', {})];
-  const s = await issueSubject(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' }, 'parts');
-  const { title, body, ...rest } = s.state;
+  const { issue, thread, state } = await readIssue(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' });
+  const frame: Frame = {
+    text: `${issue.title}\n${issue.body}`,
+    whole: { texts: [{ name: 'the body', text: issue.body, tier: 0 }, ...thread.texts], build: ([body, ...rest]) => ({ kind: 'issue', ...state(body!, thread.of(rest)) }) },
+    opening: {
+      texts: thread.texts,
+      build: (part, note, rest) => {
+        const { title: _title, body: _body, ...others } = state('', thread.of(rest));
+        return { kind: 'issue', ...others, note, text: part };
+      },
+    },
+  };
   // the subject is read, and a pull request refused, before discovery spends judge calls
-  return partSubjects(await rulesFound(host, config), `issue:${ref}`, `${title}\n${body}`, cap, `issue ${ref}`, { kind: 'issue', ...s.state }, { kind: 'issue', ...rest });
+  return partSubjects(await rulesFound(host, config), `issue:${ref}`, frame, `issue ${ref}`);
 }
 
 // text about to be written, as the rules read it
-export async function textRulesSubjects(host: RulesHost, target: { text: string; about?: string }, config: RepoConfig, cap = BODY_CAP): Promise<Subject[]> {
+export async function textRulesSubjects(host: RulesHost, target: { text: string; about?: string }, config: RepoConfig): Promise<Subject[]> {
   const { text, about } = target;
   const context = { kind: 'text', ...(about ? { about } : {}) };
-  return partSubjects(await rulesFound(host, config), `text:${truncate(text, 40)}`, text, cap, about, { ...context, text }, context);
+  const frame: Frame = {
+    text,
+    whole: { texts: [{ name: 'the text', text, tier: 0 }], build: ([whole]) => ({ ...context, text: whole! }) },
+    opening: { texts: [], build: (part, note) => ({ ...context, note, text: part }) },
+  };
+  return partSubjects(await rulesFound(host, config), `text:${truncate(text, 40)}`, frame, about);
 }
 
-// one subject when the text fits the judge's state, otherwise one per part, so every character is judged. the opening part
-// (where a title is) carries the rest of the subject and is judged against every rule, a rule about the whole text among
-// them; each later part against what a part can break, named by its place and headings
-function partSubjects(found: Found, ref: string, text: string, cap: number, about: string | undefined, whole: Record<string, unknown>, opening: Record<string, unknown>): Subject[] {
-  const parts = partsOf(text, cap);
+// a subject the rules read: the texts of its whole state, and the text split into parts when that state does not fit,
+// the opening part judged beside the texts the rest of the subject carries (its thread), fit into what the part leaves
+type Frame = {
+  text: string;
+  whole: { texts: Text[]; build: (texts: string[]) => Record<string, unknown> };
+  opening: { texts: Text[]; build: (part: string, note: string, texts: string[]) => Record<string, unknown> };
+};
+
+// what a part's note and place may cost beyond its frame: its number, count and the headings it names
+const NOTE_ROOM = 256;
+
+// the rules judge a subject as the context of a batched rank, beside the rules as its items. one subject when the text
+// fits that context, otherwise one per part, so every character is judged. the opening part (where a title is) carries the
+// rest of the subject and is judged against every rule, a rule about the whole text among them; each later part against
+// what a part can break, named by its place and headings. whatever is still cut to fit, a thread comment, is named
+function partSubjects(found: Found, ref: string, frame: Frame, about: string | undefined): Subject[] {
   const named = about ? ` (${about})` : '';
-  if (parts.length === 1) return [rulesOf(found, ref, whole, `The subject${named}`, {})];
-  const of = `a ${text.length}-character text in ${parts.length} parts`;
+  const whole = fitTexts(frame.whole.texts, frame.whole.build, CONTEXT_ROOM);
+  const main = new Set(frame.whole.texts.filter((t) => (t.tier ?? 0) === 0).map((t) => t.name));
+  if (!whole.cuts.some((c) => main.has(c.name))) return [withCuts(rulesOf(found, ref, whole.state, `The subject${named}`, {}), whole.cuts)];
+  const empty = frame.opening.texts.map(() => '');
+  const fixed = Math.max(estimateTokensOf(frame.opening.build('', '', empty)), estimateTokensOf({ kind: 'section', ...(about ? { about } : {}), note: '', text: '' }));
+  const parts = partsOf(frame.text, CONTEXT_ROOM - fixed - NOTE_ROOM, textTokens);
+  const of = `a ${frame.text.length}-character text in ${parts.length} parts`;
   return parts.map((part, i) => {
     const name = partName(part, i, parts.length);
     if (i === 0) {
       const note = `the opening of ${of}, judged against every rule, the rules about the whole text among them; the parts after it are judged on their own`;
-      return rulesOf(found, ref, { ...opening, note, text: part.text }, `The opening, ${name}, of the subject${named}`, { part: `the opening, ${name}` });
+      const opening = fitTexts([{ name: `the opening, ${name}`, text: part.text, tier: 0 }, ...frame.opening.texts], ([text, ...rest]) => frame.opening.build(text!, note, rest), CONTEXT_ROOM);
+      return withCuts(rulesOf(found, ref, opening.state, `The opening, ${name}, of the subject${named}`, { part: `the opening, ${name}` }), opening.cuts);
     }
     const note = `${name} of ${of}, judged on its own; the opening is judged against the rules about the whole text`;
-    return rulesOf(found, ref, { kind: 'section', ...(about ? { about } : {}), note, text: part.text }, `${name[0]!.toUpperCase()}${name.slice(1)} of the subject${named}`, { part: name, section: true });
+    const section = fitTexts([{ name, text: part.text }], ([text]) => ({ kind: 'section', ...(about ? { about } : {}), note, text: text! }), CONTEXT_ROOM);
+    return withCuts(rulesOf(found, ref, section.state, `${name[0]!.toUpperCase()}${name.slice(1)} of the subject${named}`, { part: name, section: true }), section.cuts);
   });
+}
+
+function withCuts(subject: Subject, cuts: Cut[]): Subject {
+  return cuts.length > 0 ? { ...subject, cuts } : subject;
 }
 
 type Found = { rules: Rule[]; total: number; discovery: Discovery };
@@ -402,32 +478,31 @@ function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, la
 }
 
 // a plan for an issue: the issue's title and body beside the plan text, so the judge reads the plan against what was asked.
-// a number that names a pull request is refused with the pack that was asked and the forms of an issue named
+// the body and plan share the state evenly when both do not fit. a number that names a pull request is refused with the
+// pack that was asked and the forms of an issue named
 export async function planSubject(forge: Forge, repo: string, n: number, plan: string, pack: string): Promise<Subject> {
   const issue = await forge.issue(repo, n);
   if (issue.pr) throw refusal({ pack, kind: 'issue' }, `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
-  return {
-    kind: 'plan',
-    ref: `${repo}#${n}`,
-    state: {
-      repo,
-      number: n,
-      issue: { title: issue.title, body: truncate(issue.body, BODY_CAP) },
-      plan: truncate(plan, BODY_CAP),
-    },
-    facts: { has_plan: plan.trim().length > 0 },
-    options: {},
-  };
+  const fit = fitTexts(
+    [
+      { name: 'the issue body', text: issue.body },
+      { name: 'the plan', text: plan },
+    ],
+    ([body, fitted]) => ({ repo, number: n, issue: { title: issue.title, body: body! }, plan: fitted! }),
+  );
+  return withCuts({ kind: 'plan', ref: `${repo}#${n}`, state: fit.state, facts: { has_plan: plan.trim().length > 0 }, options: {} }, fit.cuts);
 }
 
+// text about to be written, and what it is written about: the text takes room first
 export function textSubject(text: string, context?: string): Subject {
-  return {
-    kind: 'text',
-    ref: truncate(text, 40),
-    state: { text: truncate(text, BODY_CAP), context: context ? truncate(context, BODY_CAP) : null },
-    facts: {},
-    options: {},
-  };
+  const fit = fitTexts(
+    [
+      { name: 'the text', text, tier: 0 },
+      { name: 'its context', text: context ?? '', tier: 1 },
+    ],
+    ([t, c]) => ({ text: t!, context: context ? c! : null }),
+  );
+  return withCuts({ kind: 'text', ref: truncate(text, 40), state: fit.state, facts: {}, options: {} }, fit.cuts);
 }
 
 export function commitsOf(subject: Subject): ParsedCommit[] {
