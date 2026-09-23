@@ -14,16 +14,19 @@ import { ruleParagraphs } from './paragraphs.ts';
 
 export type Rule = { source: string; text: string };
 
+// a file a source lists: its path, and when the source has one, an id that changes whenever the content does
+export type SourceFile = { path: string; id?: string };
+
 // where rule documents are read from: a checkout, or a repository on the forge
 export type RuleSource = {
   // names the cache entry: the checkout root, or the repository and ref
   scope: string;
-  // every file path in the repository
-  list: () => Promise<string[]>;
+  // every file in the repository; a file with an id keys the cache without being read
+  list: () => Promise<SourceFile[]>;
   // a file's text, undefined when absent
   read: (path: string) => Promise<string | undefined>;
-  // the forge's issue and pull request templates, by path
-  templates: () => Promise<{ path: string; text: string }[]>;
+  // whether a path is an issue or pull request template, at a location the forge documents
+  template: (path: string) => boolean;
   // a file in another repository, for owner/repo:path@ref entries; undefined without a forge
   remote: (repo: string, path: string, ref?: string) => Promise<string | undefined>;
 };
@@ -38,10 +41,12 @@ export type Discovery = {
   cached: boolean;
   // the judge failed, nothing was cached
   error?: string;
+  // the discovery outlasted the wait and keeps running, for the next call on the scope to join or read from the cache
+  pending?: string;
 };
 
-// what the store holds per scope; bump when the shape, the questions or the keep policy change
-const VERSION = 2;
+// what the store holds per scope; bump when the shape, the key, the questions or the keep policy change
+const VERSION = 3;
 type Cached = { version: number; key: string; docs: string[]; rules: Rule[]; candidates: number; kept: string[] };
 
 export const PROSE = new Set(['md', 'mdx', 'markdown', 'txt', 'rst', 'org']);
@@ -127,34 +132,40 @@ type Doc = { path: string; text: string };
 
 // the candidates ranked and every one the judge does not rule out kept, the listed documents and the contributing guide
 // added as they are, every kept document's paragraphs ranked to rules. the result is cached under the source's scope keyed
-// by every file read and the config, so the judge runs only on a change. a discovery with any judge failure is never
-// cached, so the next one asks again. every discovery that answers from or writes the cache marks it read at now, so a
-// cache no discovery reads goes stale and is swept. a fresh discovery or a failure logs one line naming what was kept
+// by every candidate's content (its id where the source lists one, else a digest of its text) and the config, so a
+// cached discovery reads no candidate the source ids and the judge runs only on a change. a discovery with any judge
+// failure is never cached, so the next one asks again. every discovery that answers from or writes the cache marks it
+// read at now, so a cache no discovery reads goes stale and is swept. a fresh discovery or a failure logs one line
+// naming what was kept
 export async function discoverRules(source: RuleSource, config: RepoConfig['rules'], judge: Judge, store: StoreLike, now: () => number, log: (text: string) => void): Promise<Discovery> {
   const listed = new Set(config.docs);
-  const paths = (await source.list()).filter((p) => candidate(p) && !listed.has(p) && !excluded(p, config.exclude)).sort();
-  const read = await pool(paths, 16, async (path) => ({ path, text: await source.read(path) }));
-  const candidates: Doc[] = read.filter((d): d is Doc => d.text !== undefined);
-  for (const t of await source.templates()) {
-    if (listed.has(t.path) || excluded(t.path, config.exclude) || candidates.some((c) => c.path === t.path)) continue;
-    candidates.push({ path: t.path, text: t.text });
-  }
+  const files = (await source.list()).filter((f) => (candidate(f.path) || source.template(f.path)) && !listed.has(f.path) && !excluded(f.path, config.exclude)).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  // a file without an id is read to key the cache, and that read is kept for the discovery
+  const unkeyed = await pool(files.filter((f) => f.id === undefined), 16, async (f) => ({ path: f.path, text: await source.read(f.path) }));
+  const texts = new Map(unkeyed.map((d) => [d.path, d.text]));
+  const present = files.filter((f) => f.id !== undefined || texts.get(f.path) !== undefined);
   const explicit: Doc[] = [];
   for (const doc of config.docs) {
     const text = await ruleDoc(doc, source);
     if (text !== undefined) explicit.push({ path: doc, text });
   }
-  const key = digest(JSON.stringify({ v: VERSION, docs: [...explicit, ...candidates].map((d) => [d.path, digest(d.text)]), exclude: config.exclude }));
+  const versions = present.map((f) => [f.path, f.id !== undefined ? `id:${f.id}` : digest(texts.get(f.path)!)]);
+  const key = digest(JSON.stringify({ v: VERSION, explicit: explicit.map((d) => [d.path, digest(d.text)]), files: versions, exclude: config.exclude }));
   const keys = rulesKeys(source.scope);
   const cached = (await store.get(keys.cache)) as Cached | undefined;
   if (cached && cached.version === VERSION && cached.key === key) {
     await store.set(keys.seen, now());
     return { docs: cached.docs, rules: cached.rules, candidates: cached.candidates, kept: cached.kept, cached: true };
   }
+  const read = await pool(present, 16, async (f) => ({ path: f.path, text: texts.has(f.path) ? texts.get(f.path) : await source.read(f.path) }));
+  // a listed file that cannot be read would be cached as if it were not there
+  const unread = read.filter((d) => d.text === undefined).map((d) => d.path);
+  const candidates: Doc[] = read.filter((d): d is Doc => d.text !== undefined);
   const failed = (kept: Doc[], error: string): Discovery => {
     log(`sift rules ${source.scope}: discovery failed, nothing cached (${error})`);
     return { docs: [], rules: [], candidates: candidates.length, kept: kept.map((d) => d.path), cached: false, error };
   };
+  if (unread.length > 0) return failed([], `unreadable: ${unread.join(', ')}`);
   const guides = candidates.filter((d) => contributingGuide(d.path));
   const judged = candidates.filter((d) => !contributingGuide(d.path));
   const kept: Doc[] = [...explicit, ...guides];
@@ -183,32 +194,73 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
   return { docs, rules, candidates: result.candidates, kept: result.kept, cached: false };
 }
 
+// how long a call waits for its discovery: well inside the engine's 10 s cap on a hook, with room for the judgement and
+// the write the call makes once the rules are known
+export const DISCOVERY_WAIT_MS = 5_000;
+
+export type DiscoveriesHost = {
+  judge: Judge;
+  store: StoreLike;
+  now: () => number;
+  // the session log a fresh discovery names what it kept in
+  log: (text: string) => void;
+  schedule: (ms: number, fn: () => void) => { cancel: () => void };
+  waitMs: number;
+};
+
+// the discoveries in flight, one per scope and rules config. a call waits for its own up to the wait; one that outlasts
+// it answers pending while the discovery runs on, so the next call joins it or reads what it cached, and no single call
+// carries a whole cold discovery
+export class Discoveries {
+  private readonly running = new Map<string, Promise<Discovery>>();
+
+  constructor(private readonly host: DiscoveriesHost) {}
+
+  async discover(source: RuleSource, config: RepoConfig['rules']): Promise<Discovery> {
+    const { judge, store, now, log, schedule, waitMs } = this.host;
+    const key = JSON.stringify([source.scope, config.docs, config.exclude]);
+    let task = this.running.get(key);
+    if (!task) {
+      task = discoverRules(source, config, judge, store, now, log).finally(() => this.running.delete(key));
+      this.running.set(key, task);
+      // a throw still reaches every call waiting on it; one no call waits for any more is not an unhandled rejection
+      task.catch(() => {});
+    }
+    let timer: { cancel: () => void } | undefined;
+    const late = new Promise<Discovery>((resolve) => {
+      timer = schedule(waitMs, () =>
+        resolve({ docs: [], rules: [], candidates: 0, kept: [], cached: false, pending: `rule discovery for ${source.scope} outlasted its ${waitMs / 1000} s wait and keeps running; the next call on it reuses what it finds` }),
+      );
+    });
+    try {
+      return await Promise.race([task, late]);
+    } finally {
+      timer?.cancel();
+    }
+  }
+}
+
 // the checkout: tracked paths from git, text from the working tree. templates are the tracked paths at the
 // locations the bound forge documents, read from the tree: the forge itself is never asked for them
 export function checkoutSource(root: string, git: Git, fs: { read: (path: string) => Promise<string>; exists: (path: string) => Promise<boolean> }, forge?: Forge): RuleSource {
-  const list = async () => (await git(['ls-files', '-z'])).split('\0').filter(Boolean);
-  const read = async (path: string) => ((await fs.exists(`${root}/${path}`)) ? fs.read(`${root}/${path}`) : undefined);
   return {
     scope: root,
-    list,
-    read,
-    templates: async () => {
-      if (!forge) return [];
-      const paths = (await list()).filter((p) => forge.template(p) !== undefined);
-      const docs = await pool(paths, 16, async (path) => ({ path, text: await read(path) }));
-      return docs.filter((d): d is Doc => d.text !== undefined);
-    },
+    // the working tree is what is read, so no path carries the index's id
+    list: async () => (await git(['ls-files', '-z'])).split('\0').filter(Boolean).map((path) => ({ path })),
+    read: async (path) => ((await fs.exists(`${root}/${path}`)) ? fs.read(`${root}/${path}`) : undefined),
+    template: (path) => forge?.template(path) !== undefined,
     remote: (r, path, ref) => (forge ? forge.file(r, path, ref) : Promise.resolve(undefined)),
   };
 }
 
-// a repository on the forge at a ref, the default branch when unset
+// a repository on the forge at a ref, the default branch when unset: one tree listing keys the cache, and the
+// candidates are read only when it misses
 export function forgeSource(forge: Forge, repo: string, ref?: string): RuleSource {
   return {
-    scope: `${repo}@${ref ?? ''}`,
+    scope: ref === undefined ? repo : `${repo}@${ref}`,
     list: () => forge.contents(repo, ref),
     read: (path) => forge.file(repo, path, ref),
-    templates: async () => (await forge.templates(repo)).map((t) => ({ path: t.name, text: t.body })),
+    template: (path) => forge.template(path) !== undefined,
     remote: (r, path, at) => forge.file(r, path, at),
   };
 }

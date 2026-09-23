@@ -32,8 +32,9 @@ export async function outboundOf(tool: string, input: Record<string, unknown>, r
   return undefined;
 }
 
-// report is the whole text's, or its opening's when it was judged in parts; parts holds the report of every later part
-export type OutboundDecision = { allow: boolean; reason: string; report?: Report; parts?: Report[]; warnings: string[] };
+// report is the whole text's, or its opening's when it was judged in parts; parts holds the report of every later part.
+// pending: the text could not be judged yet and the same call made again can be
+export type OutboundDecision = { allow: boolean; reason: string; report?: Report; parts?: Report[]; warnings: string[]; pending?: boolean };
 
 // how many parts of a long text are judged at once
 const PARTS_IN_FLIGHT = 4;
@@ -45,6 +46,9 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   if (out.limit !== undefined && out.text.length > out.limit) {
     return { allow: false, reason: `${out.channel} text is ${out.text.length} chars, the limit is ${out.limit}`, warnings: [] };
   }
+  // unjudged text is never let through for want of time: the rules are still being found, and the retry finds them
+  const pending = subjects.find((s) => s.pending !== undefined);
+  if (pending) return { allow: false, reason: pending.pending!, warnings: [], pending: true };
   const reports = await pool(subjects, PARTS_IN_FLIGHT, (s) => runPack(pack, s, judge, config));
   const [report, ...parts] = reports;
   const reported = { report, ...(parts.length > 0 ? { parts } : {}) };
@@ -75,7 +79,7 @@ function ruleOf(instructions: string): string {
   return instructions.replace(/^.*? (?:complies with|does not break) this rule: /s, '');
 }
 
-export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'store' | 'now' | 'notice'>;
+export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'discoveries'>;
 
 export type Gated = { outbound: Outbound; decision: OutboundDecision };
 
@@ -85,12 +89,12 @@ export async function gateCall(host: GateHost, checkout: Checkout, tool: string,
   const outbound = await outboundOf(tool, input, read, channelTable(defaultChannels(host.forge), checkout.config.outbound.channels));
   const pack = checkout.packs['rules'];
   if (!outbound || !pack) return undefined;
-  const subjects = await textRulesSubjects({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), judge: host.judge, store: host.store, now: host.now, notice: host.notice }, { text: outbound.text, about: outbound.kind }, checkout.config);
+  const subjects = await textRulesSubjects({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, checkout.config);
   return { outbound, decision: await gateOutbound(outbound, subjects, pack, host.judge, checkout.config) };
 }
 
 // a directory in no repository has no rule documents of its own; entries the config names in another repository still read from the forge
 function rulesOf(host: GateHost, checkout: Checkout): RuleSource {
   if (checkout.git || checkout.repo) return ruleSource(host, { checkout, named: false }, undefined);
-  return { scope: checkout.root, list: async () => [], read: async () => undefined, templates: async () => [], remote: (repo, path, ref) => host.forge.file(repo, path, ref) };
+  return { scope: checkout.root, list: async () => [], read: async () => undefined, template: () => false, remote: (repo, path, ref) => host.forge.file(repo, path, ref) };
 }

@@ -104,25 +104,6 @@ describe('github forge', () => {
     expect(calls.filter((c) => c.includes('matching-refs')).map((c) => c.split('/').slice(-1)[0])).toEqual(['v1.2.0', 'main', 'v1']);
   });
 
-  it('finds templates in every documented location and skips the issue form chooser', async () => {
-    const entry = (path: string, type = 'file') => ({ name: path.split('/').pop()!, path, type });
-    const forge = github({
-      'repos/o/r/contents/.github/ISSUE_TEMPLATE/': (argv) => ({ body: `# ${argv[argv.length - 1]!.split('/').pop()}` }),
-      'repos/o/r/contents/.github/ISSUE_TEMPLATE': { body: [entry('.github/ISSUE_TEMPLATE/bug.yml'), entry('.github/ISSUE_TEMPLATE/config.yml'), entry('.github/ISSUE_TEMPLATE/feature.md')] },
-      'repos/o/r/contents/.github/PULL_REQUEST_TEMPLATE.md': { body: '# pr' },
-      'repos/o/r/contents/.github': { body: [entry('.github/ISSUE_TEMPLATE', 'dir'), entry('.github/PULL_REQUEST_TEMPLATE.md'), entry('.github/workflows', 'dir')] },
-      'repos/o/r/contents/docs/pull_request_template.md': { body: '# docs pr' },
-      'repos/o/r/contents/docs': { body: [entry('docs/pull_request_template.md')] },
-      'repos/o/r/contents/': { body: [entry('README.md'), entry('docs', 'dir'), entry('.github', 'dir')] },
-    });
-    expect(await forge.templates('o/r')).toEqual([
-      { kind: 'pr', name: 'docs/pull_request_template.md', body: '# docs pr' },
-      { kind: 'issue', name: '.github/ISSUE_TEMPLATE/bug.yml', body: '# bug.yml' },
-      { kind: 'issue', name: '.github/ISSUE_TEMPLATE/feature.md', body: '# feature.md' },
-      { kind: 'pr', name: '.github/PULL_REQUEST_TEMPLATE.md', body: '# pr' },
-    ]);
-  });
-
   it('names the kind of template at every documented location and nowhere else', () => {
     expect(templateKind('ISSUE_TEMPLATE.md')).toBe('issue');
     expect(templateKind('docs/issue_template.yml')).toBe('issue');
@@ -140,16 +121,16 @@ describe('github forge', () => {
     expect(templateKind('README.md')).toBeUndefined();
   });
 
-  it('lists every file at a ref from the recursive tree, the default branch when none is named', async () => {
+  it('lists every file at a ref with its blob id from the recursive tree, the default branch when none is named', async () => {
     const calls: string[] = [];
     const forge = github(
       {
-        'repos/o/r/git/trees/': { body: { tree: [{ path: 'README.md', type: 'blob' }, { path: 'docs', type: 'tree' }, { path: 'docs/a.md', type: 'blob' }] } },
+        'repos/o/r/git/trees/': { body: { tree: [{ path: 'README.md', type: 'blob', sha: 'b1' }, { path: 'docs', type: 'tree', sha: 't1' }, { path: 'docs/a.md', type: 'blob', sha: 'b2' }] } },
         'repos/o/r': { body: { default_branch: 'main' } },
       },
       calls,
     );
-    expect(await forge.contents('o/r')).toEqual(['README.md', 'docs/a.md']);
+    expect(await forge.contents('o/r')).toEqual([{ path: 'README.md', id: 'b1' }, { path: 'docs/a.md', id: 'b2' }]);
     expect(calls[1]).toContain('repos/o/r/git/trees/main?recursive=1');
     await forge.contents('o/r', 'feat/1');
     expect(calls[2]).toContain('repos/o/r/git/trees/feat%2F1?recursive=1');

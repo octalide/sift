@@ -120,4 +120,6 @@ export type Subject = {
   options: Record<string, Record<string, string>>;
   // a judge failure while the subject was built: the run asks nothing more and the report carries it
   judgeError?: string;
+  // work the subject needs outlasted its wait and keeps running, so the same call made again can answer
+  pending?: string;
 };

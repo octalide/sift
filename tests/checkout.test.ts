@@ -10,7 +10,7 @@ import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { Checkouts, type CheckoutFs } from '../src/repo/checkout.ts';
 import type { RunLike } from '../src/process.ts';
 import { fakeForge } from './fake-forge.ts';
-import { memoryStore, yesJudge } from './fake-source.ts';
+import { discoveries, yesJudge } from './fake-source.ts';
 
 const run: RunLike = async (argv, init) => {
   const r = spawnSync(argv[0]!, argv.slice(1), { cwd: init?.cwd, encoding: 'utf8', input: init?.stdin });
@@ -99,7 +99,7 @@ function fresh(remote: Record<string, string> = {}): void {
     defaultBranch: async () => 'main',
     issue: async (repo, n) => (issuesRead.push(`${repo}#${n}`), plain.issue(repo, n)),
   });
-  host = { forge, judge: off, store: memoryStore(), now: () => 1, notice: () => {}, fs, checkouts };
+  host = { forge, judge: off, discoveries: discoveries(off), fs, checkouts };
 }
 
 const session = () => checkouts.resolve(a);
@@ -306,7 +306,8 @@ describe('the outbound gate', () => {
     const gate = async (agentId: string | undefined, text: string, tool = 'mcp__note__send') => {
       const asked: { state: unknown; instructions: string[] }[] = [];
       const { checkout } = await scopeOf(checkouts, session, undefined, dirs.of(agentId));
-      const gated = await gateCall({ ...host, judge: yesJudge(0.9, asked) }, checkout, tool, tool === 'mcp__note__send' ? { text } : { content: text }, noRead);
+      const judge = yesJudge(0.9, asked);
+      const gated = await gateCall({ ...host, judge, discoveries: discoveries(judge) }, checkout, tool, tool === 'mcp__note__send' ? { text } : { content: text }, noRead);
       return { gated, rules: asked.flatMap((q) => q.instructions).filter((i) => /complies with this rule/.test(i)) };
     };
 
