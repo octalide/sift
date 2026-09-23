@@ -4,12 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os';
 import type { Forge } from '../src/forge/forge.ts';
 import { gateCall } from '../src/gate/outbound.ts';
-import { grade, scopeOf, SpawnDirs, subjectFor, type GradeHost, type GradeScope } from '../src/grade.ts';
+import { grade, scopeOf, subjectFor, type GradeHost, type GradeScope } from '../src/grade.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { formatReport } from '../src/packs/run.ts';
 import { Checkouts, type CheckoutFs } from '../src/repo/checkout.ts';
 import type { RunLike } from '../src/process.ts';
+import { Spawns } from '../src/spawns.ts';
 import { fakeForge } from './fake-forge.ts';
 import { discoveries, yesJudge } from './fake-source.ts';
 
@@ -131,6 +132,10 @@ describe('a checkout per directory', () => {
       utimesSync(path, Date.now() / 1000 + 10, Date.now() / 1000 + 10);
       expect((await checkouts.resolve(wt)).config.prs.targets).toEqual(['next']);
       expect(lookups).toEqual([wt]);
+      // a bad regex is refused as the file is read, naming the file and the field
+      writeFileSync(path, JSON.stringify({ branches: { pattern: '^(feat|fix/\\d+$' } }));
+      utimesSync(path, Date.now() / 1000 + 15, Date.now() / 1000 + 15);
+      await expect(checkouts.resolve(wt)).rejects.toThrow(`sift config ${path}: branches.pattern is not a valid regex: Invalid regular expression: /^(feat|fix/\\d+$/: Unterminated group`);
     } finally {
       writeFileSync(path, before);
       utimesSync(path, Date.now() / 1000 + 20, Date.now() / 1000 + 20);
@@ -263,6 +268,11 @@ describe('grade in a named checkout', () => {
 });
 
 describe('forge-only grades', () => {
+  it('refuse a repository whose config holds a bad regex, naming the file and the field', async () => {
+    fresh({ 'o/c:.sift/config.json': JSON.stringify({ release: { manifests: [{ path: 'mach.toml', keys: ['^deps\\.('], bump: 'minor' }] } }) });
+    await expect(subjectFor(host, await sessionScope(), builtin('issue'), '5', { repo: 'o/c' })).rejects.toThrow('sift config o/c:.sift/config.json: release.manifests[mach.toml].keys[0] is not a valid regex');
+  });
+
   it('apply the conventions of the repository the subject is in', async () => {
     fresh({ 'o/c:.sift/config.json': JSON.stringify({ prs: { targets: ['release'] } }) });
     const other = await subjectFor(host, await sessionScope(), builtin('issue'), '5', { repo: 'o/c' });
@@ -322,10 +332,10 @@ describe('forge-only grades', () => {
 describe('the subagent default', () => {
   it('grades where the subagent was spawned, or its parent, unless cwd names another', async () => {
     fresh();
-    const dirs = new SpawnDirs();
-    dirs.spawned('parent', wt, undefined);
-    dirs.spawned('child', undefined, 'parent');
-    dirs.spawned('loose', undefined, undefined);
+    const dirs = new Spawns();
+    await dirs.spawned('parent', wt, undefined, []);
+    await dirs.spawned('child', undefined, 'parent', []);
+    await dirs.spawned('loose', undefined, undefined, []);
     const child = await scopeOf(checkouts, session, undefined, dirs.of('child'));
     expect(child).toMatchObject({ named: false, checkout: { root: wt, repo: 'o/b' } });
     expect((await scopeOf(checkouts, session, undefined, dirs.of('loose'))).checkout.root).toBe(a);
@@ -343,10 +353,10 @@ describe('the outbound gate', () => {
 
   it('judges a subagent\'s text under the checkout it was spawned in, else the session\'s', async () => {
     fresh();
-    const dirs = new SpawnDirs();
-    dirs.spawned('there', wt, undefined);
-    dirs.spawned('loose', undefined, undefined);
-    dirs.spawned('outside', base, undefined);
+    const dirs = new Spawns();
+    await dirs.spawned('there', wt, undefined, []);
+    await dirs.spawned('loose', undefined, undefined, []);
+    await dirs.spawned('outside', base, undefined, []);
     const gate = async (agentId: string | undefined, text: string, tool = 'mcp__note__send') => {
       const asked: { state: unknown; instructions: string[] }[] = [];
       const { checkout } = await scopeOf(checkouts, session, undefined, dirs.of(agentId));

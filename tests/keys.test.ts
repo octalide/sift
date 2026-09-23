@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ownerOf, rulesKeys, STALE_MS, StoreKeys, watchKeys } from '../src/keys.ts';
+import { ownerOf, rulesKeys, STALE_MS, StoreKeys, sessionKeys } from '../src/keys.ts';
 import { memoryStore } from './fake-source.ts';
 
 const D = 24 * 3600 * 1000;
 
 // every key a session with a subscription on o/r and o/s leaves
 const keysOf = (session: string, seen?: number): [string, unknown][] => {
-  const k = watchKeys(session);
+  const k = sessionKeys(session);
   return [[k.subs, { next: 2, subs: [] }], [k.mail, []], [k.state('o/r'), { version: 9 }], [k.state('o/s'), { version: 9 }], ...(seen === undefined ? [] : ([[k.seen, seen]] as [string, unknown][]))];
 };
 
@@ -24,9 +24,9 @@ function harness(entries: [string, unknown][], clock = { now: 100 * D }) {
 
 describe('watch session keys', () => {
   it('names the session each key belongs to and marks the pre-session keys', () => {
-    const k = watchKeys('abc-1');
+    const k = sessionKeys('abc-1');
     const session = { kind: 'session', id: 'abc-1' };
-    expect([k.subs, k.mail, k.seen, k.state('o/r')].map(ownerOf)).toEqual([session, session, session, session]);
+    expect([k.subs, k.mail, k.seen, k.state('o/r'), k.tenure, k.agents].map(ownerOf)).toEqual([session, session, session, session, session, session]);
     expect(ownerOf('watch:o/r')).toBe('legacy');
     expect(ownerOf('decisions')).toBeUndefined();
     const r = rulesKeys('o/r@dev');
@@ -59,7 +59,7 @@ describe('watch session keys', () => {
     expect(left.filter((k) => k.includes(':me'))).toHaveLength(5);
     expect(left).toContain('decisions');
     // a session written before sessions were marked is marked now, and goes stale from here
-    expect(store.map.get(watchKeys('unmarked').seen)).toBe(now);
+    expect(store.map.get(sessionKeys('unmarked').seen)).toBe(now);
     expect(left.filter((k) => k.includes('unmarked'))).toHaveLength(5);
     expect(logs).toEqual(['sift: removed 2 pre-session keys, the keys of 1 stale session and 0 unused rules caches']);
   });
