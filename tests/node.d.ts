@@ -1,4 +1,4 @@
-// the few node apis the checkout tests drive real git with; the project carries no node types
+// the few node apis the tests use; the project carries no node types
 declare module 'node:child_process' {
   export function spawnSync(
     command: string,
@@ -21,4 +21,9 @@ declare module 'node:fs' {
 
 declare module 'node:os' {
   export function tmpdir(): string;
+}
+
+// a macrotask boundary, so every pending microtask has run before a test goes on
+declare module 'node:timers/promises' {
+  export function setImmediate(): Promise<void>;
 }

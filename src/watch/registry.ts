@@ -25,6 +25,7 @@ export class Watches {
   private next = 1;
   private readonly pollers = new Map<string, Watcher>();
   private readonly statuses = new Map<string, string>();
+  // this session's alone: another session on the token finds the low count on its own next poll
   private readonly rate = { until: 0 };
 
   constructor(private readonly host: WatchesHost) {}
@@ -105,6 +106,12 @@ export class Watches {
 
   stop(): void {
     for (const p of this.pollers.values()) p.stop();
+  }
+
+  // stops every poller and resolves once none is mid-poll, so nothing writes a key after the session's are removed
+  async end(): Promise<void> {
+    this.stop();
+    await Promise.all([...this.pollers.values()].map((p) => p.idle()));
   }
 
   private async ensure(repo: string): Promise<Watcher> {

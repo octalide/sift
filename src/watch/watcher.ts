@@ -48,7 +48,8 @@ export type WatchHost = {
   retire?: (ids: string[], why: string) => Promise<void>;
   // runs before each poll: the owner reaps what no longer has anyone to deliver to
   prepare?: () => Promise<void>;
-  // the epoch ms before which no poll on this token runs, shared by every poller on it
+  // the epoch ms before which no poll on this token runs, shared by the session's pollers. each session reads the
+  // remaining count on its own polls and holds its own
   rate?: { until: number };
 };
 
@@ -97,6 +98,11 @@ export class Watcher {
     this.timer?.cancel();
     this.timer = undefined;
     this.host.status(undefined);
+  }
+
+  // resolves once the poll in flight, if any, has saved
+  async idle(): Promise<void> {
+    await this.inflight;
   }
 
   async pause(): Promise<void> {
@@ -271,7 +277,8 @@ export class Watcher {
     if (reached.length > 0) await this.host.retire?.(reached.map((s) => s.id), 'until reached');
   }
 
-  // the floor is per token: a poller that reads it low holds every poller on the token until the window refills
+  // a poller that reads the token's remaining calls below the floor holds every poller of its session until the window
+  // refills
   private rateWait({ remaining, reset }: Rate, now: number): number {
     if (remaining === undefined || remaining >= this.options.rateFloor) return 0;
     const wait = Math.max(reset ? reset * 1000 - now + 5000 : this.options.maxIntervalMs, this.options.maxIntervalMs);
