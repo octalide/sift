@@ -69,6 +69,20 @@ describe('prune per loop', () => {
     expect(judge.tasks[1]).toBe('triage the backlog');
   });
 
+  it('reads a long task whole, and cuts one past the context room to it, naming the cut', async () => {
+    const loops = new PruneLoops();
+    const prompt = 'Build the watch registry and wire it through every caller. '.repeat(200);
+    loops.spawned('a1', prompt);
+    const judge = dropping();
+    await pruneCall(bash('make', 'a1'), bashOut(), loops, judge, OPTIONS, sink());
+    expect(judge.tasks).toEqual([prompt]);
+    loops.spawned('a2', '{"k":[1,2]}'.repeat(10_000));
+    const s = sink();
+    await pruneCall(bash('make', 'a2'), bashOut(), loops, judge, OPTIONS, s);
+    expect(judge.tasks[1]).toMatch(/^\{"k".*…$/);
+    expect(s.decisions[0]!.extra.digest).toMatch(/the task \(the first \d+ of 110000 characters\)$/);
+  });
+
   it('keeps the person prompt as the main task when a plugin prompt or a notification arrives', async () => {
     const loops = new PruneLoops();
     loops.submitted('composer', 'fix the flaky test');

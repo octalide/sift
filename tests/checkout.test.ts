@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { CONTEXT_ROOM, textTokens } from '../src/judge/room.ts';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -172,10 +173,10 @@ describe('grade in a named checkout', () => {
     });
     const long = (broken: boolean): string => {
       let text = '';
-      for (let n = 0; text.length < 50_000; n++) text += `${n % 10 === 0 ? `## Section ${n / 10}\n\n` : ''}${`Paragraph ${n} says one thing in plain words, at some length. `.repeat(3)}\n\n`;
-      text = text.slice(0, 50_000);
+      for (let n = 0; text.length < 150_000; n++) text += `${n % 10 === 0 ? `## Section ${n / 10}\n\n` : ''}${`Paragraph ${n} says one thing in plain words, at some length. `.repeat(3)}\n\n`;
+      text = text.slice(0, 150_000);
       if (!broken) return text;
-      const at = text.indexOf('\n\n', 30_000);
+      const at = text.indexOf('\n\n', 100_000);
       return `${text.slice(0, at)} One — dash.${text.slice(at)}`;
     };
 
@@ -190,9 +191,9 @@ describe('grade in a named checkout', () => {
       const violated = report.ranked[0]!.items.flatMap((i) => i.asked).filter((j) => j.band === 'violated');
       expect(violated.map((j) => j.parts)).toEqual([[expect.stringMatching(/^part [23] of 3 \("Section \d+"/)]]);
       expect(formatReport(report)).toMatch(/\[violated\] rules_1\.section = 0\.10: Part [23] of 3 .* does not break this rule: Style: Say it in one line\. \(in part [23] of 3 /);
-      // every character was judged, in parts no longer than the cap
+      // every character was judged, in parts no larger than a rank's context holds
       expect([...seen].sort((x, y) => text.indexOf(x) - text.indexOf(y)).join('')).toBe(text);
-      expect(seen.every((s) => s.length <= 20_000)).toBe(true);
+      expect(seen.every((s) => textTokens(s) <= CONTEXT_ROOM)).toBe(true);
       expect((await grade(host, await sessionScope(), 'rules', 'x', { text: long(false) })).report.verdict).toBe('pass');
     });
 
@@ -210,7 +211,7 @@ describe('grade in a named checkout', () => {
       expect(subject.state['subject']).toMatchObject({ kind: 'issue', number: 7, labels: ['fix'], text: expect.stringMatching(/^Issue 7\n/) });
       const text = `Issue 7\n${long(true)}`;
       expect([...seen].sort((x, y) => text.indexOf(x) - text.indexOf(y)).join('')).toBe(text);
-      expect(seen.every((s) => s.length <= 20_000)).toBe(true);
+      expect(seen.every((s) => textTokens(s) <= CONTEXT_ROOM)).toBe(true);
       host = { ...host, forge: withBody(long(false)) };
       expect((await grade(host, await sessionScope(), 'rules', '#7')).report.verdict).toBe('pass');
       // a short issue is one subject, its title and body as before

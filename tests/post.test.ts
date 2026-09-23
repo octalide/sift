@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CONTEXT_ROOM, textTokens } from '../src/judge/room.ts';
 import type { ForgePost } from '../src/forge/forge.ts';
 import { GitHubForge, GH_WRITES } from '../src/forge/github.ts';
 import type { Judge } from '../src/judge/types.ts';
@@ -237,27 +238,27 @@ describe('post', () => {
         },
       }),
     });
-    // release notes of 50,000 characters in headed sections of numbered paragraphs, the impact stated only at the top,
-    // with an em dash placed after character 30,000 when broken
+    // release notes of 150,000 characters in headed sections of numbered paragraphs, the impact stated only at the top,
+    // with an em dash placed after character 100,000 when broken
     const notes = (broken: boolean): string => {
       let body = 'SemVer impact: minor.\n\n';
-      for (let n = 0; body.length < 50_000; n++) {
+      for (let n = 0; body.length < 150_000; n++) {
         if (n % 10 === 0) body += `## Section ${n / 10}\n\n`;
         body += `Paragraph ${n} describes one change in plain words and nothing more than that, at some length. `.repeat(3) + '\n\n';
       }
-      body = body.slice(0, 50_000);
+      body = body.slice(0, 150_000);
       if (!broken) return body;
-      const at = body.indexOf('\n\n', 30_000);
+      const at = body.indexOf('\n\n', 100_000);
       return `${body.slice(0, at)} This line has one — dash.${body.slice(at)}`;
     };
     const post = (body: string) => ({ repo: 'o/long', kind: 'release-create', tag: 'v1.0.0', title: 'v1.0.0', body });
 
-    it('refuses a rule broken after character 30,000, naming the part', async () => {
+    it('refuses a rule broken after character 100,000, naming the part', async () => {
       const posted: { repo: string; post: ForgePost }[] = [];
       const seen: Seen[] = [];
       const body = notes(true);
-      expect(body.length).toBeGreaterThan(50_000);
-      expect(body.indexOf('—')).toBeGreaterThan(30_000);
+      expect(body.length).toBeGreaterThan(150_000);
+      expect(body.indexOf('—')).toBeGreaterThan(100_000);
       const r = await postCall(longHost(posted, seen), pack, post(body));
       expect(r).toMatchObject({ refused: expect.stringMatching(/^github-release-create to o\/long: breaks: Prose: No em dashes in anything you write\. \(in part [2-9] of \d \("Section \d+"( to "Section \d+")?\)\)$/) });
       expect(posted).toEqual([]);
@@ -274,7 +275,7 @@ describe('post', () => {
       const text = `v1.0.0\n${body}`;
       const read = [...seen].sort((a, b) => text.indexOf(a.text) - text.indexOf(b.text));
       expect(read.map((s) => s.text).join('')).toBe(text);
-      expect(read.every((s) => s.text.length <= 20_000)).toBe(true);
+      expect(read.every((s) => textTokens(s.text) <= CONTEXT_ROOM)).toBe(true);
     });
 
     it('judges a whole-text rule on the opening alone, so later parts need not satisfy it', async () => {

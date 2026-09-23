@@ -8,6 +8,8 @@ import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
 import { materialize } from '../src/packs/run.ts';
 import { textRulesSubjects } from '../src/repo/subjects.ts';
+import { CONTEXT_ROOM } from '../src/judge/room.ts';
+import { estimateTokensOf } from '../src/tokens.ts';
 import type { Subject } from '../src/packs/types.ts';
 import { shellWord } from '../src/shell.ts';
 import { discoveries, memorySource, yesJudge } from './fake-source.ts';
@@ -136,12 +138,15 @@ describe('rules subject for outbound text', () => {
   });
 
   it('reads text that fits as one subject, and longer text as its opening and parts', async () => {
-    const [one, ...none] = await textRulesSubjects(host(), { text: 'short', about: 'a comment on a pull request' }, config, 100);
+    const [one, ...none] = await textRulesSubjects(host(), { text: 'short', about: 'a comment on a pull request' }, config);
     expect(none).toEqual([]);
     expect(one!.state['subject']).toEqual({ kind: 'text', about: 'a comment on a pull request', text: 'short' });
     expect(one!.facts['section']).toBeUndefined();
-    const text = `# A\n\n${'a'.repeat(60)}\n\n# B\n\n${'b'.repeat(60)}\n`;
-    const parts = await textRulesSubjects(host(), { text }, config, 80);
+    // each block about two thirds of the context a rank's state leaves the subject, so the two do not fit as one
+    const text = `# A\n\n${'a'.repeat(60_000)}\n\n# B\n\n${'b'.repeat(60_000)}\n`;
+    const parts = await textRulesSubjects(host(), { text }, config);
+    for (const p of parts) expect(estimateTokensOf(p.state['subject'])).toBeLessThanOrEqual(CONTEXT_ROOM);
+    expect(parts.every((p) => p.cuts === undefined)).toBe(true);
     expect(parts.map((p) => (p.state['subject'] as { text: string }).text).join('')).toBe(text);
     expect(parts.map((p) => [p.facts['subject'], p.facts['part'], p.facts['section'] ?? false])).toEqual([
       ['The opening, part 1 of 2 ("A"), of the subject', 'the opening, part 1 of 2 ("A")', false],

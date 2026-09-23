@@ -64,11 +64,6 @@ export const CHECKS: Record<string, Check> = {
       ...empty.map((m) => warn('issue.template', `empty section: ${m}`)),
     ];
   },
-  'issue.body': (s) => {
-    const body = s.facts['body'] as { length: number; judged: number } | undefined;
-    if (!body || body.judged >= body.length) return [];
-    return [warn('issue.body', `the judge read the first ${body.judged} of the body's ${body.length} characters: the rest is more than its state holds, so the questions did not read it`)];
-  },
   'issue.parent': (s, c) => {
     const labels = (s.facts['labels'] as string[]) ?? [];
     const needs = c.issues.childLabels.some((l) => labels.includes(l));

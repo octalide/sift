@@ -1,6 +1,7 @@
 import type { Decision } from '../judge/index.ts';
 import type { Judge } from '../judge/types.ts';
 import { estimateTokens } from '../tokens.ts';
+import { cutMessage } from '../judge/room.ts';
 import type { PruneCall, PruneLoops } from './loops.ts';
 import { prune, type PruneOptions } from './prune.ts';
 
@@ -39,17 +40,19 @@ export async function pruneCall<R extends CallResult>(call: PruneCall, r: R, loo
     return r;
   }
   const pruned = await prune(text, { tool: call.tool, input: call.input, task: loops.task(call.agentId) ?? '' }, judge, options);
+  // a context the judge read part of is named in every record of the call
+  const cut = pruned.cuts ? `, ${cutMessage(pruned.cuts)}` : '';
   if (pruned.error) {
-    sink.record('fallback', { ok: false, reason: pruned.error, digest: call.tool });
+    sink.record('fallback', { ok: false, reason: pruned.error, digest: `${call.tool}${cut}` });
     return r;
   }
   if (pruned.skipped || pruned.dropped === 0) {
-    sink.record('none', { digest: `${call.tool}: ${pruned.skipped ?? 'nothing dropped'}` });
+    sink.record('none', { digest: `${call.tool}: ${pruned.skipped ?? 'nothing dropped'}${cut}` });
     return r;
   }
   const before = estimateTokens(text);
   const after = estimateTokens(pruned.text);
-  sink.record(options.shadow ? 'would-prune' : 'pruned', { digest: `${call.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens`, tokensRemoved: before - after, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
+  sink.record(options.shadow ? 'would-prune' : 'pruned', { digest: `${call.tool}: ${pruned.dropped}/${pruned.chunks} chunks, ~${before - after} tokens${cut}`, tokensRemoved: before - after, answers: Object.fromEntries(Object.entries(pruned.scores).map(([k, v]) => [k, v.toFixed(2)])) });
   sink.toast(`sift${options.shadow ? ' (shadow)' : ''}: ${call.tool} output ${pruned.dropped}/${pruned.chunks} chunks dropped, ~${before - after} tokens`);
   if (options.shadow) return r;
   loops.pruned(call);
