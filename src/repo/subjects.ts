@@ -314,28 +314,25 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
   };
 }
 
-// what the rules are read against: an issue, or free text and, when known, what it is about to become in the words the judge reads
-export type RulesTarget = { kind: 'issue'; number: number; pack: string } | { kind: 'text'; ref: string; about?: string };
+// the issue the rules are read against; free text is read by textRulesSubjects
+export type RulesTarget = { number: number; pack: string };
 
 // the checkout or repository the rules are read from, and the discoveries in flight that read them
 export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; discoveries: Discoveries };
 
 export async function rulesSubject(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject> {
   const { forge, repo } = host;
-  const ref = target.kind === 'text' ? target.ref : `#${target.number}`;
-  let subject: Record<string, unknown> = { kind: target.kind, ref };
+  const ref = `#${target.number}`;
+  let subject: Record<string, unknown> = { kind: 'issue', ref };
   let about: string | undefined;
-  if (forge && repo && target.kind === 'issue') {
+  if (forge && repo) {
     const s = await issueSubject(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' });
     subject = { kind: 'issue', ...s.state };
     about = `issue ${ref}`;
-  } else if (target.kind === 'text') {
-    about = target.about;
-    subject = { kind: 'text', ...(about ? { about } : {}), text: truncate(target.ref, BODY_CAP) };
   }
   // the subject is read, and a pull request refused, before discovery spends judge calls
   const found = await rulesFound(host, config);
-  return rulesOf(found, `${target.kind}:${truncate(ref, 40)}`, subject, about ? `The subject (${about})` : 'The subject', {});
+  return rulesOf(found, `issue:${ref}`, subject, about ? `The subject (${about})` : 'The subject', {});
 }
 
 // text about to be written, as the rules read it: one subject when it fits the judge's state, otherwise one per part, so

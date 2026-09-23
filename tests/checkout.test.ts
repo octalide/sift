@@ -7,6 +7,7 @@ import { gateCall } from '../src/gate/outbound.ts';
 import { grade, scopeOf, SpawnDirs, subjectFor, type GradeHost, type GradeScope } from '../src/grade.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
+import { formatReport } from '../src/packs/run.ts';
 import { Checkouts, type CheckoutFs } from '../src/repo/checkout.ts';
 import type { RunLike } from '../src/process.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -152,6 +153,55 @@ describe('grade in a named checkout', () => {
     expect((here.subject.facts['commits'] as { subject: string }[])[0]!.subject).toBe('feat(#1): a');
   });
 
+  describe('rules on free text', () => {
+    // a judge that finds a rule broken by any text with an em dash, and records every text it judged a rule on
+    const dashes = (seen: string[]): Judge => ({
+      name: 'fake',
+      ask: async (state, q) => {
+        const text = (state as { subject?: { text?: string } }).subject?.text;
+        const rule = Object.values(q).some((x) => / this rule: /.test(x.instructions));
+        if (rule && text !== undefined) seen.push(text);
+        return { ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k) => [k, { type: 'noul' as const, p: rule && text?.includes('—') ? 0.1 : 0.9 }])) };
+      },
+    });
+    const long = (broken: boolean): string => {
+      let text = '';
+      for (let n = 0; text.length < 50_000; n++) text += `${n % 10 === 0 ? `## Section ${n / 10}\n\n` : ''}${`Paragraph ${n} says one thing in plain words, at some length. `.repeat(3)}\n\n`;
+      text = text.slice(0, 50_000);
+      if (!broken) return text;
+      const at = text.indexOf('\n\n', 30_000);
+      return `${text.slice(0, at)} One — dash.${text.slice(at)}`;
+    };
+
+    it('judges every part of a long text and names the part a rule is broken in', async () => {
+      fresh();
+      const seen: string[] = [];
+      host = { ...host, judge: dashes(seen), discoveries: discoveries(dashes([])) };
+      const text = long(true);
+      const { report } = await grade(host, await sessionScope(), 'rules', 'x', { text });
+      expect(report.verdict).toBe('warn');
+      expect(report.parts).toHaveLength(3);
+      const violated = report.ranked[0]!.items.flatMap((i) => i.asked).filter((j) => j.band === 'violated');
+      expect(violated.map((j) => j.parts)).toEqual([[expect.stringMatching(/^part [23] of 3 \("Section \d+"/)]]);
+      expect(formatReport(report)).toMatch(/\[violated\] rules_1\.section = 0\.10: Part [23] of 3 .* does not break this rule: Style: Say it in one line\. \(in part [23] of 3 /);
+      // every character was judged, in parts no longer than the cap
+      expect([...seen].sort((x, y) => text.indexOf(x) - text.indexOf(y)).join('')).toBe(text);
+      expect(seen.every((s) => s.length <= 20_000)).toBe(true);
+      expect((await grade(host, await sessionScope(), 'rules', 'x', { text: long(false) })).report.verdict).toBe('pass');
+    });
+
+    it('grades short text as one subject, as before', async () => {
+      fresh();
+      host = { ...host, judge: dashes([]), discoveries: discoveries(dashes([])) };
+      const { report, subject } = await grade(host, await sessionScope(), 'rules', 'x', { text: 'One — dash.' });
+      expect(subject.ref).toBe('text:One — dash.');
+      expect(subject.state['subject']).toEqual({ kind: 'text', text: 'One — dash.' });
+      expect(report.parts).toBeUndefined();
+      expect(report.verdict).toBe('warn');
+      expect(formatReport(report).split('\n')).toEqual(['sift rules text:One — dash.: WARN (judge: fake)', '  [info] rules.present: 1 rule from STYLE.md', '  [violated] rules_1.rules = 0.10: The subject complies with this rule: Style: Say it in one line.']);
+    });
+  });
+
   it('runs the packs the checkout defines', async () => {
     fresh();
     const r = await grade(host, await named(wt), 'only-b', 'HEAD');
@@ -167,7 +217,8 @@ describe('grade in a named checkout', () => {
 
   it('reads a release from the checkout, its uncommitted changelog under its own root', async () => {
     fresh();
-    const { subject, config } = await subjectFor(host, await named(wt), builtin('release'), 'release');
+    const { subjects, config } = await subjectFor(host, await named(wt), builtin('release'), 'release');
+    const subject = subjects[0]!;
     expect(config.release.changelog).toBe('CHANGELOG.md');
     expect(subject.facts['changelogAdded']).toContain('an unreleased line');
     expect((subject.facts['commits'] as { subject: string }[]).map((c) => c.subject)).toContain('fix(#2): in the worktree');
@@ -178,12 +229,13 @@ describe('grade in a named checkout', () => {
     const there = await subjectFor(host, await named(wt), builtin('rules'), 'x', { text: 'a change' });
     const here = await subjectFor(host, await sessionScope(), builtin('rules'), 'x', { text: 'a change' });
     // b carries CONTRIBUTING.md and CHANGELOG.md beside what a carries
-    expect(there.subject.facts['candidates']).toBe((here.subject.facts['candidates'] as number) + 2);
+    expect(there.subjects[0]!.facts['candidates']).toBe((here.subjects[0]!.facts['candidates'] as number) + 2);
   });
 
   it('locates in the checkout', async () => {
     fresh();
-    const { subject } = await subjectFor(host, await named(wt), builtin('locate'), 'x', { text: 'a change' });
+    const { subjects } = await subjectFor(host, await named(wt), builtin('locate'), 'x', { text: 'a change' });
+    const subject = subjects[0]!;
     const paths = (subject.facts['files'] as { path: string }[]).map((f) => f.path);
     expect(paths).toContain('b.txt');
     expect(paths).not.toContain('a.txt');
@@ -191,7 +243,8 @@ describe('grade in a named checkout', () => {
 
   it('grades a pr range from the checkout under its conventions', async () => {
     fresh();
-    const { subject, config } = await subjectFor(host, await named(wt), builtin('pr'), 'main..HEAD');
+    const { subjects, config } = await subjectFor(host, await named(wt), builtin('pr'), 'main..HEAD');
+    const subject = subjects[0]!;
     expect(subject.facts['head']).toBe('fix/2');
     expect((subject.facts['commits'] as { message: string }[]).map((c) => c.message.split('\n')[0])).toEqual(['fix(#2): in the worktree']);
     expect(config.prs.targets).toEqual(['trunk']);
@@ -231,8 +284,8 @@ describe('forge-only grades', () => {
     await expect(subjectFor(host, await sessionScope(), builtin('issue'), '7')).rejects.toThrow('issue pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
     await expect(subjectFor(host, await sessionScope(), builtin('rules'), '#7')).rejects.toThrow('rules pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue URL, or free text (in text)');
     // an issue number grades as before
-    expect((await subjectFor(host, await sessionScope(), builtin('issue'), '5')).subject.kind).toBe('issue');
-    expect((await subjectFor(host, await sessionScope(), builtin('rules'), '5')).subject.state).toMatchObject({ subject: { kind: 'issue', number: 5 } });
+    expect((await subjectFor(host, await sessionScope(), builtin('issue'), '5')).subjects[0]!.kind).toBe('issue');
+    expect((await subjectFor(host, await sessionScope(), builtin('rules'), '5')).subjects[0]!.state).toMatchObject({ subject: { kind: 'issue', number: 5 } });
   });
 
   it('refuse a pull request number given to the locate or plan pack, naming the pack and the forms each takes', async () => {
@@ -242,8 +295,8 @@ describe('forge-only grades', () => {
     await expect(subjectFor(host, await sessionScope(), builtin('locate'), '7')).rejects.toThrow('locate pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text');
     await expect(subjectFor(host, await sessionScope(), builtin('plan'), '#7', { text: 'the plan' })).rejects.toThrow('plan pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
     // an issue number grades as before
-    expect((await subjectFor(host, await sessionScope(), builtin('locate'), '5')).subject.kind).toBe('tree');
-    expect((await subjectFor(host, await sessionScope(), builtin('plan'), '5', { text: 'the plan' })).subject.state).toMatchObject({ number: 5, plan: 'the plan' });
+    expect((await subjectFor(host, await sessionScope(), builtin('locate'), '5')).subjects[0]!.kind).toBe('tree');
+    expect((await subjectFor(host, await sessionScope(), builtin('plan'), '5', { text: 'the plan' })).subjects[0]!.state).toMatchObject({ number: 5, plan: 'the plan' });
   });
 
   it('name the pack that was asked in every refusal, before and after the forge read', async () => {

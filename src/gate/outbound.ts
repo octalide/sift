@@ -1,11 +1,10 @@
 import { ruleSource, type GradeHost } from '../grade.ts';
 import type { Judge } from '../judge/types.ts';
-import { runPack } from '../packs/run.ts';
+import { runParts } from '../packs/run.ts';
 import type { Pack, Report, Subject } from '../packs/types.ts';
 import type { Checkout } from '../repo/checkout.ts';
 import type { RepoConfig } from '../repo/config.ts';
 import { textRulesSubjects } from '../repo/subjects.ts';
-import { pool } from '../pool.ts';
 import type { RuleSource } from '../rules/discover.ts';
 import { channelTable, defaultChannels, textOf, type Channel } from './channels.ts';
 
@@ -32,12 +31,9 @@ export async function outboundOf(tool: string, input: Record<string, unknown>, r
   return undefined;
 }
 
-// report is the whole text's, or its opening's when it was judged in parts; parts holds the report of every later part.
+// report is the text's, one report of every part when it was judged in parts.
 // pending: the text could not be judged yet and the same call made again can be
-export type OutboundDecision = { allow: boolean; reason: string; report?: Report; parts?: Report[]; warnings: string[]; pending?: boolean };
-
-// how many parts of a long text are judged at once
-const PARTS_IN_FLIGHT = 4;
+export type OutboundDecision = { allow: boolean; reason: string; report?: Report; warnings: string[]; pending?: boolean };
 
 // the channel's length limit is mechanical; the rules are judged on every part of the text, a violated rule in any part
 // denies, an unclear one warns, each named by the parts it was found in when the text was judged in parts
@@ -49,29 +45,22 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   // unjudged text is never let through for want of time: the rules are still being found, and the retry finds them
   const pending = subjects.find((s) => s.pending !== undefined);
   if (pending) return { allow: false, reason: pending.pending!, warnings: [], pending: true };
-  const reports = await pool(subjects, PARTS_IN_FLIGHT, (s) => runPack(pack, s, judge, config));
-  const [report, ...parts] = reports;
-  const reported = { report, ...(parts.length > 0 ? { parts } : {}) };
-  const failed = reports.find((r) => r.judgeError);
-  if (failed) return { allow: true, reason: `judge unavailable (${failed.judgeError})`, ...reported, warnings: [] };
+  const report = await runParts(pack, subjects, judge, config);
+  if (report.judgeError) return { allow: true, reason: `judge unavailable (${report.judgeError})`, report, warnings: [] };
+  // a rule is asked in the opening and again in each later part, under another question; it is named once, with every part it was found in
   const found = (band: 'violated' | 'unclear') => {
     const byRule = new Map<string, string[]>();
-    reports.forEach((r, i) => {
-      const part = subjects[i]!.facts['part'];
-      for (const j of [...r.judged, ...r.ranked.flatMap((s) => s.items.flatMap((item) => item.asked))]) {
-        if (j.band !== band || j.severity === 'info') continue;
-        const rule = ruleOf(j.instructions);
-        const at = byRule.get(rule) ?? [];
-        if (typeof part === 'string') at.push(part);
-        byRule.set(rule, at);
-      }
-    });
+    for (const j of [...report.judged, ...report.ranked.flatMap((s) => s.items.flatMap((item) => item.asked))]) {
+      if (j.band !== band || j.severity === 'info') continue;
+      const rule = ruleOf(j.instructions);
+      byRule.set(rule, [...(byRule.get(rule) ?? []), ...(report.parts ? (j.parts ?? []) : [])]);
+    }
     return [...byRule].map(([rule, at]) => (at.length > 0 ? `${rule} (in ${at.join(', ')})` : rule));
   };
   const violated = found('violated');
   const warnings = found('unclear').map((w) => `unclear: ${w}`);
-  if (violated.length > 0) return { allow: false, reason: `breaks: ${violated.join(' | ')}`, ...reported, warnings };
-  return { allow: true, reason: 'clear', ...reported, warnings };
+  if (violated.length > 0) return { allow: false, reason: `breaks: ${violated.join(' | ')}`, report, warnings };
+  return { allow: true, reason: 'clear', report, warnings };
 }
 
 // the rule a rules question quotes, after the subject it names and what it asks of it
