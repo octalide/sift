@@ -2,7 +2,7 @@
 
 A Claude Code plugin that makes typed judgement calls where a session would otherwise spend a model turn, or spend context it does not need.
 
-sift asks a backend typed questions about some state and gets back probabilities, never prose. The backend is Jev (TypeSafe's System One model) when `TYPESAFE_API_KEY` is set, and a small model through the engine's client (`haiku` by default) otherwise. On that one call sit packs that grade issues, pull requests, plans, commits, CI logs, releases and rules, a repository watch, tool output pruning and an outbound text gate. Every module can be switched off, logs what it decided, and falls back to the engine's normal behaviour when the judge is unavailable.
+sift asks a backend typed questions about some state and gets back probabilities, never prose. The backend is Jev (TypeSafe's System One model) when `TYPESAFE_API_KEY` is set, and a small model through the engine's client (`haiku` by default) otherwise. On that one call sit packs that grade issues, pull requests, plans, commits, releases and rules, a repository watch, tool output pruning and an outbound text gate. Every module can be switched off, logs what it decided, and falls back to the engine's normal behaviour when the judge is unavailable.
 
 ## Install
 
@@ -31,7 +31,6 @@ Options are set in `/config` under the plugin. [Options](docs/tools.md#options) 
 /sift                                     # backend, modules, watch and decision counts
 grade(pack: "issue", subject: "17")       # is issue 17 ready to work on
 grade(pack: "pr", subject: "dev..HEAD")   # the PR this branch would open, before it exists
-grade(pack: "ci", subject: "run:123")     # why a CI run failed
 ```
 
 The model calls these as `mcp__sift__grade` and the other tools below. To have repository events delivered as prompts, turn on the `watch` option or subscribe at runtime with the `watch` tool.
@@ -44,7 +43,6 @@ The model calls these as `mcp__sift__grade` and the other tools below. To have r
 | `pr` | is the PR linked, targeted, named, templated, committed and checked as the repo requires (mechanical) |
 | `plan` | does a plan cover its issue, add nothing and decide nothing the issue leaves open |
 | `commit` | do the commit messages follow the repo's format (mechanical) |
-| `ci` | why a job failed, and whether the change, the environment or something outside the repo caused it |
 | `rules` | does an issue or text comply with the repo's rule documents |
 | `release` | are the commits since the last tag safe to ship, and do the bump and changelog agree |
 | `triage` | does a watch event need acting on now |

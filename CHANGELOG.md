@@ -6,6 +6,14 @@ Notes begin at 0.10.0. Earlier releases, and 0.10.1 and 0.10.2, have no recorded
 
 ## [Unreleased]
 
+This release removes the `ci` pack and is a minor bump on 0.x. Judging CI output cost more than it told: the pack scored every line of a failed job's log, env dumps and YAML keys included, and its headline `own_fault` answered unclear on a failure whose error text was the literal bug the PR fixed.
+
+Removed: the `ci` pack, with its `job:<id>`, `run:<id>`, run id and `text` subject forms, the `log` subject kind and its `log.trimmed` and `log.followed` checks. `grade` refuses `pack: "ci"` with the removal and the command that reads a run's log named, unless a repo-defined pack takes the name, and a repo pack that declares `subject: "log"` is refused at load. No code path sends CI log text to the judge. The `Forge` interface loses `jobs` and `jobLog`, with the `Job`, `JobLog` and `LogStep` types and the workflow file reader that filled a job's needs, and gains `logCommand`, the command a caller runs to read a failed run's log. `Check.id` (a job id) is replaced by `Check.run`, the ci run the check belongs to, read on GitHub from the check run's details url.
+
+Changed: a settled CI failure from the watch no longer carries the `ci` pack's report on each failed check. It names each failed check under its run with the command that reads the run's log (`gh run view <run> --log-failed -R <owner/name>` on GitHub), names the checks the forge keeps no log for on a `no log` line, reads no log and asks the judge nothing. `WatchHost.ciPack` and `WatchEvent.reports` are gone.
+
+Changed: `pruneFloorTokens` defaults to 20000, where it was 4000. Pruning output between those sizes cost about 13 judge tokens for each context token it saved, and most such outputs lost nothing.
+
 ## [0.13.0] - 2026-09-22
 
 Added: the `post` tool writes an issue, pull request, comment, review, merge or release to the repository it names in `repo`, after judging its title and body against that repository's rule documents, config and `outbound.channels`, read from the forge whatever directory the caller runs in, and answers the url. With `gateOutbound` on, a Bash command that writes forge text through `gh` (the cli's create, comment, edit, review, merge and release writes, and the `gh api` REST and graphql calls that make them) is refused with the `post` call to make instead, since its destination is whatever `-R`, `GH_REPO`, the working directory or a fork's upstream make it. The forge's shell channels (`github-pr-comment` and the rest, `tool: ^Bash$`) are gone from the default table: the same names now match `post` calls of that kind, with the title and body as their text, and a create's or an edit's `kind` names the title too. `Forge` gains `post` and `writeOf`, `ForgeWrite` is the write alone, and a `fields` text source takes `when`.

@@ -41,20 +41,14 @@ ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
 ```
 
-A failure carries the `ci` pack's report on each failed check, one job per check, read from its log through the forge, so the session that pushed the commit reads why it failed without opening the log. A check that failed only because a job it needs failed is named in one line instead (`gate: failed because docs failed`), since that job has its own report:
+A failure names each failed check under the run it belongs to, with the command that reads that run's log, and judges nothing: sift reads no CI log, and the session that pushed the commit opens the log itself. A check the forge keeps no log for (a commit status, a check from an app other than Actions) is named on a `no log` line:
 
 ```
 [sift watch octalide/sift]
-ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test) · now: open, head unchanged
+ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (4 checks, failed: test, lint, ext) · now: open, head unchanged
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
-  sift ci octalide/sift job 106195824649: PASS (judge: jev)
-    [info] log.trimmed: 212 of 212 lines read from the failing step Run npm test
-    lines: top 40 of 212, 40 not ruled out
-      1. [satisfied] 118: FAIL tests/watch.test.ts > watcher > delivers one settled verdict = 0.91
-      ...
-    [satisfied] own_fault = 0.88: The failure is caused by the change under test: ...
-    [violated] environment = 0.06: The failure is a flake, a network or runner problem, or an external service, ...
-    [satisfied] fixable_here = 0.93: The fix is inside this repository.
+  run 17736210453 failed: test, lint · log: gh run view 17736210453 --log-failed -R octalide/sift
+  no log: ext
 ```
 
 The verdict counts every check run and commit status on the PR's head, so it waits for external checks too. Until the last one finishes the individual runs are held in the digest, named by PR. A head whose checks have not all finished within `watchStallHours` (default 1) is delivered once as `ci stalled`, in the same shape, naming the checks still pending, so no session waits on a check that never reports. Heads are tracked from the moment their PR is open, so a check that never starts stalls too. The head is not delivered as stalled again unless a new commit lands on it, and a stalled head that does finish later still delivers its `ci settled` line:
