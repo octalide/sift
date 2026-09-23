@@ -1,12 +1,10 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
-import { channelTable, defaultChannels } from '../src/gate/channels.ts';
-import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
+import { gateCall } from '../src/gate/outbound.ts';
 import { GitHubForge } from '../src/forge/github.ts';
-import { grade, ruleSource, scopeOf, SpawnDirs, type GradeHost, type GradeOptions } from '../src/grade.ts';
+import { grade, scopeOf, SpawnDirs, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
 import { configLayers, globalConfigPath } from '../src/repo/config.ts';
-import { rulesSubject } from '../src/repo/subjects.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
 import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
 import { failureText, type Answer, type KeyOrigin, type Questions } from '../src/judge/types.ts';
@@ -404,21 +402,16 @@ export const register: Register = (on, rawOptions) => {
       if (e.tool.startsWith('mcp__sift__')) return next(e);
       const rt = runtime;
       if (!rt) return next(e);
-      const session = options.gateOutbound ? await rt.session() : undefined;
-      // the outbound channel table: the defaults for the forge, then the config's entries over them
-      const outbound = session ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, channelTable(defaultChannels(rt.forge), session.config.outbound.channels)) : undefined;
-      if (session && outbound) {
-        const rulesPack = session.packs['rules'];
-        const scope = { checkout: session, named: false };
-        const subject = rulesPack ? await rulesSubject({ forge: rt.forge, repo: session.repo, source: ruleSource(rt, scope, undefined), judge: rt.judge, store: rt.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, session.config) : undefined;
-        if (rulesPack && subject) {
-          const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, session.config);
-          record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
-          for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-          if (!decision.allow) {
-            if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-            else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
-          }
+      // the checkout a grade with no cwd reads: where this loop was spawned, else the session's
+      const checkout = options.gateOutbound ? (await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(e.agentId))).checkout : undefined;
+      const gated = checkout ? await gateCall(rt, checkout, e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
+      if (gated) {
+        const { outbound, decision } = gated;
+        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
+        for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
+        if (!decision.allow) {
+          if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
+          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
         }
       }
       const r = await next(e);

@@ -299,6 +299,8 @@ The default table ships Discord (`send_message`, `edit_message`, `send_webhook_m
 }
 ```
 
+The gate reads one checkout, the one a `grade` with no `cwd` reads: the directory the calling subagent was spawned in, else the session's repository. Its `outbound.channels`, its `rules` pack and its rule documents apply, so a subagent spawned in a worktree of another repository is gated by that repository's rules, and the main loop and a subagent spawned without a `cwd` by the session's. A directory in no repository has no config or rule documents of its own, so a subagent spawned there is gated by the defaults and the global config alone. A `cd` inside a Bash command does not move the binding.
+
 The channel's limit is mechanical and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`, each question naming the channel's `kind`, so a pull request rule read against an issue body is answered as not applying rather than broken: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
 
 ### Classify
@@ -485,6 +487,8 @@ Fixed: a low-confidence choice is unclear, not violated. A choice was banded on 
 Fixed: a low-confidence score is unclear, not violated. A score was banded on its confidence alone, so a score answered with low confidence read violated whichever level it picked. A score is now banded on the level it picked the same way a choice is, with `violates` naming its violating levels by index. The issue pack's `readiness` marks needs author input and needs triage as violating, so a confident not-ready pick is an info finding. A repo pack score without `violates` is never violated, where a low-confidence answer to it used to be.
 
 Fixed: the issue pack's `needs_parent` is inverted, so an issue that does not need a parent shows it satisfied rather than `[violated] needs_parent = 0.23`.
+
+Changed: the outbound gate judges text under the checkout of the loop that sends it, the one a `grade` with no `cwd` reads: the directory the calling subagent was spawned in, else the session's repository. Its `outbound.channels`, `rules` pack and rule documents apply, where the session's applied to every loop. A directory in no repository is gated with no rule documents of its own, where the gate threw and the whole `tool.call` hook was skipped for that call, its prune and watch delivery with it.
 
 ## Changes in 0.11.0
 

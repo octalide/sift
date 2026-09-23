@@ -171,7 +171,7 @@
     "gateOutbound": {
       "type": "boolean",
       "title": "Outbound text gate",
-      "description": "Before text leaves the session through a channel (Discord messages and gh pr, issue and release bodies by default, more under outbound.channels in the config), check the channel's length limit and judge the text against the repository rule documents. A broken rule denies the call, an unclear one logs.",
+      "description": "Before text leaves the session through a channel (Discord messages and gh pr, issue and release bodies by default, more under outbound.channels in the config), check the channel's length limit and judge the text against the rule documents of the repository checked out where the calling subagent was spawned, else the session's. A broken rule denies the call, an unclear one logs.",
       "default": false
     },
     "classify": {
