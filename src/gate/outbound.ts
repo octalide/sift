@@ -1,8 +1,12 @@
+import { ruleSource, type GradeHost } from '../grade.ts';
 import type { Judge } from '../judge/types.ts';
 import { runPack } from '../packs/run.ts';
 import type { Pack, Report, Subject } from '../packs/types.ts';
+import type { Checkout } from '../repo/checkout.ts';
 import type { RepoConfig } from '../repo/config.ts';
-import { defaultChannels, textOf, type Channel } from './channels.ts';
+import { rulesSubject } from '../repo/subjects.ts';
+import type { RuleSource } from '../rules/discover.ts';
+import { channelTable, defaultChannels, textOf, type Channel } from './channels.ts';
 
 // text a tool call is about to send somewhere people read, the hard limit of that channel, and what the text is;
 // denied names the reason the text could not be obtained at all, which the gate refuses without a judge call
@@ -44,4 +48,24 @@ export async function gateOutbound(out: Outbound, subject: Subject, pack: Pack, 
   const warnings = unclear.map((j) => `unclear: ${rule(j.id)}`);
   if (violated.length > 0) return { allow: false, reason: `breaks: ${violated.map((j) => rule(j.id)).join(' | ')}`, report, warnings };
   return { allow: true, reason: 'clear', report, warnings };
+}
+
+export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'store'>;
+
+export type Gated = { outbound: Outbound; decision: OutboundDecision };
+
+// one tool call under the checkout it is made from: that checkout's channel table, rules pack and rule documents;
+// undefined when the call sends no text or the checkout has no rules pack
+export async function gateCall(host: GateHost, checkout: Checkout, tool: string, input: Record<string, unknown>, read: ReadText): Promise<Gated | undefined> {
+  const outbound = await outboundOf(tool, input, read, channelTable(defaultChannels(host.forge), checkout.config.outbound.channels));
+  const pack = checkout.packs['rules'];
+  if (!outbound || !pack) return undefined;
+  const subject = await rulesSubject({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), judge: host.judge, store: host.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, checkout.config);
+  return { outbound, decision: await gateOutbound(outbound, subject, pack, host.judge, checkout.config) };
+}
+
+// a directory in no repository has no rule documents of its own; entries the config names in another repository still read from the forge
+function rulesOf(host: GateHost, checkout: Checkout): RuleSource {
+  if (checkout.git || checkout.repo) return ruleSource(host, { checkout, named: false }, undefined);
+  return { scope: checkout.root, list: async () => [], read: async () => undefined, templates: async () => [], remote: (repo, path, ref) => host.forge.file(repo, path, ref) };
 }
