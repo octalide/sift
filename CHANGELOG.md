@@ -6,6 +6,8 @@ Notes begin at 0.10.0. Earlier releases, and 0.10.1 and 0.10.2, have no recorded
 
 ## [Unreleased]
 
+Fixed: a `pr` subscription never heard a verdict that was out before it subscribed. A head whose checks had all finished before the subscribe, on a poller already running or on the seed poll the subscribe itself started, was recorded as settled and delivered to nobody, so a subagent subscribed `until: settled` after its CI went green was never resumed, and the subscription outlived its pull request. A `pr` subscription now joins its pull request as it stands and is delivered the verdict already out on its open head on the next poll, and a `pr` subscription `until: settled` is removed once its pull request is merged or closed before a verdict. `until: settled` takes the event that settles it whatever its `ci` filter holds back, and is refused beside `ci: none`. A `pr` subscription no longer takes a run that completed on a head its pull request has moved from, unless its filter is `all`. The stored watch state changes shape, so the first poll after the upgrade reseeds.
+
 ## [0.14.0] - 2026-09-23
 
 This release removes the `ci` pack and is a minor bump on 0.x. Judging CI output cost more than it told: the pack scored every line of a failed job's log, env dumps and YAML keys included, and its headline `own_fault` answered unclear on a failure whose error text was the literal bug the PR fixed.

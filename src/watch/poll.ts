@@ -54,7 +54,7 @@ export type WatchEvent = {
 };
 
 // bump when the stored shape changes; a store from an older version is reseeded
-export const STATE_VERSION = 9;
+export const STATE_VERSION = 10;
 
 export type WatchState = {
   version: number;
@@ -79,6 +79,8 @@ export type WatchState = {
   login?: string;
   // the runs a run subscription waits on, read by id each poll until their completion is out
   awaited: string[];
+  // the pr subscriptions not yet answered with their pull request's head as it stood when they subscribed
+  joined: string[];
   interval: number;
   lastPoll?: number;
   lastDelivery?: number;
@@ -120,6 +122,7 @@ export function initialState(): WatchState {
     etags: {},
     deferred: [],
     awaited: [],
+    joined: [],
     paused: false,
     interval: 0,
     failures: 0,
