@@ -7,11 +7,24 @@ export type SiftQuestion =
 export type SiftAnswer =
   | { type: 'noul'; p: number }
   | { type: 'choice'; choice: string; probabilities: Record<string, number>; confidence: number }
-  | { type: 'score'; score: number; legend: string; probabilities: number[]; confidence: number };
+  // score is the most likely level index, expected the probability-weighted position between levels
+  | { type: 'score'; score: number; expected: number; legend: string; probabilities: number[]; confidence: number };
+
+export type SiftFailure = 'disabled' | 'unavailable' | 'rejected' | 'malformed';
+
+// what a call cost: the backend's own count when it reports one, else an estimate from the bytes sent and received
+export type SiftUsage = { requestTokens: number; responseTokens: number; source: 'backend' | 'estimate' };
+
+// a key named without its value: where it came from and its last four characters
+export type SiftKeyRef = { source: 'option' | 'env' | 'settings'; ending: string };
+
+// the key in use, and every other source that holds a key, marked when that key is the same one
+export type SiftKeyOrigin = SiftKeyRef & { others: (SiftKeyRef & { same: boolean })[] };
 
 export type SiftJudgement =
-  | { ok: true; answers: Record<string, SiftAnswer>; backend: string; latencyMs: number }
-  | { ok: false; reason: 'disabled' | 'unavailable' | 'rejected' | 'malformed'; message: string; backend: string };
+  | { ok: true; answers: Record<string, SiftAnswer>; backend: string; latencyMs: number; usage?: SiftUsage }
+  // status is the backend's http status, key is set only when the backend rejected the key
+  | { ok: false; reason: SiftFailure; message: string; backend: string; status?: number; key?: SiftKeyOrigin; usage?: SiftUsage };
 
 export type SiftRankMode = 'batched' | 'isolated';
 
@@ -19,11 +32,13 @@ export type SiftRankOptions = {
   mode: SiftRankMode;
   // state every item is read against, placed beside the items
   context?: Record<string, unknown>;
-  // the question the sorted view orders by, the first when absent; for a choice question, the key whose probability orders it
+  // the question the sorted view orders by, the first when absent
   by?: string;
+  // for a choice question: the key whose probability orders the view, the chosen key's confidence when absent
   choice?: string;
   maxStateTokens?: number;
   maxRequestTokens?: number;
+  // requests in flight at once
   concurrency?: number;
   // the item fields the state carries beside k, every field when absent; every field still fills the questions
   fields?: string[];
@@ -32,11 +47,13 @@ export type SiftRankOptions = {
 export type SiftRanked<T> = { index: number; item: T; answers: Record<string, SiftAnswer>; value: number };
 
 export type SiftRankResult<T> =
-  | { ok: true; items: SiftRanked<T>[]; sorted: SiftRanked<T>[]; requests: number; backend: string }
-  | { ok: false; reason: 'disabled' | 'unavailable' | 'rejected' | 'malformed'; message: string; backend: string; requests: number };
+  // dropped: answers under a key no item or question of the request owns
+  | { ok: true; items: SiftRanked<T>[]; sorted: SiftRanked<T>[]; requests: number; dropped: number; backend: string; usage?: SiftUsage }
+  | { ok: false; reason: SiftFailure; message: string; backend: string; requests: number; key?: SiftKeyOrigin };
 
-// answer is absent when the judge left the question unanswered, the band is then unclear
-export type SiftJudged = { id: string; answer?: SiftAnswer; band: 'satisfied' | 'violated' | 'unclear'; severity: 'fail' | 'warn' | 'info'; instructions: string };
+// answer is absent when the judge left the question unanswered, the band is then unclear; parts, on a subject judged in
+// parts, are the parts the band was found in
+export type SiftJudged = { id: string; answer?: SiftAnswer; band: 'satisfied' | 'violated' | 'unclear'; severity: 'fail' | 'warn' | 'info'; instructions: string; parts?: string[] };
 
 export type SiftReport = {
   pack: string;
@@ -49,8 +66,23 @@ export type SiftReport = {
   verdict: 'pass' | 'warn' | 'fail' | 'unknown';
   backend: string;
   judgeError?: string;
+  // a subject too long to judge at once: the parts it was judged in, every one read
+  parts?: string[];
   // answers under an id no question asked for, and answers the judge left out of a ranked item, dropped without touching the verdict
   dropped?: number;
+};
+
+export type SiftGradeOptions = {
+  // owner/name, the checkout's repository when absent
+  repo?: string;
+  // the directory whose checkout the grade reads, absolute; the calling agent's or the session's when absent
+  cwd?: string;
+  // free text subject for rules, locate and text packs, or the plan for plan
+  text?: string;
+  // release: the branch or sha the release is cut from
+  ref?: string;
+  // how many items every top list shows, over each rank step's own setting
+  top?: number;
 };
 
 export type Sift = {
@@ -59,8 +91,8 @@ export type Sift = {
   // the same questions over many items: batched fills each request with items, isolated sends one request per item.
   // {k} in a question is the item index, {field} a field of an object item, {text} a string item
   rank: <T extends string | Record<string, unknown>>(items: T[], questions: Record<string, SiftQuestion>, options: SiftRankOptions) => Promise<SiftRankResult<T>>;
-  // run a pack over a subject: an issue or PR number, a commit range, "release", a job or run id, or text; top cuts a ranked list
-  grade: (pack: string, subject: string, options?: { repo?: string; text?: string; ref?: string; top?: number }) => Promise<SiftReport>;
+  // run a pack over a subject: an issue or PR number or url, a commit ref or range, "release" or a version, or text
+  grade: (pack: string, subject: string, options?: SiftGradeOptions) => Promise<SiftReport>;
   // the backend name in use
   backend: () => string;
 };

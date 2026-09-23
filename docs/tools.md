@@ -37,7 +37,7 @@ A noul's optional `criteria` is Jev's shape, `{ "true": "...", "false": "..." }`
 
 Two modes, both Jev shapes. `batched` fills each request with as many items as fit under the 32k state and 64k request limits and asks one question set per item, so items can see each other and a list costs as few requests as possible. `isolated` sends one request per item, run concurrently, so no item colours another. Prune is `rank` over output chunks, the rules pack is `rank` over the rule documents, locate is `rank` over the file tree, so any pack or session that needs the relevant N of M is data over the same primitive.
 
-Other plugins reach the same calls through `$.sift.judge`, `$.sift.rank` and `$.sift.grade`, typed in `types/sift.d.ts`.
+Other plugins reach the same calls through `$.sift.judge`, `$.sift.rank` and `$.sift.grade`, typed in `types/sift.d.ts`. `npm run typecheck` holds each type declared there to the one in the code it declares, so a field the code adds or drops fails the typecheck until the declaration follows.
 
 ## Tools
 
