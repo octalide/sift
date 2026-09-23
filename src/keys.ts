@@ -13,7 +13,8 @@ export const STALE_MS = 7 * 24 * 3600 * 1000;
 export const SEEN_EVERY_MS = 3600 * 1000;
 
 // every key one session writes. seen is the session's own, so no two sessions write one key. tenure names the plugin
-// environment that owns the session's background work, agents what each subagent was spawned with
+// environment that owns the session's background work, agents what each subagent was spawned with, tally the session's
+// decision totals
 export const sessionKeys = (session: string) => ({
   subs: `watch-subs:${session}`,
   mail: `watch-mail:${session}`,
@@ -21,6 +22,7 @@ export const sessionKeys = (session: string) => ({
   state: (repo: string) => `watch:${session}:${repo}`,
   tenure: `tenure:${session}`,
   agents: `agents:${session}`,
+  tally: `tally:${session}`,
 });
 
 // every key rule discovery writes for one scope: the cache every session shares, and when a discovery last read it
@@ -38,6 +40,7 @@ const PREFIXES: [string, Owner['kind']][] = [
   ['watch-seen:', 'session'],
   ['tenure:', 'session'],
   ['agents:', 'session'],
+  ['tally:', 'session'],
   ['rules:', 'rules'],
   ['rules-seen:', 'rules'],
 ];
