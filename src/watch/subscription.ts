@@ -92,7 +92,7 @@ export function inScope(e: WatchEvent, scope: Scope): boolean {
 }
 
 // what one subscription makes of a ci event in its scope
-export function routeCi(e: WatchEvent, sub: Pick<Subscription, 'scope' | 'filter'>, rules: WatchRules): Route {
+export function routeCi(e: WatchEvent, sub: Pick<Subscription, 'scope' | 'filter' | 'until'>, rules: WatchRules): Route {
   const { ci, stall } = sub.filter;
   if (ci === 'none') return { action: 'drop', reason: 'ci off' };
   if (e.settled) return { action: 'deliver', reason: 'ci settled on pr' };
@@ -102,6 +102,10 @@ export function routeCi(e: WatchEvent, sub: Pick<Subscription, 'scope' | 'filter
   const pr = e.subject?.startsWith('pr:') ? e.subject.slice(3) : undefined;
   if (e.head === 'settled') return { action: 'drop', reason: `ci on pr #${pr}, answered by its settled verdict` };
   if (e.head === 'pending') return { action: 'defer', reason: `ci ${e.conclusion ?? 'unknown'} on pr #${pr}, awaiting the other checks` };
+  // a pr scope takes the verdicts on its open head: a run here ran on a head the pr has moved from or on a closed pr
+  if (sub.scope.kind === 'pr') return { action: 'drop', reason: `ci on pr #${pr}, not its open head` };
+  // until settled takes the run that settles it, whatever else the filter holds back
+  if (sub.until === 'settled') return { action: 'deliver', reason: 'ci run completed' };
   if (ci === 'settled') return sub.scope.kind === 'repo' ? { action: 'drop', reason: 'ci run off a pr' } : { action: 'deliver', reason: 'ci run completed' };
   if (e.ok === true) return { action: 'defer', reason: 'ci success' };
   if (sub.scope.kind !== 'repo') return { action: 'deliver', reason: `ci failure on ${formatScope(sub.scope)}` };
@@ -153,5 +157,6 @@ export function subscriptionOf(input: SubscribeInput, how: { start: boolean; rep
   const until = parseUntil(input.until ?? (how.start && ref && how.owner ? 'settled' : undefined), scope);
   if (typeof until === 'object') return until;
   const filter: Filter = { items: input.items ?? how.filter.items, ci: (input.ci as CiFilter | undefined) ?? how.filter.ci, stall: input.stall ?? how.filter.stall };
+  if (until === 'settled' && filter.ci === 'none') return { error: 'until settled waits on a ci verdict, which ci none never delivers' };
   return { repo, scope, filter, ...(how.owner ? { for: how.owner } : {}), ...(until ? { until } : {}) };
 }
