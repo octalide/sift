@@ -3,7 +3,7 @@ import type { Judge } from '../judge/types.ts';
 import type { StoreLike } from '../log.ts';
 import type { Pack } from '../packs/types.ts';
 import type { RepoConfig } from '../repo/config.ts';
-import { rulesSubject } from '../repo/subjects.ts';
+import { textRulesSubjects } from '../repo/subjects.ts';
 import { forgeSource } from '../rules/discover.ts';
 import { simpleCommands } from '../shell.ts';
 import { channelTable, defaultChannels, POST_TOOL, postKind, textAbout } from './channels.ts';
@@ -100,8 +100,8 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
   const outbound = await outboundOf(POST_TOOL, input as Record<string, unknown>, noFile, channelTable(defaultChannels(host.forge), config.outbound.channels));
   let decision: OutboundDecision | undefined;
   if (outbound && pack) {
-    const subject = await rulesSubject({ forge: host.forge, repo, source: forgeSource(host.forge, repo), judge: host.judge, store: host.store, now: host.now, notice: host.notice }, { kind: 'text', ref: outbound.text, about: outbound.kind }, config);
-    decision = await gateOutbound(outbound, subject, pack, host.judge, config);
+    const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), judge: host.judge, store: host.store, now: host.now, notice: host.notice }, { text: outbound.text, about: outbound.kind }, config);
+    decision = await gateOutbound(outbound, subjects, pack, host.judge, config);
     if (!decision.allow && !shadow) return { outbound, decision, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
   }
   return { outbound, decision, url: await host.forge.post(repo, post) };

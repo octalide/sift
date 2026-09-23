@@ -18,6 +18,8 @@ export type PackQuestion = (Exclude<Question, { type: 'choice' }> | PackChoice) 
   violates?: string[] | number[] | 'listed';
   // ask only when this subject fact is truthy
   when?: string;
+  // ask only when this subject fact is falsy
+  unless?: string;
   // for a noul: true when a high probability is the bad outcome (e.g. "scope creep")
   inverted?: boolean;
 };

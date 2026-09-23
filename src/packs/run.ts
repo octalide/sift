@@ -21,7 +21,7 @@ export type RunOptions = {
 export const TOP_DEFAULT = 20;
 
 function buildQuestion(q: PackQuestion, subject: Subject): { question: Question; meta: Meta } | undefined {
-  const { lo, hi, severity, options, when, inverted, violates, ...question } = q;
+  const { lo, hi, severity, options, when, unless, inverted, violates, ...question } = q;
   let built: Question;
   let violating: (string | number)[] = [];
   if (question.type === 'choice') {
@@ -39,11 +39,16 @@ function buildQuestion(q: PackQuestion, subject: Subject): { question: Question;
   };
 }
 
+// a question is asked when its when fact is truthy and its unless fact is not, each when named
+function applies(q: PackQuestion, subject: Subject): boolean {
+  return (!q.when || !!subject.facts[q.when]) && (!q.unless || !subject.facts[q.unless]);
+}
+
 export function materialize(pack: Pack, subject: Subject): Materialized {
   const questions: Questions = {};
   const meta: Record<string, Meta> = {};
   for (const [id, q] of Object.entries(pack.questions)) {
-    if (q.when && !subject.facts[q.when]) continue;
+    if (!applies(q, subject)) continue;
     const built = buildQuestion(q, subject);
     if (!built) continue;
     questions[id] = built.question;
@@ -56,6 +61,7 @@ export function materialize(pack: Pack, subject: Subject): Materialized {
     const stepQuestions: Questions = {};
     const stepMeta: Record<string, Meta> = {};
     for (const [id, q] of Object.entries(step.questions)) {
+      if (!applies(q, subject)) continue;
       // {subject} is the pack's own placeholder, the item's fields are filled by rank per item
       const built = buildQuestion({ ...q, instructions: q.instructions.replace('{subject}', label) }, subject);
       if (!built) continue;
