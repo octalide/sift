@@ -476,6 +476,10 @@ CI runs the same four commands on every pull request and reports them through a 
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
 - The prune module estimates tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT).
 
+## Changes in 0.12.1
+
+Fixed: a bare number given to the `locate` or `plan` pack that names a pull request is refused with the forms the pack takes, as `issue` and `rules` already were, where it was read as an issue. The forms `locate` names no longer offer a pull request number: a bare number there names an issue, and a pull request is given by URL.
+
 ## Changes in 0.12.0
 
 Fixed: a bare number given to the `issue` or `rules` pack that names a pull request is refused with the forms the pack takes, where it was graded as if the pull request were an issue. GitHub's issues endpoint serves pull requests too, and the forge dropped the field that tells them apart. `Issue` now carries `pr`, set when the number names a pull request, and a second forge member must answer it.
