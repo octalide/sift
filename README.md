@@ -479,6 +479,8 @@ CI runs the same three commands on every pull request and reports them through a
 
 Fixed: a low-confidence choice is unclear, not violated. A choice was banded on its confidence alone, so the issue pack's `duplicate_of = none` at 0.32 warned an issue with no duplicate. A choice is now banded on what it picked: a confident pick of an option its `violates` names is violated, a confident other pick satisfied, and any pick below `hi` unclear. `duplicate_of` and `blocked_by` mark every open issue as violating, so `none` is never a finding and a confident duplicate still warns. A repo pack choice without `violates` is never violated, where a low-confidence answer to it used to be.
 
+Changed: the outbound gate judges text under the checkout of the loop that sends it, the one a `grade` with no `cwd` reads: the directory the calling subagent was spawned in, else the session's repository. Its `outbound.channels`, `rules` pack and rule documents apply, where the session's applied to every loop. A directory in no repository is gated with no rule documents of its own, where the gate threw and the whole `tool.call` hook was skipped for that call, its prune and watch delivery with it.
+
 ## Changes in 0.11.0
 
 This release drops judged review of diffs and is breaking. The judged diff questions caught nothing the repositories' own checks did not, raised false positives, and often could not run from another repository's worktree.
