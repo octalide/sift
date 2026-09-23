@@ -6,11 +6,13 @@ export type WatchesHost = {
   store: StoreLike;
   // the store key the subscriptions persist under
   key: string;
+  // the store key a repository's poll state persists under, one per session and repository
+  stateKey: (repo: string) => string;
   now: () => number;
   log: (text: string) => void;
   status: (text: string | undefined) => void;
   // what every poller shares; the registry supplies the per-repository rest
-  watcher: Omit<WatchHost, 'subscriptions' | 'retire' | 'prepare' | 'rate' | 'status'>;
+  watcher: Omit<WatchHost, 'key' | 'subscriptions' | 'retire' | 'prepare' | 'rate' | 'status'>;
   options: Omit<WatchOptions, 'repo'>;
 };
 
@@ -111,6 +113,7 @@ export class Watches {
     const poller = new Watcher(
       {
         ...this.host.watcher,
+        key: this.host.stateKey(repo),
         subscriptions: () => this.on(repo),
         retire: (ids, why) => this.remove(ids, why),
         prepare: () => this.reap(),

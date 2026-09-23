@@ -222,6 +222,7 @@ export const register: Register = (on, rawOptions) => {
       ? new Watches({
           store,
           key: `watch-subs:${sessionId}`,
+          stateKey: (repo) => `watch:${sessionId}:${repo}`,
           now: () => Date.now(),
           log: (text) => $.ui.log(text),
           status: (text) => $.ui.status(text),

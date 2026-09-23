@@ -3,7 +3,7 @@ import type { Check, Conditional, Run, WatchItem } from '../src/forge/forge.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
-import { currentState, diffItems, diffRuns, hashOf, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, type Item, type WatchEvent } from '../src/watch/poll.ts';
+import { currentState, diffItems, diffRuns, hashOf, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, type Item, type WatchEvent, type WatchState } from '../src/watch/poll.ts';
 import { Watches, type WatchesHost } from '../src/watch/registry.ts';
 import { formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, subscriptionOf, type CiFilter, type Scope, type Subscription } from '../src/watch/subscription.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
@@ -199,6 +199,7 @@ describe('watcher', () => {
       {
         forge,
         store: { get: async (k) => store.get(k), set: async (k, v) => void store.set(k, JSON.parse(JSON.stringify(v))) },
+        key: 'watch:test:o/r',
         judge,
         pack: BUILTIN_PACKS['triage']!,
         config: DEFAULT_CONFIG,
@@ -229,6 +230,7 @@ describe('watcher', () => {
 
   const silent = (over: Partial<WatchHost> = {}) => ({
     store: { get: async () => undefined, set: async () => {} },
+    key: 'watch:test:o/r',
     judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) } as Judge,
     pack: BUILTIN_PACKS['triage']!,
     config: DEFAULT_CONFIG,
@@ -485,6 +487,7 @@ describe('superseded ci news', () => {
     const h: WatchHost = {
       forge,
       store: { get: async (k) => store.get(k), set: async (k, v) => void store.set(k, JSON.parse(JSON.stringify(v))) },
+      key: 'watch:test:o/r',
       judge: { name: 'fake', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'fake' }) } as Judge,
       pack: BUILTIN_PACKS['triage']!,
       config: DEFAULT_CONFIG,
@@ -719,7 +722,7 @@ describe('subscriptions', () => {
   async function deliveredFor(subs: Subscription[]) {
     const deliveries: WatchDelivery[] = [];
     const watcher = new Watcher(
-      { forge: scenario(), store: memoryStore(), judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => 1_000_000, deliver: async (d) => void deliveries.push(d), log: () => {}, status: () => {}, schedule: () => ({ cancel: () => {} }), subscriptions: () => subs },
+      { forge: scenario(), store: memoryStore(), key: 'watch:test:o/r', judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => 1_000_000, deliver: async (d) => void deliveries.push(d), log: () => {}, status: () => {}, schedule: () => ({ cancel: () => {} }), subscriptions: () => subs },
       { repo: 'o/r', ...options },
     );
     await watcher.start();
@@ -785,12 +788,13 @@ describe('subscriptions', () => {
     expect(deliveries[1]!.text).not.toContain('deferred meanwhile');
   });
 
-  const registry = (forge: ReturnType<typeof fakeForge>, clock = { now: 1_000_000 }, store = memoryStore()) => {
+  const registry = (forge: ReturnType<typeof fakeForge>, clock = { now: 1_000_000 }, store = memoryStore(), session = 'test') => {
     const delivered: WatchDelivery[] = [];
     const logs: string[] = [];
     const host: WatchesHost = {
       store,
-      key: 'watch-subs:test',
+      key: `watch-subs:${session}`,
+      stateKey: (repo) => `watch:${session}:${repo}`,
       now: () => clock.now,
       log: (t) => void logs.push(t),
       status: () => {},
@@ -831,6 +835,52 @@ describe('subscriptions', () => {
     expect(again.w.list()).toEqual([other.sub]);
     expect(again.w.poller('o/other')).toBeDefined();
     expect(await again.w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter })).toMatchObject({ sub: { id: 's4' } });
+  });
+
+  it('keeps each session\'s poll state its own, so two sessions on one repository each get every event once', async () => {
+    const stamp = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const clock = { now: Date.parse('2026-02-01T00:00:00Z') };
+    // one repository both sessions read: the items updated since the cursor, answered 304 while the etag is current
+    const items: WatchItem[] = [slim(1)];
+    let etag = 1;
+    const change = (n: number) => {
+      clock.now += 60_000;
+      items.push(slim(n, { createdAt: stamp(clock.now), updatedAt: stamp(clock.now), url: `https://x/${n}` }));
+      etag += 1;
+    };
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: async (_r, since, token) => (token === String(etag) ? same() : changed(items.filter((i) => i.updatedAt >= since), String(etag))),
+      runs: async () => same(),
+    });
+    const store = memoryStore();
+    const got = (d: WatchDelivery[], n: number) => d.flatMap((x) => x.text.split('\n')).filter((l) => l.includes(`https://x/${n} `)).length;
+    const a = registry(forge, clock, store, 'a');
+    await a.w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
+    await a.w.poller('o/r')!.tick();
+    const b = registry(forge, clock, store, 'b');
+    await b.w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
+    await b.w.poller('o/r')!.tick();
+    expect([...store.map.keys()].filter((k) => k.startsWith('watch:')).sort()).toEqual(['watch:a:o/r', 'watch:b:o/r']);
+    change(2);
+    const before = JSON.parse(JSON.stringify(store.map.get('watch:a:o/r')));
+    await b.w.poller('o/r')!.tick();
+    expect(got(b.delivered, 2)).toBe(1);
+    // b's poll moved b's cursor and left a's alone
+    expect(store.map.get('watch:a:o/r')).toEqual(before);
+    expect((store.map.get('watch:b:o/r') as WatchState).cursor).not.toBe((before as WatchState).cursor);
+    // a restarts from its own cursor, not the one b left, so it still gets what changed since its last poll
+    a.w.stop();
+    const again = registry(forge, clock, store, 'a');
+    await again.w.load();
+    await again.w.poller('o/r')!.tick();
+    expect(got([...a.delivered, ...again.delivered], 2)).toBe(1);
+    change(3);
+    await b.w.poller('o/r')!.tick();
+    await again.w.poller('o/r')!.tick();
+    await b.w.poller('o/r')!.tick();
+    await again.w.poller('o/r')!.tick();
+    for (const d of [[...a.delivered, ...again.delivered], b.delivered]) expect([got(d, 1), got(d, 2), got(d, 3)]).toEqual([0, 1, 1]);
   });
 
   it('delivers a run subscription\'s completion read by id when 30 newer runs have paged it out of the listing', async () => {
@@ -952,7 +1002,7 @@ describe('subscriptions', () => {
     const low = fakeForge({ items: async () => ({ changed: false, rate: { remaining: 3, reset: 1_600 } }) });
     const fine = fakeForge({ items: async () => ({ changed: false, rate: { remaining: 4000 } }) });
     const make = (forge: ReturnType<typeof fakeForge>) =>
-      new Watcher({ forge, store: memoryStore(), judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => 1_000_000, deliver: async () => {}, log: () => {}, status: () => {}, schedule: (ms) => (waits.push(ms), { cancel: () => {} }), subscriptions: () => repoSub(), rate }, { repo: 'o/r', ...options });
+      new Watcher({ forge, store: memoryStore(), key: 'watch:test:o/r', judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => 1_000_000, deliver: async () => {}, log: () => {}, status: () => {}, schedule: (ms) => (waits.push(ms), { cancel: () => {} }), subscriptions: () => repoSub(), rate }, { repo: 'o/r', ...options });
     const a = make(low);
     await a.start();
     await a.tick();
@@ -965,9 +1015,9 @@ describe('subscriptions', () => {
 
   it('reseeds a store written before subscriptions', async () => {
     expect(STATE_VERSION).toBe(9);
-    const store = memoryStore(new Map([['watch:o/r', { ...initialState(), version: 8, seeded: true, armedBy: 'issue-1' }]]));
+    const store = memoryStore(new Map([['watch:test:o/r', { ...initialState(), version: 8, seeded: true, armedBy: 'issue-1' }]]));
     const logs: string[] = [];
-    const watcher = new Watcher({ forge: fakeForge(), store, judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => 1_000_000, deliver: async () => {}, log: (t) => void logs.push(t), status: () => {}, schedule: () => ({ cancel: () => {} }), subscriptions: () => repoSub() }, { repo: 'o/r', ...options });
+    const watcher = new Watcher({ forge: fakeForge(), store, key: 'watch:test:o/r', judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => 1_000_000, deliver: async () => {}, log: (t) => void logs.push(t), status: () => {}, schedule: () => ({ cancel: () => {} }), subscriptions: () => repoSub() }, { repo: 'o/r', ...options });
     await watcher.start();
     expect(logs[0]).toBe('sift watch o/r: stored state is from an older version, reseeding');
     expect(watcher.snapshot()).not.toHaveProperty('armedBy');
