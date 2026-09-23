@@ -143,12 +143,24 @@ export function settles(e: WatchEvent, scope: Scope): boolean {
 // a subscribe or start as the watch tool takes it
 export type SubscribeInput = { repo?: string; scope?: string; items?: boolean; ci?: string; stall?: boolean; until?: string; for?: string };
 
-// the subscription a subscribe asks for: the caller's repository unless it names one, the default filter under what
-// it sets, owned by the agent that asked. a start takes the caller's repository alone, scoped to the pull request or
-// branch its for names, else the whole repository; a subagent's start for a pull request or branch lasts until settled
-// unless it says otherwise, since the verdict is what it waits on
+// a /sift watch command's arguments as the watch tool takes them: subscribe <repo> [scope], unsubscribe <id>,
+// start [repo] [for <pr|branch>], and every other action [repo]
+export function commandInputOf(action: string, args: string[]): (SubscribeInput & { action: string; id?: string }) | { error: string } {
+  if (action === 'subscribe') return { action, repo: args[0], scope: args.slice(1).join(' ') || undefined };
+  if (action === 'unsubscribe') return { action, id: args[0] };
+  if (action !== 'start') return { action, repo: args[0] };
+  const [repo, ...rest] = args[0] === 'for' ? [undefined, ...args] : args;
+  if (rest.length === 0) return { action, repo };
+  if (rest[0] !== 'for' || rest.length !== 2) return { error: 'usage: /sift watch start [repo] [for <pr|branch>]' };
+  return { action, repo, for: rest[1] };
+}
+
+// the subscription a subscribe or start asks for: the caller's repository unless it names one, the default filter
+// under what it sets, owned by the agent that asked. a start is scoped to the pull request or branch its for names,
+// else the whole repository; a subagent's start for a pull request or branch lasts until settled unless it says
+// otherwise, since the verdict is what it waits on
 export function subscriptionOf(input: SubscribeInput, how: { start: boolean; repo?: string; filter: Filter; owner?: string }): Omit<Subscription, 'id'> | { error: string } {
-  const repo = how.start ? how.repo : input.repo?.trim() || how.repo;
+  const repo = input.repo?.trim() || how.repo;
   if (!repo) return { error: 'no repository (pass repo, or run in a checkout of one)' };
   const ref = how.start ? input.for?.trim().replace(/^#(?=\d+$)/, '') : undefined;
   const scope = how.start ? (!ref ? { kind: 'repo' as const } : /^\d+$/.test(ref) ? { kind: 'pr' as const, number: Number(ref) } : { kind: 'branch' as const, name: ref }) : parseScope(input.scope);
