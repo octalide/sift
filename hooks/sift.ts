@@ -1,6 +1,8 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
+import { POST_TOOL, postKind } from '../src/gate/channels.ts';
 import { gateCall } from '../src/gate/outbound.ts';
+import { METHODS, postCall, rawWriteOf, rawWriteRefusal, VERDICTS, type PostInput } from '../src/gate/post.ts';
 import { GitHubForge } from '../src/forge/github.ts';
 import { grade, scopeOf, SpawnDirs, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
@@ -366,6 +368,30 @@ export const register: Register = (on, rawOptions) => {
         },
       });
     }
+    await $.tool.register({
+      name: 'post',
+      description:
+        `Write an issue, pull request, comment, review, merge or release on ${forge.name} to the repository named in repo, never the one the working directory implies. The text is judged against that repository's rule documents and its outbound channels first: a broken rule or a channel's length limit refuses the write with the rule quoted, and nothing is written. Otherwise the write is made and its url returned. Every kind takes repo and kind. issue-create: title, body. pr-create: title, body, base, head (a branch, or owner:branch from a fork), draft. issue-comment, pr-comment: number, body. issue-edit, pr-edit: number, title or body or both. pr-review: number, verdict, body (required unless approving). pr-merge: number, method, title and body for the merge commit. release-create: tag, body (the notes), title, target, draft, prerelease. release-edit: tag, title or body. Writing these through gh in Bash is refused while the outbound gate is on; labels, assignees, closing and the like stay with gh.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'the repository written to, as owner/name' },
+          kind: { type: 'string', enum: forge.writes.map(postKind), description: 'the artifact and what the write does to it' },
+          number: { type: 'number', description: 'the issue or pull request number, for comment, edit, review and merge' },
+          tag: { type: 'string', description: 'release-create and release-edit: the release tag' },
+          title: { type: 'string', description: 'the title; for pr-merge the merge commit subject' },
+          body: { type: 'string', description: 'the body, comment, review, release notes, or for pr-merge the merge commit message' },
+          base: { type: 'string', description: 'pr-create: the branch merged into' },
+          head: { type: 'string', description: 'pr-create: the branch merged from' },
+          draft: { type: 'boolean', description: 'pr-create and release-create: open as a draft' },
+          verdict: { type: 'string', enum: [...VERDICTS], description: 'pr-review: the review verdict' },
+          method: { type: 'string', enum: [...METHODS], description: 'pr-merge: how the pull request is merged' },
+          target: { type: 'string', description: 'release-create: the branch or sha the tag is created from when it does not exist' },
+          prerelease: { type: 'boolean', description: 'release-create: mark the release a prerelease' },
+        },
+        required: ['repo', 'kind'],
+      },
+    });
     await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred]' });
 
     if (watches) {
@@ -402,6 +428,15 @@ export const register: Register = (on, rawOptions) => {
       if (e.tool.startsWith('mcp__sift__')) return next(e);
       const rt = runtime;
       if (!rt) return next(e);
+      // a forge write from the shell is refused: its destination is whatever the command implies, so it goes through post
+      const command = (e as unknown as { command?: unknown }).command;
+      const raw = options.gateOutbound && e.tool === 'Bash' && typeof command === 'string' ? rawWriteOf(rt.forge, command) : undefined;
+      if (raw) {
+        const refusal = rawWriteRefusal(rt.forge, raw);
+        record('outbound', options.shadow ? 'would-refuse' : 'refuse', { digest: `shell ${postKind(raw)}` });
+        if (options.shadow) $.ui.log(`sift outbound (shadow): would refuse: ${refusal}`);
+        else return { deny: `sift outbound: ${refusal}.` };
+      }
       // the checkout a grade with no cwd reads: where this loop was spawned, else the session's
       const checkout = options.gateOutbound ? (await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(e.agentId))).checkout : undefined;
       const gated = checkout ? await gateCall(rt, checkout, e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
@@ -440,6 +475,26 @@ export const register: Register = (on, rawOptions) => {
       return { result: [{ type: 'text', text: formatReport(report) }] };
     } catch (error) {
       return { deny: `sift grade failed: ${messageOf(error)}` };
+    }
+  });
+
+  // the destination is the repo the call names; the rules pack is the caller's, as a grade's is
+  on('tool.call', { tool: POST_TOOL }, async ($, e) => {
+    try {
+      const rt = ready();
+      const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(e.agentId))).checkout.packs['rules'];
+      const input = e as unknown as PostInput;
+      const posted = await postCall({ forge: rt.forge, judge: rt.judge, store: rt.store, now: rt.now, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
+      const { outbound, decision } = posted;
+      if (outbound && decision) {
+        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}` });
+        for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
+        if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
+      }
+      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. Rewrite the text or ask the user.` };
+      return { result: [{ type: 'text', text: posted.url }] };
+    } catch (error) {
+      return { deny: `sift post failed: ${messageOf(error)}` };
     }
   });
 
