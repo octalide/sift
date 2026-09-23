@@ -24,7 +24,6 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     reviewComments: async () => [],
     checks: async () => [],
     template: () => undefined,
-    templates: async () => [],
     tags: async () => [],
     compare: async () => [],
     compareDiff: async () => '',

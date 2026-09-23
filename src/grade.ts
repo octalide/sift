@@ -2,7 +2,6 @@ import type { Forge } from './forge/forge.ts';
 import type { Git } from './forge/git.ts';
 import type { Judge } from './judge/types.ts';
 import { indexTree, treeSubject } from './locate/tree.ts';
-import type { StoreLike } from './log.ts';
 import { REMOVED_PACKS } from './packs/builtin.ts';
 import { runPack } from './packs/run.ts';
 import { parseSubject, refusal, type ParsedKind } from './packs/subject.ts';
@@ -11,7 +10,7 @@ import type { Checkout, CheckoutFs, Checkouts } from './repo/checkout.ts';
 import { defaultTarget, type RepoConfig } from './repo/config.ts';
 import { localSource, remoteSource } from './repo/source.ts';
 import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubject, textSubject } from './repo/subjects.ts';
-import { checkoutSource, forgeSource, type RuleSource } from './rules/discover.ts';
+import { checkoutSource, forgeSource, type Discoveries, type RuleSource } from './rules/discover.ts';
 import { truncate } from './tokens.ts';
 
 export type GradeOptions = {
@@ -26,10 +25,8 @@ export type GradeOptions = {
 export type GradeHost = {
   forge: Forge;
   judge: Judge;
-  store: StoreLike;
-  now: () => number;
-  // a line for the session log
-  notice: (text: string) => void;
+  // the rule discoveries in flight, shared by every grade and post of the session
+  discoveries: Discoveries;
   fs: CheckoutFs;
   checkouts: Checkouts;
 };
@@ -123,7 +120,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<
         at = checkout.repo;
       } else at = needRepo();
       const config = await configOf(at);
-      const rules = { forge, repo, source: ruleSource(host, scope, at), judge: host.judge, store: host.store, now: host.now, notice: host.notice };
+      const rules = { forge, repo, source: ruleSource(host, scope, at), discoveries: host.discoveries };
       if (p.kind === 'text') return { subject: await rulesSubject(rules, { kind: 'text', ref: opts.text ?? p.text }, config), config };
       return { subject: await rulesSubject({ ...rules, repo: p.repo ?? needRepo() }, { kind: 'issue', number: p.number, pack: pack.name }, config), config };
     }
