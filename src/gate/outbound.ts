@@ -53,7 +53,7 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
     for (const j of [...report.judged, ...report.ranked.flatMap((s) => s.items.flatMap((item) => item.asked))]) {
       if (j.band !== band || j.severity === 'info') continue;
       const rule = ruleOf(j.instructions);
-      byRule.set(rule, [...(byRule.get(rule) ?? []), ...(report.parts ? (j.parts ?? []) : [])]);
+      byRule.set(rule, [...(byRule.get(rule) ?? []), ...(j.parts ?? [])]);
     }
     return [...byRule].map(([rule, at]) => (at.length > 0 ? `${rule} (in ${at.join(', ')})` : rule));
   };
