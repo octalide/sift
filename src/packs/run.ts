@@ -6,7 +6,7 @@ import { CHECKS } from './checks.ts';
 import type { Finding, Judged, Pack, PackQuestion, RankedItem, RankedStep, RankStep, Report, Subject, Verdict } from './types.ts';
 import { batchQuestions, estimateTokensOf, JEV_LIMITS } from '../tokens.ts';
 
-type Meta = { lo: number; hi: number; severity: Judged['severity']; inverted: boolean; violates: string[] };
+type Meta = { lo: number; hi: number; severity: Judged['severity']; inverted: boolean; violates: (string | number)[] };
 
 // a rank step as rank input: the subject list as items, the questions asked of each with {subject} already filled
 export type Step = { step: RankStep; items: Record<string, unknown>[]; questions: Questions; meta: Record<string, Meta>; by: string };
@@ -23,7 +23,7 @@ export const TOP_DEFAULT = 20;
 function buildQuestion(q: PackQuestion, subject: Subject): { question: Question; meta: Meta } | undefined {
   const { lo, hi, severity, options, when, inverted, violates, ...question } = q;
   let built: Question;
-  let violating: string[] = [];
+  let violating: (string | number)[] = [];
   if (question.type === 'choice') {
     const set = options ? subject.options[options] : question.criteria;
     if (!set || Object.keys(set).length === 0) return undefined;
@@ -31,6 +31,7 @@ function buildQuestion(q: PackQuestion, subject: Subject): { question: Question;
     violating = violates === 'listed' ? Object.keys(set) : (violates ?? []);
   } else {
     built = question;
+    if (question.type === 'score' && Array.isArray(violates)) violating = violates;
   }
   return {
     question: built,

@@ -391,6 +391,44 @@ describe('issue pack', () => {
     expect(clear.verdict).toBe('pass');
   });
 
+  it('shows needs_parent satisfied for an issue with no parent, and readiness banded on the level it picked', async () => {
+    const subject: Subject = { kind: 'issue', ref: 'r#1', state: {}, facts: { labels: [], sections: {}, has_others: false }, options: {} };
+    const config = resolveConfig(undefined);
+    const clean = { substantive: { type: 'noul' as const, p: 0.9 }, implementable: { type: 'noul' as const, p: 0.9 }, scope_clear: { type: 'noul' as const, p: 0.9 }, single_repo: { type: 'noul' as const, p: 0.9 } };
+    const level = (score: number, confidence: number) => ({ type: 'score' as const, score, expected: score, legend: String(score), probabilities: [0, 0, 0].map((_, i) => (i === score ? confidence : (1 - confidence) / 2)), confidence });
+    const grade = (parent: number, readiness: ReturnType<typeof level>) => runPack(BUILTIN_PACKS['issue']!, subject, answering({ ...clean, needs_parent: { type: 'noul', p: parent }, readiness }), config);
+    const band = (r: Awaited<ReturnType<typeof grade>>, id: string) => r.judged.find((j) => j.id === id)!.band;
+    const alone = await grade(0.23, level(2, 0.97));
+    expect(band(alone, 'needs_parent')).toBe('satisfied');
+    expect(band(alone, 'readiness')).toBe('satisfied');
+    expect(alone.verdict).toBe('pass');
+    expect(band(await grade(0.9, level(2, 0.97)), 'needs_parent')).toBe('violated');
+    for (const picked of [0, 1, 2]) expect(band(await grade(0.23, level(picked, 0.4)), 'readiness')).toBe('unclear');
+    const triage = await grade(0.23, level(1, 0.9));
+    expect(triage.judged.find((j) => j.id === 'readiness')).toMatchObject({ band: 'violated', severity: 'info' });
+    expect(triage.verdict).toBe('pass');
+  });
+
+  it('bands a repo pack score on the level it picked, so only a confident violating level fails', async () => {
+    const pack: Pack = { name: 'p', subject: 'text', description: 'x', checks: [], questions: { fit: { type: 'score', instructions: 'x', criteria: ['bad', 'fine', 'good'], violates: [0], severity: 'fail' } } };
+    const subject: Subject = { kind: 'text', ref: 'x', state: {}, facts: {}, options: {} };
+    const config = resolveConfig(undefined);
+    const grade = (score: number, confidence: number) => runPack(pack, subject, answering({ fit: { type: 'score', score, expected: score, legend: String(score), probabilities: [], confidence } }), config);
+    for (const picked of [0, 1, 2]) {
+      const unsure = await grade(picked, 0.2);
+      expect(unsure.judged[0]!.band).toBe('unclear');
+      expect(unsure.verdict).toBe('warn');
+    }
+    const bad = await grade(0, 0.9);
+    expect(bad.judged[0]!.band).toBe('violated');
+    expect(bad.verdict).toBe('fail');
+    for (const picked of [1, 2]) {
+      const fine = await grade(picked, 0.9);
+      expect(fine.judged[0]!.band).toBe('satisfied');
+      expect(fine.verdict).toBe('pass');
+    }
+  });
+
   it('never counts duplicate_of = none as a finding, and warns only on a confident duplicate', async () => {
     const subject: Subject = { kind: 'issue', ref: 'r#1', state: {}, facts: { labels: [], sections: {}, has_others: true }, options: { open_issues: { '#3': 'three', '#4': 'four' } } };
     const config = resolveConfig(undefined);
@@ -468,6 +506,10 @@ describe('pack materialization', () => {
     expect(() => validatePack({ subject: 'text', questions: { q: { type: 'choice', instructions: 'x', criteria: { a: 'a' }, violates: 'a' } } }, 'bad')).toThrow(/list of option keys/);
     expect(validatePack({ subject: 'text', questions: { q: { type: 'choice', instructions: 'x', criteria: { a: 'a' }, violates: ['a'] } } }, 'ok').name).toBe('ok');
     expect(validatePack({ subject: 'issue', questions: { q: { type: 'choice', instructions: 'x', options: 'open_issues', violates: 'listed' } } }, 'ok').name).toBe('ok');
+    expect(validatePack({ subject: 'text', questions: { q: { type: 'score', instructions: 'x', criteria: ['a', 'b'], violates: [0] } } }, 'ok').name).toBe('ok');
+    expect(() => validatePack({ subject: 'text', questions: { q: { type: 'score', instructions: 'x', criteria: ['a', 'b'], violates: [2] } } }, 'bad')).toThrow(/level indices/);
+    expect(() => validatePack({ subject: 'text', questions: { q: { type: 'score', instructions: 'x', criteria: ['a', 'b'], violates: ['a'] } } }, 'bad')).toThrow(/level indices/);
+    expect(() => validatePack({ subject: 'text', questions: { q: { type: 'score', instructions: 'x', criteria: ['a', 'b'], violates: 'listed' } } }, 'bad')).toThrow(/level indices/);
   });
   it('drops an answer to a question it did not ask and reports the count without touching the verdict', async () => {
     // answers every question asked at 0.9 and one nobody asked, for the pack and for the rank step
