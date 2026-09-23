@@ -7,7 +7,7 @@ It asks one of two backends a set of typed questions about some state and gets b
 - **Jev** (TypeSafe's System One model) when `TYPESAFE_API_KEY` is set. Sub-second, cheap, calibrated.
 - **the session's small model** (`haiku` by default) otherwise, through the engine's own client. Slower and less calibrated, but it needs no extra account.
 
-Two primitives sit on that call: `judge`, typed questions over one state, and `rank`, the same questions over many items. Everything else is data over them. A pack is questions and checks over a repository subject (an issue, a pull request, a release, a job log, the file tree). The hooks that act inside a session (prune, the outbound gate, classify) and the repository watch are packs and ranks with a policy attached. Every module is a toggle, every module logs what it decided, and every module falls back to the engine's normal behaviour when the judge is unavailable. Correctness never depends on the judge.
+Two primitives sit on that call: `judge`, typed questions over one state, and `rank`, the same questions over many items. Everything else is data over them. A pack is questions and checks over a repository subject (an issue, a pull request, a release, the file tree). The hooks that act inside a session (prune, the outbound gate, classify) and the repository watch are packs and ranks with a policy attached. Every module is a toggle, every module logs what it decided, and every module falls back to the engine's normal behaviour when the judge is unavailable. Correctness never depends on the judge.
 
 ## Install
 
@@ -78,7 +78,6 @@ A pack is data: a subject kind, a list of mechanical checks, typed questions wit
 | `pr` | a PR number or URL, or a `base..head` range | is the PR linked, targeted, named, templated, committed and checked as the repository requires, and has the base moved under it. Mechanical only, no judge call |
 | `plan` | an issue number, the plan in `text` | does the plan cover the issue, add nothing beyond it, and decide nothing the issue leaves open; a warn means the plan lists its decisions in the PR body |
 | `commit` | a ref or range | do the commit messages follow the repository's commit format. Mechanical only, no judge call |
-| `ci` | a job id, a run id, or a log in `text` | why the job failed: the lines that explain it, then whether the change under test caused it, whether it is the environment, and whether the fix is in this repository |
 | `rules` | an issue number or URL, or free text | does the subject comply with each rule the repository's rule documents state |
 | `release` | a proposed version, or `release` | are the commits since the last tag safe to ship as described, and do the version bump and changelog agree with them |
 | `triage` | a repository event | does this event need the session to act on it now, what kind is it, how urgent |
@@ -90,9 +89,6 @@ grade(pack: "pr", subject: "dev..HEAD")        # the PR this branch would open, 
 grade(pack: "issue", subject: "17")            # or "#17", or an issue URL, which may name another repo
 grade(pack: "plan", subject: "17", text: "...")   # a plan for issue 17
 grade(pack: "commit", subject: "main..HEAD")
-grade(pack: "ci", subject: "job:106195824649")  # a failed job by id
-grade(pack: "ci", subject: "35554549814")       # a run id (or run:<id>) reads its first job that failed on its own
-grade(pack: "ci", subject: "x", text: "...")    # a log pasted as text
 grade(pack: "rules", subject: "17")            # issue 17 against the repo's rule documents
 grade(pack: "rules", subject: "x", text: "...") # free text against the rules, a commit message or PR body before it is written
 grade(pack: "release", subject: "v1.4.0")      # or "release" for the required bump alone
@@ -102,9 +98,9 @@ grade(pack: "locate", subject: "x", text: "...", top: 10)  # the same for free t
 grade(pack: "commit", subject: "HEAD", cwd: "/src/other-42")  # HEAD of another checkout, under its conventions
 ```
 
-The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. `locate` takes the same reference forms, a bare number naming an issue, or free text in `text`. `rules` takes an issue number or URL, or free text in `text`, and refuses a pull request or a commit with the forms it takes named: sift judges no diff. `ci` takes `job:<id>`, `run:<id>`, a bare run id, or the log in `text`. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named, and so is a number given to `issue`, `rules`, `locate` or `plan` that names a pull request.
+The subject is parsed before anything is fetched: `issue` and `pr` take a number as `N` or `#N`, or an issue or pull request URL in the code host's own shape (the repo in the URL is the one read, so a URL of another repo needs no `repo`), `pr` also a range (`dev..HEAD`), `commit` takes a ref or range, `release` takes a tag or `release`. `locate` takes the same reference forms, a bare number naming an issue, or free text in `text`. `rules` takes an issue number or URL, or free text in `text`, and refuses a pull request or a commit with the forms it takes named: sift judges no diff. A missing subject, a title or body pasted as one, or a URL of the wrong kind is refused with the expected form named, and so is a number given to `issue`, `rules`, `locate` or `plan` that names a pull request.
 
-Every grade reads one checkout: `cwd` when the call passes it (an absolute path), otherwise the directory the calling subagent was spawned in when its Agent call set one (or its parent's), otherwise the session's repository. The checkout is the git toplevel of that directory, so a worktree grades its own HEAD and working tree, and it brings its repository, its `.sift/config.json` and its `.sift/packs`: the packs a grade can name and the conventions it checks against are that checkout's. `commit`, a `pr` range, `locate`, and `release` and `rules` when they read the checkout refuse a `repo` that is not the checkout's, naming both, rather than mix one repository's commits with another's name; pass the `cwd` of a checkout of that repository instead. Without `cwd`, a `release` or `rules` grade of another repository reads it from the forge as before. A subject read from the forge (an issue, a PR by number, a plan, a ci log, or a `release` or `rules` grade of another repository) is checked against the conventions of the repository it is in: the checkout's own when it is that repository, otherwise that repository's `.sift/config.json` at its default branch, read through the forge over the global layer. The repository a checkout names on the forge is looked up once per checkout, and its conventions and packs are reread when anything under `.sift/` changes.
+Every grade reads one checkout: `cwd` when the call passes it (an absolute path), otherwise the directory the calling subagent was spawned in when its Agent call set one (or its parent's), otherwise the session's repository. The checkout is the git toplevel of that directory, so a worktree grades its own HEAD and working tree, and it brings its repository, its `.sift/config.json` and its `.sift/packs`: the packs a grade can name and the conventions it checks against are that checkout's. `commit`, a `pr` range, `locate`, and `release` and `rules` when they read the checkout refuse a `repo` that is not the checkout's, naming both, rather than mix one repository's commits with another's name; pass the `cwd` of a checkout of that repository instead. Without `cwd`, a `release` or `rules` grade of another repository reads it from the forge as before. A subject read from the forge (an issue, a PR by number, a plan, or a `release` or `rules` grade of another repository) is checked against the conventions of the repository it is in: the checkout's own when it is that repository, otherwise that repository's `.sift/config.json` at its default branch, read through the forge over the global layer. The repository a checkout names on the forge is looked up once per checkout, and its conventions and packs are reread when anything under `.sift/` changes.
 
 A report has three parts: mechanical findings (labels, milestone, template sections, linked issue, target branch, CI, commit format and scope, drift, required version bump, changelog), judged findings (each with its probability and a band: satisfied, unclear, violated), and a verdict (pass, warn, fail, or unknown when the judge was unavailable). A pack with rank steps adds one list per step. A question the judge left unanswered is reported in the unclear band without an answer, and an answer under an id no question asked for is dropped and counted.
 
@@ -121,10 +117,6 @@ The issue is judged as it stands, not as first filed. The subject carries the wh
 ### plan
 
 The `plan` pack reads an issue and a plan for it from `text` and asks three questions: `covers` (every point the issue asks for is met by a step, or the plan says why it is left out), `adds_nothing` (no step changes something the issue does not mention unless the change is needed to land one it does), and `decides_unasked` (no step settles something the issue leaves open that others will depend on: a new or changed public interface, a stored format, behaviour a caller outside the change depends on, a choice between two architectures; normalising an input, a collision or ordering rule inside one module, the wording of a message, or a test's shape are not decisions). A violated `covers` fails the report. A violated `adds_nothing` or `decides_unasked` warns: the plan goes ahead and lists its decisions in the PR body.
-
-### ci
-
-The `ci` pack reads a failing job's log: a job id (`job:<id>`), a run id (its first job that failed on its own) read through the forge, or the text itself. A job that failed only because a job it `needs` failed or was cancelled, such as an aggregate `gate` job, is downstream: it is never judged. A run names each downstream job in one `log.followed` line (`gate: failed because docs failed`), and `job:<id>` naming one follows it to the job that failed on its own and says so (`gate: failed because docs failed, followed to docs`). Any other job that failed on its own is named with its id, so one report hides no failure. Whether a job is downstream is decided in code from the forge's dependencies and the results: on GitHub the jobs API carries none, so they are read from the workflow file at the run's commit, each `jobs.<key>` mapped to the listed jobs by its name (a matrix job by the literal text of its `name` template). A job sift cannot map, or whose workflow cannot be read, is judged as a leaf. The log is trimmed in code to the step the forge marks failed (the tail of the whole log when none is), stripped of timestamps, colours and group marks, and bounded at 300 lines. One `top` rank step over the lines keeps the ones that explain the failure and feeds them to the questions, so the judge reads the failure rather than the log. The pull request whose head the job ran on, when one is open, stands beside it with the files its diff touches, and `own_fault` (the failure is caused by the change under test) is asked only then. `environment` asks whether it is a flake, a runner or network problem or an external service, and `fixable_here` whether a change to this repository would make the job pass. The watch attaches this report to every settled CI failure, see [Watch](#watch).
 
 ### rules
 
@@ -166,7 +158,7 @@ The built-in packs are in `src/packs/builtin.ts`. A repo overrides or adds one w
 
 Question fields beyond Jev's own: `lo` and `hi` set the band thresholds (default 0.35 and 0.65), `severity` says what a violated band means for the verdict (`fail`, `warn`, `info`), `inverted` marks a noul whose high probability is the bad outcome, `when` names a subject fact that must be truthy for the question to be asked, `options` names a runtime option set for a choice (`open_issues`, `type_labels`, `commit_types`), and `violates` names the picks of a choice or score that are a finding: for a choice a list of its criteria keys, or `"listed"` for every option of its `options` set but the added `none`, and for a score a list of level indices into its `criteria` (`[0, 1]` for its first two levels). A noul is banded on its probability. A choice or score is banded on what it picked: a pick at or above `hi` is violated when `violates` names it and satisfied otherwise, and a pick below `hi` is unclear. A low-confidence choice or score is never violated, and one without `violates` never is. The issue pack's `duplicate_of` and `blocked_by` mark every open issue as violating, so `none` is never a finding, and its `readiness` marks needs author input and needs triage as violating. A pack with more questions than one request holds goes out in several, the subject repeated in each.
 
-A pack may also carry `rank`, a list of steps run in order before the questions, each one `rank` over a subject list with the state so far as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by, or a template over its fields), `list` (`each` prints every item in order with every question of the step, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`, `violated` only the items ruled out with the questions that ruled them out), `order` (`input` shows a top list in input order instead of by value), `fields` (the item fields the state carries beside its index, every field unless said. The rest only fill the questions, so a text that is already in the question is not sent twice), `context` (the state fields the items are read against, the whole state unless said. An isolated step repeats them in every request, so a step over many items names the few it needs), `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out, which makes steps hierarchical, and `feed`, the state field the items the step did not rule out are placed under for the steps and questions after it. Every question of a step is judged for every item, and `by` only orders. A step rules out an item that any of its questions bands violated, and a `top` step everything below the top it shows. The rules pack is one `each` step over the rule paragraphs, locate two `top` steps, ci one `top` step over a log's lines feeding `lines` to its questions.
+A pack may also carry `rank`, a list of steps run in order before the questions, each one `rank` over a subject list with the state so far as context. A step names the list (`from`, a subject fact), the `questions` asked of every item (`{field}` takes the item's field, `{subject}` the subject's label), `mode` (`batched` unless said), `by` (the question whose value orders and bands the items, the first unless said), `label` (the item field the report names it by, or a template over its fields), `list` (`each` prints every item in order with every question of the step, `top` the best `top` by value, 20 unless said or overridden by the grade call's `top`, `violated` only the items ruled out with the questions that ruled them out), `order` (`input` shows a top list in input order instead of by value), `fields` (the item fields the state carries beside its index, every field unless said. The rest only fill the questions, so a text that is already in the question is not sent twice), `context` (the state fields the items are read against, the whole state unless said. An isolated step repeats them in every request, so a step over many items names the few it needs), `within`: `{ "field": "dir", "of": "path" }` keeps only the items whose `dir` equals the `path` of an item the previous step did not rule out, which makes steps hierarchical, and `feed`, the state field the items the step did not rule out are placed under for the steps and questions after it. Every question of a step is judged for every item, and `by` only orders. A step rules out an item that any of its questions bands violated, and a `top` step everything below the top it shows. The rules pack is one `each` step over the rule paragraphs and locate two `top` steps.
 
 Subject kinds and the checks they support:
 
@@ -178,7 +170,6 @@ Subject kinds and the checks they support:
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
 | `tree` | `tree.indexed` |
-| `log` | `log.trimmed`, `log.followed` |
 | `plan`, `event`, `text` | none |
 
 ## Conventions
@@ -244,7 +235,7 @@ Discovery is cached in the plugin store per checkout (or per repository and ref)
 
 ## Forge
 
-Nothing above the code host layer names a host. Every read and write of a repository goes through the `Forge` interface in `src/forge/forge.ts`: the checkout's repository and default branch, the login, issues and their parents (an issue read by number says whether the number names a pull request), comment threads with each commenter's standing and whether that standing maintains the repository, pull requests with their diffs, commits, closing issues, reviews and checks, runs and jobs and a job's log by step, tags and compares, file trees and contents at a ref, templates, the writes `post` makes on a named repository (each answering the url of what it made), and which shell commands write text through its own cli or api, so the outbound gate can refuse them. A repository is the forge's own path for it, opaque above this layer, and a forge names its artifacts in its own words (`GitHub issue`, `merge request`) for the judge.
+Nothing above the code host layer names a host. Every read and write of a repository goes through the `Forge` interface in `src/forge/forge.ts`: the checkout's repository and default branch, the login, issues and their parents (an issue read by number says whether the number names a pull request), comment threads with each commenter's standing and whether that standing maintains the repository, pull requests with their diffs, commits, closing issues, reviews and checks (each with the ci run it belongs to when the forge keeps its log), runs, the command that reads a failed run's log, tags and compares, file trees and contents at a ref, templates, the writes `post` makes on a named repository (each answering the url of what it made), and which shell commands write text through its own cli or api, so the outbound gate can refuse them. A repository is the forge's own path for it, opaque above this layer, and a forge names its artifacts in its own words (`GitHub issue`, `merge request`) for the judge.
 
 GitHub, over `gh`, is the one member today. The shapes are held to what a second member (GitLab, with merge requests, pipelines and project paths with slashes) can also answer, so adding one is a new class behind the interface, not a change to the packs, the watch or the gate.
 
@@ -262,7 +253,7 @@ Three modules act inside the session without being asked.
 
 ### Prune
 
-Output over `pruneFloorTokens` (estimated) from the tools in `pruneTools` is split into chunks of `pruneChunkLines` lines and ranked, batched, against the calling loop's task: is this chunk needed for the current task. A chunk below `pruneKeepThreshold` is dropped. Nothing is kept on disk. In its place stands a one-line note with the omitted line range, how to get it back, and how to keep such output whole:
+Output over `pruneFloorTokens` (estimated, 20000 by default, so only genuinely large output is judged) from the tools in `pruneTools` is split into chunks of `pruneChunkLines` lines and ranked, batched, against the calling loop's task: is this chunk needed for the current task. A chunk below `pruneKeepThreshold` is dropped. Nothing is kept on disk. In its place stands a one-line note with the omitted line range, how to get it back, and how to keep such output whole:
 
 ```
 [sift: lines 51-75 (25 lines) omitted as not needed for the current task, re-read src/watch/watcher.ts with offset 51 limit 25, or call mcp__sift__prune off to read files whole]
@@ -346,20 +337,14 @@ ci settled success: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
 ```
 
-A failure carries the `ci` pack's report on each failed check, one job per check, read from its log through the forge, so the session that pushed the commit reads why it failed without opening the log. A check that failed only because a job it needs failed is named in one line instead (`gate: failed because docs failed`), since that job has its own report:
+A failure names each failed check under the run it belongs to, with the command that reads that run's log, and judges nothing: sift reads no CI log, and the session that pushed the commit opens the log itself. A check the forge keeps no log for (a commit status, a check from an app other than Actions) is named on a `no log` line:
 
 ```
 [sift watch octalide/sift]
-ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (3 checks, failed: test) · now: open, head unchanged
+ci settled failure: pr #14 feat/14 @3f2a9c1: Watch delivers a settled CI verdict (4 checks, failed: test, lint, ext) · now: open, head unchanged
   by octalide · https://github.com/octalide/sift/pull/14 · ci settled on pr · s1
-  sift ci octalide/sift job 106195824649: PASS (judge: jev)
-    [info] log.trimmed: 212 of 212 lines read from the failing step Run npm test
-    lines: top 40 of 212, 40 not ruled out
-      1. [satisfied] 118: FAIL tests/watch.test.ts > watcher > delivers one settled verdict = 0.91
-      ...
-    [satisfied] own_fault = 0.88: The failure is caused by the change under test: ...
-    [violated] environment = 0.06: The failure is a flake, a network or runner problem, or an external service, ...
-    [satisfied] fixable_here = 0.93: The fix is inside this repository.
+  run 17736210453 failed: test, lint · log: gh run view 17736210453 --log-failed -R octalide/sift
+  no log: ext
 ```
 
 The verdict counts every check run and commit status on the PR's head, so it waits for external checks too. Until the last one finishes the individual runs are held in the digest, named by PR. A head whose checks have not all finished within `watchStallHours` (default 1) is delivered once as `ci stalled`, in the same shape, naming the checks still pending, so no session waits on a check that never reports. Heads are tracked from the moment their PR is open, so a check that never starts stalls too. The head is not delivered as stalled again unless a new commit lands on it, and a stalled head that does finish later still delivers its `ci settled` line:
@@ -437,7 +422,7 @@ Every option, with its default. The same descriptions are in `.claude-plugin/plu
 | `fallbackModel` | `haiku` | model used by the model backend, an alias or a full id |
 | `shadow` | `false` | every module logs what it would have done and does nothing |
 | `prune` | `true` | score long tool outputs against the calling loop's task before the model reads them and drop the chunks the judge marks unneeded. Targeted reads, repeats of pruned output and reads of paths the task names pass whole, and `# sift: full` or the `prune` tool keep output whole on purpose |
-| `pruneFloorTokens` | `4000` | tool outputs under this estimated size pass through untouched |
+| `pruneFloorTokens` | `20000` | tool outputs under this estimated size pass through untouched |
 | `pruneChunkLines` | `25` | lines per scored chunk |
 | `pruneKeepThreshold` | `0.5` | minimum probability that a chunk is needed. Below it the chunk is replaced by an omission note |
 | `pruneTools` | `Bash,Read` | comma separated tool names whose output is pruned. Bash and Read are supported |
@@ -480,6 +465,16 @@ CI runs the same four commands on every pull request and reports them through a 
 
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
 - The prune module estimates tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT).
+
+## Unreleased
+
+This release removes the `ci` pack and is a minor bump on 0.x. Judging CI output cost more than it told: the pack scored every line of a failed job's log, env dumps and YAML keys included, and its headline `own_fault` answered unclear on a failure whose error text was the literal bug the PR fixed.
+
+Removed: the `ci` pack, with its `job:<id>`, `run:<id>`, run id and `text` subject forms, the `log` subject kind and its `log.trimmed` and `log.followed` checks. `grade` refuses `pack: "ci"` with the removal and the command that reads a run's log named, unless a repo-defined pack takes the name, and a repo pack that declares `subject: "log"` is refused at load. No code path sends CI log text to the judge. The `Forge` interface loses `jobs` and `jobLog`, with the `Job`, `JobLog` and `LogStep` types and the workflow file reader that filled a job's needs, and gains `logCommand`, the command a caller runs to read a failed run's log. `Check.id` (a job id) is replaced by `Check.run`, the ci run the check belongs to, read on GitHub from the check run's details url.
+
+Changed: a settled CI failure from the watch no longer carries the `ci` pack's report on each failed check. It names each failed check under its run with the command that reads the run's log (`gh run view <run> --log-failed -R <owner/name>` on GitHub), names the checks the forge keeps no log for on a `no log` line, reads no log and asks the judge nothing. `WatchHost.ciPack` and `WatchEvent.reports` are gone.
+
+Changed: `pruneFloorTokens` defaults to 20000, where it was 4000. Pruning output between those sizes cost about 13 judge tokens for each context token it saved, and most such outputs lost nothing.
 
 ## Changes in 0.13.0
 
