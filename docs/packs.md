@@ -50,7 +50,7 @@ The `plan` pack reads an issue and a plan for it from `text` and asks three ques
 
 ## rules
 
-The `rules` pack is one rank step over the rule paragraphs of the repository's rule documents (found by discovery, see [Rule documents](conventions.md#rule-documents)), each rule going out once in its question with the subject and an item index and nothing else in the state. Each question names what the subject is (`The subject (the body of a new GitHub issue) complies with this rule: ...`) so a rule written for another artifact is answered as not applying rather than broken. `rules.present` names the documents the rules came from.
+The `rules` pack is one rank step over the rule paragraphs of the repository's rule documents (found by discovery, see [Rule documents](conventions.md#rule-documents)), each rule going out once in its question with the subject and an item index and nothing else in the state. Each question names what the subject is (`The subject (the body of a new GitHub issue) complies with this rule: ...`) so a rule written for another artifact is answered as not applying rather than broken. `rules.present` names the documents the rules came from. Free text is read the way the outbound gate reads it (see [Outbound text](hooks.md#outbound-text)): text longer than one judge state holds is graded in parts, every character judged, and the parts' answers make one report. The report names the parts it was judged in, a rule takes its worst band across them, and each band names the parts it was found in: `[violated] rules_4.section = 0.10: ... (in part 3 of 3 ("Fixes" to "Docs"))`. Short text is one subject, graded as it always was.
 
 ## release
 
