@@ -360,6 +360,7 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
 // a plan for an issue: the issue's title and body beside the plan text, so the judge reads the plan against what was asked
 export async function planSubject(forge: Forge, repo: string, n: number, plan: string): Promise<Subject> {
   const issue = await forge.issue(repo, n);
+  if (issue.pr) throw refusal('issue', `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
   return {
     kind: 'plan',
     ref: `${repo}#${n}`,

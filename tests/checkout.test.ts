@@ -226,6 +226,17 @@ describe('forge-only grades', () => {
     expect((await subjectFor(host, await sessionScope(), 'issue', '5')).subject.kind).toBe('issue');
     expect((await subjectFor(host, await sessionScope(), 'rules', '5')).subject.state).toMatchObject({ subject: { kind: 'issue', number: 5 } });
   });
+
+  it('refuse a pull request number given to the locate or plan pack, naming the forms each takes', async () => {
+    fresh();
+    const plain = fakeForge();
+    host = { ...host, forge: fakeForge({ issue: async (repo, n) => ({ ...(await plain.issue(repo, n)), pr: n === 7 }) }) };
+    await expect(subjectFor(host, await sessionScope(), 'tree', '7')).rejects.toThrow('mixed pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text');
+    await expect(subjectFor(host, await sessionScope(), 'plan', '#7', { text: 'the plan' })).rejects.toThrow('issue pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
+    // an issue number grades as before
+    expect((await subjectFor(host, await sessionScope(), 'tree', '5')).subject.kind).toBe('tree');
+    expect((await subjectFor(host, await sessionScope(), 'plan', '5', { text: 'the plan' })).subject.state).toMatchObject({ number: 5, plan: 'the plan' });
+  });
 });
 
 describe('the subagent default', () => {
