@@ -16,6 +16,7 @@ import type { Report } from '../src/packs/types.ts';
 import { pruneCall } from '../src/prune/call.ts';
 import { PRUNE_TOOL, PruneLoops } from '../src/prune/loops.ts';
 import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
+import { Discoveries, DISCOVERY_WAIT_MS } from '../src/rules/discover.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
@@ -273,7 +274,8 @@ export const register: Register = (on, rawOptions) => {
           },
         })
       : undefined;
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, now: () => Date.now(), notice: (text) => $.ui.log(text), watches, mailbox: watches ? mailbox : undefined, sessionId, storeKeys };
+    const discoveries = new Discoveries({ judge, store, now: () => Date.now(), log: (text) => $.ui.log(text), schedule: (ms, fn) => $.clock.after(ms, fn), waitMs: DISCOVERY_WAIT_MS });
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: watches ? mailbox : undefined, sessionId, storeKeys };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     if (options.grade) {
@@ -445,7 +447,7 @@ export const register: Register = (on, rawOptions) => {
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
         if (!decision.allow) {
           if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
+          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${decision.pending ? 'Make the same call again.' : 'Rewrite the text or ask the user.'}` };
         }
       }
       const r = await next(e);
@@ -483,14 +485,14 @@ export const register: Register = (on, rawOptions) => {
       const rt = ready();
       const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(e.agentId))).checkout.packs['rules'];
       const input = e as unknown as PostInput;
-      const posted = await postCall({ forge: rt.forge, judge: rt.judge, store: rt.store, now: rt.now, notice: rt.notice, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
+      const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
       const { outbound, decision } = posted;
       if (outbound && decision) {
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}` });
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
         if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
       }
-      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. Rewrite the text or ask the user.` };
+      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. ${decision?.pending ? 'Make the same post again.' : 'Rewrite the text or ask the user.'}` };
       return { result: [{ type: 'text', text: posted.url }] };
     } catch (error) {
       return { deny: `sift post failed: ${messageOf(error)}` };

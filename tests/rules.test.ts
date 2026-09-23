@@ -1,15 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { templateKind } from '../src/forge/github.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import { rulesSubject } from '../src/repo/subjects.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { runPack } from '../src/packs/run.ts';
-import { candidate, checkoutSource, contributingGuide, discoverRules, excluded, forgeSource, ruleDoc } from '../src/rules/discover.ts';
+import { candidate, checkoutSource, contributingGuide, discoverRules, excluded, forgeSource, ruleDoc, type RuleSource } from '../src/rules/discover.ts';
 import { ruleParagraphs } from '../src/rules/paragraphs.ts';
 import { rulesKeys, STALE_MS, StoreKeys } from '../src/keys.ts';
 import { fakeForge } from './fake-forge.ts';
-import { memorySource, memoryStore, yesJudge } from './fake-source.ts';
+import { discoveries, memorySource, memoryStore, yesJudge } from './fake-source.ts';
 
 // a fixed clock: the cache's read mark is not what these tests check
 const now = () => 1;
@@ -101,7 +101,7 @@ describe('rule discovery', () => {
     const paragraphs = (asked[1]!.state as { items: Record<string, unknown>[] }).items;
     expect(paragraphs.map((p) => p['doc'])).toEqual(['CONTRIBUTING.md', 'CONTRIBUTING.md', 'CONTRIBUTING.md', 'docs/style.md', 'docs/style.md']);
     expect(asked[1]!.instructions[0]).toBe('This paragraph is a rule a contribution can break, not narrative or instruction: Contributing: Thanks for helping out.');
-    expect(store.map.get('rules:mem')).toMatchObject({ version: 2, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
+    expect(store.map.get('rules:mem')).toMatchObject({ version: 3, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
     // the kept set is in the session log by name; a cached answer logs nothing new
     expect(logged).toEqual(['sift rules mem: 5 candidates, kept CONTRIBUTING.md, docs/style.md; 3 rules from CONTRIBUTING.md, docs/style.md']);
     await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now, (t) => logged.push(t));
@@ -159,12 +159,41 @@ describe('rule discovery', () => {
     expect(asked).toHaveLength(8);
   });
 
-  it('adds listed docs without judging them as documents, removes excluded paths, and reads forge templates', async () => {
+  it('keys a source with content ids on the ids alone, reading no file on a hit, and reruns when an id changes', async () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
-    const source = memorySource(files, { templates: { '.github/PULL_REQUEST_TEMPLATE.md': 'dup', '.github/ISSUE_TEMPLATE/bug.yml': 'name: Bug\nbody:\n  - type: markdown\n' }, remote: { 'o/r:MIGRATION.md@v2': '# Migration\n\nCallers must pass len.\n' } });
+    const store = memoryStore();
+    const judge = judgeBy(isRuleDoc, isRule, asked);
+    const reads: string[] = [];
+    const ided = (ids: Record<string, string>): RuleSource => {
+      const s = memorySource(files, { ids });
+      return { ...s, read: async (p) => (reads.push(p), s.read(p)) };
+    };
+    const ids = Object.fromEntries(Object.keys(files).map((p) => [p, `${p}-1`]));
+    const first = await discoverRules(ided(ids), rules(), judge, store, now, quiet);
+    expect(first.cached).toBe(false);
+    reads.length = 0;
+    expect(await discoverRules(ided(ids), rules(), judge, store, now, quiet)).toEqual({ ...first, cached: true });
+    expect(reads).toEqual([]);
+    expect(asked).toHaveLength(2);
+    const third = await discoverRules(ided({ ...ids, 'CONTRIBUTING.md': 'CONTRIBUTING.md-2' }), rules(), judge, store, now, quiet);
+    expect(third.cached).toBe(false);
+    expect(asked).toHaveLength(4);
+  });
+
+  it('fails and caches nothing when a listed file cannot be read', async () => {
+    const store = memoryStore();
+    const s = memorySource(files, { ids: { 'CONTRIBUTING.md': 'c1' } });
+    const found = await discoverRules({ ...s, read: async (p) => (p === 'CONTRIBUTING.md' ? undefined : s.read(p)) }, rules(), yesJudge(), store, now, quiet);
+    expect(found).toMatchObject({ docs: [], rules: [], error: 'unreadable: CONTRIBUTING.md', cached: false });
+    expect(store.map.size).toBe(0);
+  });
+
+  it('adds listed docs without judging them as documents, removes excluded paths, and reads templates that are not prose', async () => {
+    const asked: { state: unknown; instructions: string[] }[] = [];
+    const source = memorySource(files, { templates: { '.github/ISSUE_TEMPLATE/bug.yml': 'name: Bug\nbody:\n  - type: markdown\n' }, remote: { 'o/r:MIGRATION.md@v2': '# Migration\n\nCallers must pass len.\n' } });
     const found = await discoverRules(source, rules({ docs: ['README.md', 'o/r:MIGRATION.md@v2'], exclude: ['docs/**'] }), judgeBy(() => 0.1, isRule, asked), memoryStore(), now, quiet);
     const docs = (asked[0]!.state as { items: { path: string }[] }).items.map((d) => d.path);
-    expect(docs).toEqual(['.github/PULL_REQUEST_TEMPLATE.md', '.github/ISSUE_TEMPLATE/bug.yml']);
+    expect(docs).toEqual(['.github/ISSUE_TEMPLATE/bug.yml', '.github/PULL_REQUEST_TEMPLATE.md']);
     expect(found.candidates).toBe(3);
     // the listed docs and the contributing guide, never a judged document ruled out
     expect(found.kept).toEqual(['README.md', 'o/r:MIGRATION.md@v2', 'CONTRIBUTING.md']);
@@ -275,27 +304,22 @@ describe('rule discovery', () => {
   it('reads a checkout from git ls-files and the working tree, a repository from the forge tree', async () => {
     const git = async (args: string[]) => (args[0] === 'ls-files' ? 'README.md\0src/a.ts\0docs/pull_request_template.md\0.github/ISSUE_TEMPLATE/bug.yml\0.github/ISSUE_TEMPLATE/config.yml\0.github/ISSUE_TEMPLATE/gone.md\0' : '');
     const tree: Record<string, string> = { '/r/README.md': '# r', '/r/docs/pull_request_template.md': '## Summary', '/r/.github/ISSUE_TEMPLATE/bug.yml': 'name: Bug', '/r/.github/ISSUE_TEMPLATE/config.yml': 'blank_issues_enabled: false' };
-    const templates = vi.fn(async () => [{ kind: 'pr' as const, name: 'docs/pull_request_template.md', body: '## Summary' }]);
-    const forge = fakeForge({ template: templateKind, templates, file: async (repo, path, ref) => (repo === 'o/r' && path === 'RULES.md' ? `# rules@${ref ?? 'default'}` : undefined), contents: async () => ['RULES.md', 'src/a.ts'] });
+    const forge = fakeForge({ template: templateKind, file: async (repo, path, ref) => (repo === 'o/r' && path === 'RULES.md' ? `# rules@${ref ?? 'default'}` : undefined), contents: async () => [{ path: 'RULES.md', id: 'b1' }, { path: 'src/a.ts', id: 'b2' }] });
     const local = checkoutSource('/r', git, { read: async (p) => tree[p]!, exists: async (p) => p in tree }, forge);
     expect(local.scope).toBe('/r');
-    expect(await local.list()).toEqual(['README.md', 'src/a.ts', 'docs/pull_request_template.md', '.github/ISSUE_TEMPLATE/bug.yml', '.github/ISSUE_TEMPLATE/config.yml', '.github/ISSUE_TEMPLATE/gone.md']);
+    // the working tree is read, so no path carries an id
+    expect(await local.list()).toEqual(['README.md', 'src/a.ts', 'docs/pull_request_template.md', '.github/ISSUE_TEMPLATE/bug.yml', '.github/ISSUE_TEMPLATE/config.yml', '.github/ISSUE_TEMPLATE/gone.md'].map((path) => ({ path })));
     expect(await local.read('README.md')).toBe('# r');
     expect(await local.read('gone.md')).toBeUndefined();
-    // templates are the tracked paths at the forge's documented locations, read from the tree, never from the forge
-    expect(await local.templates()).toEqual([
-      { path: 'docs/pull_request_template.md', text: '## Summary' },
-      { path: '.github/ISSUE_TEMPLATE/bug.yml', text: 'name: Bug' },
-    ]);
-    expect(templates).not.toHaveBeenCalled();
-    expect(await checkoutSource('/r', git, { read: async (p) => tree[p]!, exists: async (p) => p in tree }).templates()).toEqual([]);
+    // templates are the paths at the forge's documented locations, named by the forge and read from the tree
+    expect(['docs/pull_request_template.md', '.github/ISSUE_TEMPLATE/bug.yml', '.github/ISSUE_TEMPLATE/config.yml', 'README.md'].map(local.template)).toEqual([true, true, false, false]);
+    expect(checkoutSource('/r', git, { read: async (p) => tree[p]!, exists: async (p) => p in tree }).template('docs/pull_request_template.md')).toBe(false);
     expect(await local.remote('o/r', 'RULES.md', 'v1')).toBe('# rules@v1');
     const remote = forgeSource(forge, 'o/r', 'dev');
     expect(remote.scope).toBe('o/r@dev');
-    expect(await remote.list()).toEqual(['RULES.md', 'src/a.ts']);
+    expect(await remote.list()).toEqual([{ path: 'RULES.md', id: 'b1' }, { path: 'src/a.ts', id: 'b2' }]);
     expect(await remote.read('RULES.md')).toBe('# rules@dev');
-    expect(await remote.templates()).toEqual([{ path: 'docs/pull_request_template.md', text: '## Summary' }]);
-    expect(templates).toHaveBeenCalledTimes(1);
+    expect(remote.template('.github/PULL_REQUEST_TEMPLATE.md')).toBe(true);
   });
 });
 
@@ -303,7 +327,7 @@ describe('rules subject', () => {
   const files = { 'CONTRIBUTING.md': '# Rules\n\n- No em dashes.\n- Tests must pass.\n' };
 
   it('carries the discovered rules, names the documents in rules.present, and sends each rule once in its question', async () => {
-    const s = await rulesSubject({ source: memorySource(files), judge: yesJudge(), store: memoryStore(), now, notice: quiet }, { kind: 'text', ref: 'hello' }, resolveConfig(undefined));
+    const s = await rulesSubject({ source: memorySource(files), discoveries: discoveries(yesJudge()) }, { kind: 'text', ref: 'hello' }, resolveConfig(undefined));
     expect(s.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Rules: No em dashes.' }, { source: 'CONTRIBUTING.md', text: 'Rules: Tests must pass.' }]);
     expect(s.facts['docs']).toEqual(['CONTRIBUTING.md']);
     expect(s.judgeError).toBeUndefined();
@@ -317,7 +341,7 @@ describe('rules subject', () => {
 
   it('says the rules came from the cache', async () => {
     const store = memoryStore();
-    const host = { source: memorySource(files), judge: yesJudge(), store, now, notice: quiet };
+    const host = { source: memorySource(files), discoveries: discoveries(yesJudge(), store) };
     await rulesSubject(host, { kind: 'text', ref: 'a' }, resolveConfig(undefined));
     const s = await rulesSubject(host, { kind: 'text', ref: 'b' }, resolveConfig(undefined));
     const report = await runPack(BUILTIN_PACKS['rules']!, s, yesJudge(), resolveConfig(undefined));
@@ -326,12 +350,40 @@ describe('rules subject', () => {
 
   it('carries a discovery failure into the report as an unknown verdict', async () => {
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'unavailable', message: 'down', backend: 'off' }) };
-    const s = await rulesSubject({ source: memorySource(files), judge: off, store: memoryStore(), now, notice: quiet }, { kind: 'text', ref: 'x' }, resolveConfig(undefined));
+    const s = await rulesSubject({ source: memorySource(files), discoveries: discoveries(off) }, { kind: 'text', ref: 'x' }, resolveConfig(undefined));
     expect(s.judgeError).toBe('rule discovery: unavailable: down');
     const report = await runPack(BUILTIN_PACKS['rules']!, s, off, resolveConfig(undefined));
     expect(report.verdict).toBe('unknown');
     expect(report.judgeError).toBe('rule discovery: unavailable: down');
     expect(report.mechanical).toEqual([{ check: 'rules.present', severity: 'info', message: 'no rules found in 1 candidate document, kept CONTRIBUTING.md' }]);
+  });
+
+  it('answers pending when discovery outlasts its wait, and the next call joins the run it left going', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const asked: { state: unknown; instructions: string[] }[] = [];
+    const inner = yesJudge(0.9, asked);
+    const slow: Judge = { name: 'slow', ask: async (state, q) => (await gate, inner.ask(state, q)) };
+    const timers: (() => void)[] = [];
+    const store = memoryStore();
+    const host = { source: memorySource(files), discoveries: discoveries(slow, store, { schedule: (_, fn) => (timers.push(fn), { cancel: () => {} }), waitMs: 5_000 }) };
+    const first = rulesSubject(host, { kind: 'text', ref: 'a' }, resolveConfig(undefined));
+    await Promise.resolve();
+    timers.shift()!();
+    const s = await first;
+    const pending = 'rule discovery for mem outlasted its 5 s wait and keeps running; the next call on it reuses what it finds';
+    expect(s).toMatchObject({ judgeError: pending, pending });
+    const report = await runPack(BUILTIN_PACKS['rules']!, s, inner, resolveConfig(undefined));
+    expect(report.verdict).toBe('unknown');
+    // the second call joins the same run rather than starting another, and answers once it lands
+    const second = rulesSubject(host, { kind: 'text', ref: 'b' }, resolveConfig(undefined));
+    release();
+    const done = await second;
+    expect(done.pending).toBeUndefined();
+    expect(done.facts['docs']).toEqual(['CONTRIBUTING.md']);
+    // one paragraph round, the contributing guide being kept unjudged: a second run would have asked again
+    expect(asked).toHaveLength(1);
+    expect(store.map.size).toBeGreaterThan(0);
   });
 
   it('parses paragraphs, list items and table rows', () => {

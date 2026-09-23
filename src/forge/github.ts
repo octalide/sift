@@ -1,6 +1,6 @@
 import { Gh, GhError, type ApiResponse } from './gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
-import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgePost, ForgeUser, ForgeWrite, Issue, IssueSummary, PullHead, PullRequest, Rate, Review, ReviewComment, ReviewVerdict, Run, Template, WatchItem } from './forge.ts';
+import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgePost, ForgeUser, ForgeWrite, Issue, IssueSummary, PullHead, PullRequest, Rate, Review, ReviewComment, ReviewVerdict, Run, TemplateKind, TreeFile, WatchItem } from './forge.ts';
 
 type GhUser = { login: string; type?: string };
 type GhIssue = {
@@ -44,7 +44,6 @@ type GhRun = {
   actor?: { login: string };
   updated_at: string;
 };
-type GhEntry = { name: string; path: string; type: string };
 
 const RAW = 'application/vnd.github.raw+json';
 const COMMIT_JQ = '[.[] | {sha, parents, commit: {message: .commit.message}}]';
@@ -255,14 +254,14 @@ const missing = (error: unknown): boolean => error instanceof GhError && /http 4
 
 // where github documents templates: a single file or a directory of them, in the root, docs/ or .github/
 const TEMPLATE_DIRS = ['', 'docs', '.github'];
-const TEMPLATE_FILE: Record<Template['kind'], RegExp> = { issue: /^issue_template\.(md|yml|yaml)$/i, pr: /^pull_request_template\.md$/i };
-const TEMPLATE_DIR: Record<Template['kind'], RegExp> = { issue: /^issue_template$/i, pr: /^pull_request_template$/i };
-const TEMPLATE_ENTRY: Record<Template['kind'], RegExp> = { issue: /\.(md|yml|yaml)$/i, pr: /\.md$/i };
+const TEMPLATE_FILE: Record<TemplateKind, RegExp> = { issue: /^issue_template\.(md|yml|yaml)$/i, pr: /^pull_request_template\.md$/i };
+const TEMPLATE_DIR: Record<TemplateKind, RegExp> = { issue: /^issue_template$/i, pr: /^pull_request_template$/i };
+const TEMPLATE_ENTRY: Record<TemplateKind, RegExp> = { issue: /\.(md|yml|yaml)$/i, pr: /\.md$/i };
 // config.yml beside issue forms configures the chooser, it is no template
 const TEMPLATE_CHOOSER = /^config\.ya?ml$/i;
 
 // the kind of template at a path, from where github documents them; undefined anywhere else
-export function templateKind(path: string): Template['kind'] | undefined {
+export function templateKind(path: string): TemplateKind | undefined {
   const parts = path.split('/');
   const name = parts.pop()!;
   const single = parts.length <= 1 && TEMPLATE_DIRS.includes(parts[0] ?? '');
@@ -401,27 +400,8 @@ export class GitHubForge implements Forge {
     return [...(runs.check_runs ?? []).map(checkRun), ...(statuses.statuses ?? []).map(status)];
   }
 
-  template(path: string): Template['kind'] | undefined {
+  template(path: string): TemplateKind | undefined {
     return templateKind(path);
-  }
-
-  async templates(repo: string): Promise<Template[]> {
-    const out: Template[] = [];
-    const list = (dir: string) => this.gh.json<GhEntry[]>(`repos/${repo}/contents/${dir}`).catch((e: unknown) => (missing(e) ? [] : Promise.reject(e)));
-    const read = async (kind: Template['kind'], entries: GhEntry[]) => {
-      for (const e of entries.filter((e) => e.type === 'file' && templateKind(e.path) === kind)) {
-        const body = await this.file(repo, e.path);
-        if (body !== undefined) out.push({ kind, name: e.path, body });
-      }
-    };
-    for (const dir of TEMPLATE_DIRS) {
-      const entries = await list(dir);
-      for (const kind of ['issue', 'pr'] as const) {
-        await read(kind, entries);
-        for (const d of entries.filter((e) => e.type === 'dir' && TEMPLATE_DIR[kind].test(e.name))) await read(kind, await list(d.path));
-      }
-    }
-    return out;
   }
 
   async tags(repo: string): Promise<string[]> {
@@ -447,10 +427,10 @@ export class GitHubForge implements Forge {
   }
 
   // the recursive git tree in one call; github truncates it past its own limit and says so
-  async contents(repo: string, ref?: string): Promise<string[]> {
+  async contents(repo: string, ref?: string): Promise<TreeFile[]> {
     const at = ref ?? (await this.defaultBranch(repo));
-    const tree = await this.gh.json<{ tree?: { path: string; type: string }[] }>(`repos/${repo}/git/trees/${encodeURIComponent(at)}?recursive=1`);
-    return (tree.tree ?? []).filter((e) => e.type === 'blob').map((e) => e.path);
+    const tree = await this.gh.json<{ tree?: { path: string; type: string; sha: string }[] }>(`repos/${repo}/git/trees/${encodeURIComponent(at)}?recursive=1`);
+    return (tree.tree ?? []).filter((e) => e.type === 'blob').map((e) => ({ path: e.path, id: e.sha }));
   }
 
   // one conditional probe on the newest item, then the pages since the stamp only when it moved
