@@ -173,7 +173,6 @@ describe('mechanical checks', () => {
     expect(off.commits.scopePattern).toBeUndefined();
     expect(off.release.versionPattern).toBeUndefined();
     expect(off.release.tagPattern).toBe('^v(?<version>.+)$');
-    expect(() => resolveConfig({ branches: { pattern: '(' } })).toThrow('branches.pattern is not a valid regex');
     // this repo's own .sift/config.json, which must keep resolving to the presets it names
     const own = resolveConfig({
       commits: { convention: 'conventional', scope: 'issue', forbidTrailers: ['Co-Authored-By'] },

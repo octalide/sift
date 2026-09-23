@@ -132,27 +132,60 @@ function expandPresets(config: RepoConfig): RepoConfig {
   const release = { ...config.release };
   if (release.versionPattern === undefined && release.scheme !== undefined) release.versionPattern = VERSION_PATTERNS[release.scheme];
   if (release.tagPattern === undefined) release.tagPattern = tagPatternFor(release.tagPrefix);
-  const resolved = { ...config, commits, prs, release };
-  for (const [field, pattern] of [
-    ['commits.format', commits.format],
-    ['commits.scopePattern', commits.scopePattern],
-    ['branches.pattern', resolved.branches.pattern],
-    ['prs.targets', typeof prs.targets === 'string' ? prs.targets : undefined],
-    ['release.versionPattern', release.versionPattern],
-    ['release.tagPattern', release.tagPattern],
-    ...resolved.outbound.channels.flatMap((c): [string, string | undefined][] => [
-      [`outbound.channels[${c.name}].tool`, c.tool],
-      [`outbound.channels[${c.name}].text.command`, c.text && 'command' in c.text ? c.text.command : undefined],
-    ]),
-  ] as const) {
-    if (pattern === undefined) continue;
+  return { ...config, commits, prs, release };
+}
+
+// a config file's text, parsed with every regex field in it compiled, so a bad one is refused where the file is read
+// rather than by the first grade that reaches it. from names the file in the error
+export function readConfig(text: string, from: string): unknown {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`sift config ${from}: ${(e as Error).message}`);
+  }
+  for (const [field, pattern] of patternFields(raw)) {
     try {
       new RegExp(pattern);
     } catch (e) {
-      throw new Error(`sift config: ${field} is not a valid regex: ${(e as Error).message}`);
+      throw new Error(`sift config ${from}: ${field} is not a valid regex: ${(e as Error).message}`);
     }
   }
-  return resolved;
+  return raw;
+}
+
+const fieldsOf = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+const listOf = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+// an entry of a list by its name when it has one, else by its index
+const entry = (name: unknown, i: number) => (typeof name === 'string' && name !== '' ? name : String(i));
+
+// every field of one layer that holds a regex, by its dotted name, where the layer sets it to a string
+function patternFields(raw: unknown): [string, string][] {
+  const layer = fieldsOf(raw);
+  const commits = fieldsOf(layer.commits);
+  const branches = fieldsOf(layer.branches);
+  const prs = fieldsOf(layer.prs);
+  const release = fieldsOf(layer.release);
+  const outbound = fieldsOf(layer.outbound);
+  const fields: [string, unknown][] = [
+    ['commits.format', commits.format],
+    ['commits.scopePattern', commits.scopePattern],
+    ['branches.pattern', branches.pattern],
+    ['prs.targets', prs.targets],
+    ['release.versionPattern', release.versionPattern],
+    ['release.tagPattern', release.tagPattern],
+    ...listOf(release.manifests).flatMap((m, i): [string, unknown][] => {
+      const manifest = fieldsOf(m);
+      const at = `release.manifests[${entry(manifest.path, i)}]`;
+      return [...listOf(manifest.keys).map((k, j): [string, unknown] => [`${at}.keys[${j}]`, k]), [`${at}.pattern`, manifest.pattern]];
+    }),
+    ...listOf(outbound.channels).flatMap((c, i): [string, unknown][] => {
+      const channel = fieldsOf(c);
+      const at = `outbound.channels[${entry(channel.name, i)}]`;
+      return [[`${at}.tool`, channel.tool], [`${at}.text.command`, fieldsOf(channel.text).command]];
+    }),
+  ];
+  return fields.filter((f): f is [string, string] => typeof f[1] === 'string');
 }
 
 // the tag pattern a prefix stands for: the prefix, then the version

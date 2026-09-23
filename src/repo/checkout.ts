@@ -3,7 +3,7 @@ import { localGit, type Git } from '../forge/git.ts';
 import { loadPacks, type FsLike } from '../packs/load.ts';
 import type { Pack } from '../packs/types.ts';
 import type { RunLike } from '../process.ts';
-import { CONFIG_PATH, PACKS_DIR, resolveConfig, type RepoConfig } from './config.ts';
+import { CONFIG_PATH, PACKS_DIR, readConfig, resolveConfig, type RepoConfig } from './config.ts';
 
 export type CheckoutFs = FsLike & { stat: (path: string) => Promise<{ size: number; mtimeMs?: number }> };
 
@@ -60,12 +60,12 @@ export class Checkouts {
   async remoteConfig(forge: Forge, repo: string): Promise<RepoConfig> {
     const defaultBranch = await forge.defaultBranch(repo);
     const raw = await forge.file(repo, CONFIG_PATH, defaultBranch);
-    return resolveConfig([this.host.base(), raw === undefined ? undefined : parseJson(raw, `${repo}:${CONFIG_PATH}`)], defaultBranch);
+    return resolveConfig([this.host.base(), raw === undefined ? undefined : readConfig(raw, `${repo}:${CONFIG_PATH}`)], defaultBranch);
   }
 
   private async conventions(root: string, defaultBranch: string | undefined): Promise<Pick<Entry, 'config' | 'packs'>> {
     const path = `${root}/${CONFIG_PATH}`;
-    const own = (await this.host.fs.exists(path)) ? parseJson(await this.host.fs.read(path), path) : undefined;
+    const own = (await this.host.fs.exists(path)) ? readConfig(await this.host.fs.read(path), path) : undefined;
     return { config: resolveConfig([this.host.base(), own], defaultBranch), packs: await loadPacks(this.host.fs, root) };
   }
 
@@ -79,13 +79,5 @@ export class Checkouts {
       for (const e of await fs.list(dir)) parts.push(`${e.name}:${await mtime(`${dir}/${e.name}`)}`);
     }
     return parts.join('|');
-  }
-}
-
-function parseJson(text: string, where: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw new Error(`${where}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

@@ -130,6 +130,10 @@ describe('a checkout per directory', () => {
       utimesSync(path, Date.now() / 1000 + 10, Date.now() / 1000 + 10);
       expect((await checkouts.resolve(wt)).config.prs.targets).toEqual(['next']);
       expect(lookups).toEqual([wt]);
+      // a bad regex is refused as the file is read, naming the file and the field
+      writeFileSync(path, JSON.stringify({ branches: { pattern: '^(feat|fix/\\d+$' } }));
+      utimesSync(path, Date.now() / 1000 + 15, Date.now() / 1000 + 15);
+      await expect(checkouts.resolve(wt)).rejects.toThrow(`sift config ${path}: branches.pattern is not a valid regex: Invalid regular expression: /^(feat|fix/\\d+$/: Unterminated group`);
     } finally {
       writeFileSync(path, before);
       utimesSync(path, Date.now() / 1000 + 20, Date.now() / 1000 + 20);
@@ -210,6 +214,11 @@ describe('grade in a named checkout', () => {
 });
 
 describe('forge-only grades', () => {
+  it('refuse a repository whose config holds a bad regex, naming the file and the field', async () => {
+    fresh({ 'o/c:.sift/config.json': JSON.stringify({ release: { manifests: [{ path: 'mach.toml', keys: ['^deps\\.('], bump: 'minor' }] } }) });
+    await expect(subjectFor(host, await sessionScope(), builtin('issue'), '5', { repo: 'o/c' })).rejects.toThrow('sift config o/c:.sift/config.json: release.manifests[mach.toml].keys[0] is not a valid regex');
+  });
+
   it('apply the conventions of the repository the subject is in', async () => {
     fresh({ 'o/c:.sift/config.json': JSON.stringify({ prs: { targets: ['release'] } }) });
     const other = await subjectFor(host, await sessionScope(), builtin('issue'), '5', { repo: 'o/c' });

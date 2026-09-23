@@ -6,7 +6,7 @@ import { METHODS, postCall, rawWriteOf, rawWriteRefusal, VERDICTS, type PostInpu
 import { GitHubForge } from '../src/forge/github.ts';
 import { grade, scopeOf, SpawnDirs, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
-import { configLayers, globalConfigPath } from '../src/repo/config.ts';
+import { configLayers, globalConfigPath, readConfig } from '../src/repo/config.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
 import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
 import { failureText, type Answer, type KeyOrigin, type Questions } from '../src/judge/types.ts';
@@ -112,16 +112,16 @@ type Runtime = GradeHost & {
 async function optionConfig($: EngineInterface, value: string, root: string): Promise<unknown> {
   const v = value.trim();
   if (!v) return undefined;
-  if (v.startsWith('{')) return JSON.parse(v);
+  if (v.startsWith('{')) return readConfig(v, 'option');
   const path = v.startsWith('/') ? v : `${root}/${v}`;
   if (!(await $.fs.exists(path))) throw new Error(`sift config ${path} not found`);
-  return JSON.parse(await $.fs.read(path));
+  return readConfig(await $.fs.read(path), path);
 }
 
-// parsed contents of a json file, undefined when there is no such file
-async function readJson($: EngineInterface, path: string | undefined): Promise<unknown> {
+// the global config file, undefined when there is no such file
+async function globalConfig($: EngineInterface, path: string | undefined): Promise<unknown> {
   if (!path || !(await $.fs.exists(path))) return undefined;
-  return JSON.parse(await $.fs.read(path));
+  return readConfig(await $.fs.read(path), path);
 }
 
 async function apiKeyOf($: EngineInterface, options: Options): Promise<ApiKey | undefined> {
@@ -208,7 +208,7 @@ export const register: Register = (on, rawOptions) => {
     const forge = new GitHubForge(run, spawnCwd);
     const globalPath = globalConfigPath({ XDG_CONFIG_HOME: await $.env.get('XDG_CONFIG_HOME'), HOME: await $.env.get('HOME') });
     // the layer under every repository's own conventions, read once
-    const [base] = configLayers({ option: await optionConfig($, options.config, await spawnCwd()), global: await readJson($, globalPath) });
+    const [base] = configLayers({ option: await optionConfig($, options.config, await spawnCwd()), global: await globalConfig($, globalPath) });
     const checkouts = new Checkouts({ run, fs, forgeAt: (dir) => new GitHubForge(run, async () => dir), base: () => base });
     const session = async () => checkouts.resolve(await spawnCwd());
     const bound = await session();
