@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Comment } from '../src/forge/forge.ts';
 import { DEFAULT_CONFIG } from '../src/repo/config.ts';
-import { issueSubject, prSubject, rulingsOf, threadOf, type ThreadComment } from '../src/repo/subjects.ts';
+import { ISSUE_STATE_TOKENS, issueSubject, prSubject, rulingsOf, threadOf, type ThreadComment } from '../src/repo/subjects.ts';
+import { CHECKS } from '../src/packs/checks.ts';
+import { estimateTokensOf } from '../src/tokens.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { formatReport, materialize, runPack } from '../src/packs/run.ts';
 import type { Judge } from '../src/judge/types.ts';
@@ -84,6 +86,36 @@ describe('issue thread', () => {
     expect(formatReport(report)).toContain('ruling = octalide at 2026-09-22T20:29:33Z (0.90)');
     const outsider = await issueSubject(forgeFor(OPEN_QUESTION, [OUTSIDER_OVERRIDE]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     expect(materialize(BUILTIN_PACKS['issue']!, outsider).questions['ruling']).toBeUndefined();
+  });
+
+  it('reads the whole of a long body, the thread taking the room the state has left', async () => {
+    let body = '';
+    for (let n = 0; body.length < 60_000; n++) body += `Paragraph ${n} says one thing in plain words, at some length, about the change. `;
+    body += '\n\n## Acceptance\n\n- [ ] done looks like this';
+    const thread = Array.from({ length: 40 }, (_, i) => say('author', 'NONE', `2026-01-${String(i + 1).padStart(2, '0')}T00:00:00Z`, `Comment ${i}. `.repeat(400)));
+    const s = await issueSubject(forgeFor({ ...OPEN_QUESTION, body }, thread), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
+    expect(s.state['body']).toBe(body);
+    expect(s.facts['body']).toEqual({ length: body.length, judged: body.length });
+    expect(CHECKS['issue.body']!(s, DEFAULT_CONFIG)).toEqual([]);
+    const comments = s.state['comments'] as ThreadComment[];
+    expect(comments.length).toBeGreaterThan(0);
+    expect(comments.length).toBeLessThan(thread.length);
+    expect(comments.at(-1)!.at).toBe(thread.at(-1)!.createdAt);
+    expect(estimateTokensOf(s.state)).toBeLessThanOrEqual(ISSUE_STATE_TOKENS);
+  });
+
+  it('cuts a body too dense for the state alone to the room there is, and says so', async () => {
+    const body = '{"k":[1,2]}'.repeat(6_000);
+    const s = await issueSubject(forgeFor({ ...OPEN_QUESTION, body }, [RULING]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
+    const text = s.state['body'] as string;
+    const judged = (s.facts['body'] as { judged: number }).judged;
+    expect(text).toBe(`${body.slice(0, judged)}…`);
+    expect(judged).toBeGreaterThan(20_000);
+    expect(judged).toBeLessThan(body.length);
+    expect(estimateTokensOf(s.state)).toBeLessThanOrEqual(ISSUE_STATE_TOKENS);
+    expect(CHECKS['issue.body']!(s, DEFAULT_CONFIG)).toEqual([
+      { check: 'issue.body', severity: 'warn', message: `the judge read the first ${judged} of the body's ${body.length} characters: the rest is more than its state holds, so the questions did not read it` },
+    ]);
   });
 
   it('gives a pull request the same thread', async () => {

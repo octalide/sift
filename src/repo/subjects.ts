@@ -1,4 +1,4 @@
-import { truncate } from '../tokens.ts';
+import { estimateTokensOf, JEV_LIMITS, prefixWithin, truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
 import { refusal, type Asked } from '../packs/subject.ts';
 import type { Check, Comment, Forge } from '../forge/forge.ts';
@@ -16,6 +16,8 @@ const BODY_CAP = 20_000;
 const COMMENT_CAP = 6_000;
 // what a thread may add to the state: the body's cap twice over, so a long discussion cannot crowd out the rest
 const THREAD_BUDGET = 40_000;
+// what an issue's state may cost: the judge's state limit, less room for the longest question asked beside it
+export const ISSUE_STATE_TOKENS = JEV_LIMITS.stateTokens - 2_000;
 
 
 export function sectionsOf(markdown: string): Record<string, string> {
@@ -65,21 +67,24 @@ export function amends(forge: Pick<Forge, 'maintains'>, author: string, by: stri
   return by === author || forge.maintains(association);
 }
 
-// the thread under a budget: the author's and maintainers' comments first, newest first, then the newest of
-// the rest; what is kept goes out oldest first, so a later ruling reads as later
-export function threadOf(forge: Pick<Forge, 'maintains'>, author: string, comments: Comment[], budget = THREAD_BUDGET): ThreadComment[] {
+// the thread under a budget of characters and, where the state is tight, of tokens: the author's and maintainers' comments
+// first, newest first, then the newest of the rest; what is kept goes out oldest first, so a later ruling reads as later
+export function threadOf(forge: Pick<Forge, 'maintains'>, author: string, comments: Comment[], budget = THREAD_BUDGET, tokens = Infinity): ThreadComment[] {
   const order = comments.map((c, i) => ({ c, i })).reverse();
   const standing = ({ c }: { c: Comment }) => amends(forge, author, c.author.login, c.association);
   const ranked = [...order.filter(standing), ...order.filter((x) => !standing(x))];
-  const kept: { c: Comment; i: number; text: string }[] = [];
+  const kept: { i: number; comment: ThreadComment }[] = [];
   let left = budget;
+  let room = tokens;
   for (const { c, i } of ranked) {
-    const text = truncate(c.body, COMMENT_CAP);
-    if (text.length > left) continue;
-    left -= text.length;
-    kept.push({ c, i, text });
+    const comment = { by: c.author.login, association: c.association ?? null, at: c.createdAt, text: truncate(c.body, COMMENT_CAP) };
+    const cost = tokens === Infinity ? 0 : estimateTokensOf(comment) + 1;
+    if (comment.text.length > left || cost > room) continue;
+    left -= comment.text.length;
+    room -= cost;
+    kept.push({ i, comment });
   }
-  return kept.sort((a, b) => a.i - b.i).map(({ c, text }) => ({ by: c.author.login, association: c.association ?? null, at: c.createdAt, text }));
+  return kept.sort((a, b) => a.i - b.i).map(({ comment }) => comment);
 }
 
 // the author's and maintainers' comments a judge can name as the one that settles something, keyed by who and when
@@ -92,40 +97,47 @@ export function rulingsOf(forge: Pick<Forge, 'maintains'>, author: string, threa
   return out;
 }
 
-// an issue graded for the pack that was asked; a number that names a pull request is refused with the pack and the forms of its kind named
-export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, asked: Asked<'issue' | 'rules'>, cap = BODY_CAP): Promise<Subject> {
+// an issue graded for the pack that was asked; a number that names a pull request is refused with the pack and the forms of its kind named.
+// the body is whole in the state: fit to the judge's state limit, the thread taking the room left, when the pack reads it at once,
+// or whole whatever its length when the caller judges it in parts (the rules pack)
+export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, asked: Asked<'issue' | 'rules'>, body: 'fit' | 'parts' = 'fit'): Promise<Subject> {
   const issue = await forge.issue(repo, n);
   if (issue.pr) throw refusal(asked, `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
   const [all, open, parent] = await Promise.all([forge.comments(repo, 'issue', n), forge.openIssues(repo), forge.parent(repo, n)]);
-  const comments = threadOf(forge, issue.author.login, all);
-  const rulings = rulingsOf(forge, issue.author.login, comments);
-  const body = issue.body;
-  const sections = sectionsOf(body);
+  const sections = sectionsOf(issue.body);
   const labels = issue.labels;
   const others = open.filter((i) => i.number !== n);
+  const state = (text: string, comments: ThreadComment[]) => ({
+    repo,
+    number: n,
+    title: issue.title,
+    body: text,
+    labels,
+    milestone: issue.milestone ?? null,
+    author: issue.author.login,
+    association: issue.association ?? null,
+    sections: Object.keys(sections),
+    comments,
+    conventions: {
+      template_sections: config.issues.templateSections,
+      required_label_groups: config.issues.requiredLabelGroups,
+    },
+  });
+  // the body first, then the thread in what room is left; a body too dense for the state alone is cut to it, and the cut marked
+  const fit = body === 'fit';
+  const kept = fit ? prefixWithin(issue.body, ISSUE_STATE_TOKENS - estimateTokensOf(state('', [])) - 1) : issue.body;
+  const text = kept.length < issue.body.length ? `${kept}…` : kept;
+  const comments = threadOf(forge, issue.author.login, all, THREAD_BUDGET, fit ? ISSUE_STATE_TOKENS - estimateTokensOf(state(text, [])) : Infinity);
+  const rulings = rulingsOf(forge, issue.author.login, comments);
   return {
     kind: 'issue',
     ref: `${repo}#${n}`,
-    state: {
-      repo,
-      number: n,
-      title: issue.title,
-      body: truncate(body, cap),
-      labels,
-      milestone: issue.milestone ?? null,
-      author: issue.author.login,
-      association: issue.association ?? null,
-      sections: Object.keys(sections),
-      comments,
-      conventions: {
-        template_sections: config.issues.templateSections,
-        required_label_groups: config.issues.requiredLabelGroups,
-      },
-    },
+    state: state(text, comments),
     facts: {
       labels,
       milestone: issue.milestone,
       sections,
+      body: { length: issue.body.length, judged: kept.length },
       parent,
       is_new: all.length === 0,
       has_others: others.length > 0,
@@ -325,7 +337,7 @@ export async function rulesSubjects(host: RulesHost, target: RulesTarget, config
   const { forge, repo } = host;
   const ref = `#${target.number}`;
   if (!forge || !repo) return [rulesOf(await rulesFound(host, config), `issue:${ref}`, { kind: 'issue', ref }, 'The subject', {})];
-  const s = await issueSubject(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' }, Infinity);
+  const s = await issueSubject(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' }, 'parts');
   const { title, body, ...rest } = s.state;
   // the subject is read, and a pull request refused, before discovery spends judge calls
   return partSubjects(await rulesFound(host, config), `issue:${ref}`, `${title}\n${body}`, cap, `issue ${ref}`, { kind: 'issue', ...s.state }, { kind: 'issue', ...rest });

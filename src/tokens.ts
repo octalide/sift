@@ -21,6 +21,21 @@ export function estimateTokensOf(value: unknown): number {
   return estimateTokens(typeof value === 'string' ? value : JSON.stringify(value) ?? '');
 }
 
+// the longest prefix of text that costs at most tokens as a json string in the state, never splitting a surrogate pair
+export function prefixWithin(text: string, tokens: number): string {
+  const cost = (n: number) => estimateTokens(JSON.stringify(text.slice(0, n)));
+  if (cost(text.length) <= tokens) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (cost(mid) <= tokens) lo = mid;
+    else hi = mid - 1;
+  }
+  const end = text.charCodeAt(lo - 1);
+  return text.slice(0, end >= 0xd800 && end <= 0xdbff ? lo - 1 : lo);
+}
+
 export function truncate(text: string, maxChars: number, note = '…'): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars)}${note}`;
 }
