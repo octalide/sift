@@ -25,4 +25,19 @@ describe('decision log', () => {
     ]);
     expect(log.takeWarnings()).toEqual([]);
   });
+
+  it('counts every decision of this session once the ring has dropped them', async () => {
+    const store = new Map<string, unknown>();
+    const log = new DecisionLog({ get: async (k) => store.get(k), set: async (k, v) => void store.set(k, v) }, 'now');
+    const other = new DecisionLog({ get: async (k) => store.get(k), set: async (k, v) => void store.set(k, v) }, 'other');
+    for (let i = 0; i < 600; i++) log.push(decision({ at: i, ok: i !== 3, requestTokens: 1 }));
+    await log.stats();
+    for (let i = 0; i < 400; i++) other.push(decision({ at: i }));
+    expect((await other.stats()).session.calls).toBe(400);
+    const stats = await log.stats();
+    expect(stats.calls).toBe(500);
+    expect(stats.session).toMatchObject({ calls: 600, failures: 1, lastFailure: { at: 3 }, cost: { requestTokens: 600 } });
+    await log.clear();
+    expect((await log.stats()).session).toEqual({ calls: 0, failures: 0, cost: { requestTokens: 0, responseTokens: 0, tokensRemoved: 0 } });
+  });
 });
