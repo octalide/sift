@@ -47,6 +47,13 @@ export function postChannels(forge: Forge): Channel[] {
   return forge.writes.map((w) => ({ name: `${prefix}-${postKind(w)}`, tool: `^${POST_TOOL}$`, text: { fields: ['title', 'body'], when: { kind: postKind(w) } }, kind: textAbout(w, forge.nouns) }));
 }
 
+// one channel per write the forge's cli makes from the shell, named forge-shell-artifact-action. not in the default
+// table: a shell write is refused toward post, and judged on these only for a loop that has no post to make it with
+export function shellChannels(forge: Forge): Channel[] {
+  const prefix = forge.name.toLowerCase();
+  return forge.writes.map((w) => ({ name: `${prefix}-shell-${postKind(w)}`, tool: '^Bash$', text: forge.cliText(w), kind: textAbout(w, forge.nouns) }));
+}
+
 export function defaultChannels(forge?: Forge): Channel[] {
   return forge ? [...DISCORD_CHANNELS, ...postChannels(forge)] : [...DISCORD_CHANNELS];
 }

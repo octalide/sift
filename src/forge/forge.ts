@@ -115,6 +115,10 @@ export type ForgeAction = 'create' | 'comment' | 'edit' | 'review' | 'merge';
 // one write of text people read: the artifact and what the write does to it
 export type ForgeWrite = { kind: ForgeArtifact; action: ForgeAction };
 
+// how a shell command makes a write through the forge's cli: a regex matching the command, the flags carrying the
+// text inline and the flags naming a file it is read from
+export type CliText = { command: string; body: string[]; file: string[] };
+
 export type ReviewVerdict = 'approve' | 'request-changes' | 'comment';
 export type MergeMethod = 'merge' | 'squash' | 'rebase';
 
@@ -206,4 +210,6 @@ export interface Forge {
   // the write one simple shell command (its words, unquoted) makes through the forge's own cli or api when it
   // sends text people read; undefined for a read, or a write that carries no text
   writeOf(words: string[]): ForgeWrite | undefined;
+  // where the forge's cli carries the text of the write, for a caller that has no post to make it with
+  cliText(write: ForgeWrite): CliText;
 }

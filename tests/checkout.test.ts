@@ -4,11 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os';
 import type { Forge } from '../src/forge/forge.ts';
 import { gateCall } from '../src/gate/outbound.ts';
-import { grade, scopeOf, SpawnDirs, subjectFor, type GradeHost, type GradeScope } from '../src/grade.ts';
+import { grade, scopeOf, subjectFor, type GradeHost, type GradeScope } from '../src/grade.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { Checkouts, type CheckoutFs } from '../src/repo/checkout.ts';
 import type { RunLike } from '../src/process.ts';
+import { Spawns } from '../src/spawns.ts';
 import { fakeForge } from './fake-forge.ts';
 import { discoveries, yesJudge } from './fake-source.ts';
 
@@ -278,10 +279,10 @@ describe('forge-only grades', () => {
 describe('the subagent default', () => {
   it('grades where the subagent was spawned, or its parent, unless cwd names another', async () => {
     fresh();
-    const dirs = new SpawnDirs();
-    dirs.spawned('parent', wt, undefined);
-    dirs.spawned('child', undefined, 'parent');
-    dirs.spawned('loose', undefined, undefined);
+    const dirs = new Spawns();
+    await dirs.spawned('parent', wt, undefined, []);
+    await dirs.spawned('child', undefined, 'parent', []);
+    await dirs.spawned('loose', undefined, undefined, []);
     const child = await scopeOf(checkouts, session, undefined, dirs.of('child'));
     expect(child).toMatchObject({ named: false, checkout: { root: wt, repo: 'o/b' } });
     expect((await scopeOf(checkouts, session, undefined, dirs.of('loose'))).checkout.root).toBe(a);
@@ -299,10 +300,10 @@ describe('the outbound gate', () => {
 
   it('judges a subagent\'s text under the checkout it was spawned in, else the session\'s', async () => {
     fresh();
-    const dirs = new SpawnDirs();
-    dirs.spawned('there', wt, undefined);
-    dirs.spawned('loose', undefined, undefined);
-    dirs.spawned('outside', base, undefined);
+    const dirs = new Spawns();
+    await dirs.spawned('there', wt, undefined, []);
+    await dirs.spawned('loose', undefined, undefined, []);
+    await dirs.spawned('outside', base, undefined, []);
     const gate = async (agentId: string | undefined, text: string, tool = 'mcp__note__send') => {
       const asked: { state: unknown; instructions: string[] }[] = [];
       const { checkout } = await scopeOf(checkouts, session, undefined, dirs.of(agentId));

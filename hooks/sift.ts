@@ -2,9 +2,10 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
 import { POST_TOOL, postKind } from '../src/gate/channels.ts';
 import { gateCall } from '../src/gate/outbound.ts';
-import { METHODS, postCall, rawWriteOf, rawWriteRefusal, VERDICTS, type PostInput } from '../src/gate/post.ts';
-import { GitHubForge } from '../src/forge/github.ts';
-import { grade, scopeOf, SpawnDirs, type GradeHost, type GradeOptions } from '../src/grade.ts';
+import { METHODS, postCall, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
+import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
+import { ghWriteOf, GitHubForge } from '../src/forge/github.ts';
+import { grade, scopeOf, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
 import { configLayers, globalConfigPath, readConfig } from '../src/repo/config.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
@@ -20,7 +21,9 @@ import { Discoveries, DISCOVERY_WAIT_MS } from '../src/rules/discover.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, commandInputOf, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
-import { SEEN_EVERY_MS, StoreKeys, watchKeys } from '../src/keys.ts';
+import { SEEN_EVERY_MS, sessionKeys, StoreKeys } from '../src/keys.ts';
+import { Spawns } from '../src/spawns.ts';
+import { Tenure, tenureToken } from '../src/tenure.ts';
 
 type Options = {
   backend: Backend;
@@ -107,6 +110,8 @@ type Runtime = GradeHost & {
   sessionId: string;
   // the lifetime of the session's watch keys and every rules cache
   storeKeys: StoreKeys;
+  // whether this environment still owns the session's background work, or a reload replaced it
+  tenure: Tenure;
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -152,12 +157,15 @@ export const register: Register = (on, rawOptions) => {
   };
 
   const ready = (): Runtime => {
-    if (!runtime) throw new Error('sift is not bound yet');
+    if (!runtime) throw new Error(UNBOUND);
     return runtime;
   };
 
-  // where each subagent was spawned; its grades default there
-  const spawnDirs = new SpawnDirs();
+  // where each subagent was spawned, its grades defaulting there, and which of sift's tools it was given
+  const spawns = new Spawns();
+
+  // sift's tools this environment has registered so far, as the model names them
+  const offered: string[] = [];
 
   // each loop's task, what prune already dropped for it, and whether it is turned off there
   const pruneLoops = new PruneLoops();
@@ -166,7 +174,7 @@ export const register: Register = (on, rawOptions) => {
   let readFile: (p: string) => Promise<string> = async () => '';
 
   async function gradeIn(rt: Runtime, packName: string, ref: string, opts: GradeOptions = {}, agentId?: string): Promise<Report> {
-    const { report, subject } = await grade(rt, await scopeOf(rt.checkouts, rt.session, opts.cwd, spawnDirs.of(agentId)), packName, ref, opts);
+    const { report, subject } = await grade(rt, await scopeOf(rt.checkouts, rt.session, opts.cwd, spawns.of(agentId)), packName, ref, opts);
     record('grade', report.verdict, { digest: `${packName} ${subject.ref}` });
     return report;
   }
@@ -187,12 +195,30 @@ export const register: Register = (on, rawOptions) => {
     const fs = { read: (p: string) => $.fs.read(p), exists: (p: string) => $.fs.exists(p), list: (p: string) => $.fs.list(p), stat: (p: string) => $.fs.stat(p) };
     const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v), delete: (k: string) => $.store.delete(k), keys: () => $.store.keys() };
     const sessionId = await $.session.id();
-    const keys = watchKeys(sessionId);
+    const keys = sessionKeys(sessionId);
+    // the environment a reload replaced lives on until its last dispatch settles: it stands down, so its timers poll
+    // and deliver nothing and its writes never clobber what this one loads
+    let watches: Watches | undefined;
+    let mailbox: Mailbox | undefined;
+    const tenure = new Tenure({
+      store,
+      key: keys.tenure,
+      token: tenureToken(Date.now()),
+      after: (ms, fn) => $.clock.after(ms, fn),
+      lost: () => {
+        void watches?.end();
+        void mailbox?.stop();
+        $.ui.log('sift: a reload replaced this instance, its watch and deliveries stand down');
+      },
+    });
+    await tenure.claim();
+    // what the session's background work writes
+    const owned = tenure.store(store);
+    await spawns.bind(owned, keys.agents);
     const storeKeys = new StoreKeys({ store, now: () => Date.now(), log: (text) => $.ui.log(text) });
     await storeKeys.touch(sessionId);
     await storeKeys.sweep(sessionId);
-    // a reload cancels the old interval with the old environment
-    $.clock.every(SEEN_EVERY_MS, () => void storeKeys.touch(sessionId));
+    $.clock.every(SEEN_EVERY_MS, () => void tenure.holds().then((held) => (held ? storeKeys.touch(sessionId) : undefined)));
     const log = new DecisionLog(store, sessionId);
     const apiKey = await apiKeyOf($, options);
     const inner = makeJudge(
@@ -216,21 +242,21 @@ export const register: Register = (on, rawOptions) => {
     // the watch polls under the session's conventions and packs, as bound at start
     const { config, packs } = bound;
     const triagePack = packs['triage'];
-    let watches: Watches | undefined;
-    const mailbox = new Mailbox({
-      store,
+    const letters = new Mailbox({
+      store: owned,
       key: keys.mail,
       agents: () => $.agent.list(),
       now: () => Date.now(),
       submit: async (text) => void (await $.prompt.submit({ text })),
       send: async (to, text) => refusalOf(await $.tool.call({ tool: 'SendMessage', to, message: text, summary: 'sift watch delivery' })),
       retire: async (agentId, why) => watches?.retireOwner(agentId, why),
-      schedule: (ms, fn) => $.clock.after(ms, () => void fn()),
+      schedule: (ms, fn) => tenure.after(ms, fn),
       log: (text) => $.ui.log(text),
     });
+    mailbox = letters;
     watches = triagePack
       ? new Watches({
-          store,
+          store: owned,
           key: keys.subs,
           stateKey: keys.state,
           now: () => Date.now(),
@@ -238,7 +264,7 @@ export const register: Register = (on, rawOptions) => {
           status: (text) => $.ui.status(text),
           watcher: {
             forge,
-            store,
+            store: owned,
             judge,
             pack: triagePack,
             issuePack: packs['issue'],
@@ -246,14 +272,15 @@ export const register: Register = (on, rawOptions) => {
             now: () => Date.now(),
             // each recipient's delivery goes by its channel: the main loop's prompt, or the owning agent's mailbox
             deliver: async (d) => {
+              if (!(await tenure.holds())) return;
               if (options.watchDelivery === 'log') {
                 for (const line of [...(d.to ? [`sift watch to ${d.to}:`] : []), ...d.text.split('\n')]) $.ui.log(line);
                 return;
               }
-              await mailbox.deliver(d);
+              await letters.deliver(d);
             },
             log: (text) => $.ui.log(text),
-            schedule: (ms, fn) => $.clock.after(ms, fn),
+            schedule: (ms, fn) => tenure.after(ms, fn),
             onDecision: (event, action, label) => log.push({ at: Date.now(), module: 'watch', backend: judge.name, ok: true, digest: `${event.id} ${event.changes.join(',')}`, action, shadow: options.shadow, answers: { label } }),
           },
           options: {
@@ -275,11 +302,17 @@ export const register: Register = (on, rawOptions) => {
         })
       : undefined;
     const discoveries = new Discoveries({ judge, store, now: () => Date.now(), log: (text) => $.ui.log(text), schedule: (ms, fn) => $.clock.after(ms, fn), waitMs: DISCOVERY_WAIT_MS });
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: watches ? mailbox : undefined, sessionId, storeKeys };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: watches ? letters : undefined, sessionId, storeKeys, tenure };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
+    // a subagent keeps the tools it was spawned with, so what it was offered is recorded as each is registered
+    const tool = async (spec: Parameters<typeof $.tool.register>[0]) => {
+      await $.tool.register(spec);
+      offered.push(`mcp__sift__${spec.name}`);
+    };
+
     if (options.grade) {
-      await $.tool.register({
+      await tool({
         name: 'grade',
         description:
           'Grade a repository subject with a sift pack and get mechanical findings plus calibrated judgements. Packs and what each expects as subject: issue (an issue number as N or #N, or an issue URL, which may name another repo), pr (a PR number as N or #N, a PR URL, or a range like dev..HEAD graded from the checkout before the PR exists; mechanical checks only: link, target, branch, CI, template, commit format, drift), commit (a ref such as a sha, branch or tag, or a range like main..HEAD; the commit format check only), release ("release" for the required bump alone, or a proposed version like v1.4.0; ref: the branch it is cut from, repo: any repo, no checkout needed), rules (an issue number or URL, or free text in text; a PR or commit is refused), locate (an issue number or URL, or free text in text, lists the files of the checkout to read or change for it, top: how many per level), plan (an issue number, text: the plan, judges whether the plan covers the issue, adds nothing beyond it, and decides nothing it leaves open). Never paste a title or body as the subject: it is a reference, the text goes in text. A missing or malformed subject is refused with the expected form named. The grade reads one checkout: cwd when given (pass it from a worktree or another repository), else the directory the calling subagent was spawned in, else the session\'s repository; that checkout\'s .sift/config.json conventions and .sift/packs apply, and repo-defined packs are available by name.',
@@ -297,7 +330,7 @@ export const register: Register = (on, rawOptions) => {
           required: ['pack', 'subject'],
         },
       });
-      await $.tool.register({
+      await tool({
         name: 'judge',
         description:
           'Ask calibrated typed questions about any state without generating text. questions is an object of id -> {type: "noul"|"choice"|"score", instructions, criteria}. noul answers a probability, choice picks one key of criteria (an object of key -> description), score picks a position in criteria (an ordered array of level descriptions). Use it for classification, routing, and yes/no checks where a probability is more useful than prose.',
@@ -310,7 +343,7 @@ export const register: Register = (on, rawOptions) => {
           required: ['state', 'questions'],
         },
       });
-      await $.tool.register({
+      await tool({
         name: 'rank',
         description:
           'Score many items with the same typed questions and get them back in input order with their answers, plus a view sorted by one question. questions has the judge shape; {k} in a question stands for the item index and {field} for a field of an object item ({text} for a string item). mode "batched" fills each request with as many items as fit, so items can see each other and it is cheapest; "isolated" sends one request per item so no item colours another. Use it for "which of these N" problems: relevance, triage, dedup, picking a best candidate.',
@@ -330,12 +363,12 @@ export const register: Register = (on, rawOptions) => {
       });
     }
 
-    await $.tool.register({
+    await tool({
       name: 'status',
       description: 'sift status: judge backend, enabled modules, the watch subscriptions and their pollers, and decision counts. Call it at session start to learn whether repository events will be delivered to you as prompts.',
       inputSchema: { type: 'object', properties: {} },
     });
-    await $.tool.register({
+    await tool({
       name: 'watch',
       description:
         'Control the sift watch, a set of subscriptions polled one repository at a time. subscribe (repo, default the one checked out where the calling subagent was spawned, else the session\'s; scope: repo, pr <n>, branch <name>, run <id> or tag <glob>; items, ci, stall filter what reaches you; until: settled, merged, closed or an iso time; returns the id), unsubscribe (id), list (every subscription with its scope, filter and owner), start (subscribe to that repository with the configured filter, or to one pull request or branch when for names it, until settled from a subagent), status, poll (one poll now), pause, resume, reset (forget the cursor and reseed), deferred (events held back). poll, pause, resume, reset and deferred act on every polled repository, or on repo alone. A subscription made from a subagent belongs to it and outlives its turn: subscribe, end your turn, and the delivery resumes you. It arrives with your next tool call, or as a message after 60 s without one or once you have ended your turn. Do not wait or poll for it. It is removed by until, unsubscribe, or once no message can reach you.',
@@ -355,7 +388,7 @@ export const register: Register = (on, rawOptions) => {
       },
     });
     if (options.prune) {
-      await $.tool.register({
+      await tool({
         name: 'prune',
         description:
           'Turn sift\'s pruning of long Bash and Read output off or on for the calling loop alone (this subagent, or the main loop). off lasts until the loop\'s next task (a subagent\'s whole run), or for the next calls outputs prune would otherwise judge; on turns it back on. Call off before reading a document in full when every line matters. For one Bash command, end it with # sift: full instead. A Read with offset or limit, a repeat of a Read or command that was pruned, and a Read of a path your task names are never pruned. A Read is only ever cut at its tail, so its line numbers stay true.',
@@ -369,7 +402,7 @@ export const register: Register = (on, rawOptions) => {
         },
       });
     }
-    await $.tool.register({
+    await tool({
       name: 'post',
       description:
         `Write an issue, pull request, comment, review, merge or release on ${forge.name} to the repository named in repo, never the one the working directory implies. The text is judged against that repository's rule documents and its outbound channels first: a broken rule or a channel's length limit refuses the write with the rule quoted, and nothing is written. Otherwise the write is made and its url returned. Every kind takes repo and kind. issue-create: title, body. pr-create: title, body, base, head (a branch, or owner:branch from a fork), draft. issue-comment, pr-comment: number, body. issue-edit, pr-edit: number, title or body or both. pr-review: number, verdict, body (required unless approving). pr-merge: number, method, title and body for the merge commit. release-create: tag, body (the notes), title, target, draft, prerelease. release-edit: tag, title or body. Writing these through gh in Bash is refused while the outbound gate is on; labels, assignees, closing and the like stay with gh.`,
@@ -396,7 +429,7 @@ export const register: Register = (on, rawOptions) => {
     await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|poll|pause|resume|reset|deferred [repo]|start [repo] [for <pr|branch>]|subscribe <repo> [scope]|unsubscribe <id>]' });
 
     if (watches) {
-      await mailbox.load();
+      await letters.load();
       await watches.load();
       if (options.watch) {
         const repos = options.watchRepos.split(',').map((r) => r.trim()).filter(Boolean);
@@ -428,18 +461,36 @@ export const register: Register = (on, rawOptions) => {
     const answer = async (): Promise<Awaited<ReturnType<typeof next>>> => {
       if (e.tool.startsWith('mcp__sift__')) return next(e);
       const rt = runtime;
-      if (!rt) return next(e);
-      // a forge write from the shell is refused: its destination is whatever the command implies, so it goes through post
       const command = (e as unknown as { command?: unknown }).command;
-      const raw = options.gateOutbound && e.tool === 'Bash' && typeof command === 'string' ? rawWriteOf(rt.forge, command) : undefined;
-      if (raw) {
-        const refusal = rawWriteRefusal(rt.forge, raw);
-        record('outbound', options.shadow ? 'would-refuse' : 'refuse', { digest: `shell ${postKind(raw)}` });
-        if (options.shadow) $.ui.log(`sift outbound (shadow): would refuse: ${refusal}`);
-        else return { deny: `sift outbound: ${refusal}.` };
+      const shell = options.gateOutbound && e.tool === 'Bash' && typeof command === 'string' ? command : undefined;
+      // a reload's new environment answers before its session start has bound it: a forge write waits for the gate,
+      // read by the cli of the forge session start binds
+      if (!rt) {
+        const early = shell !== undefined ? rawWriteOf({ writeOf: ghWriteOf }, shell) : undefined;
+        return early ? { deny: `sift outbound: ${UNBOUND}, so this ${postKind(early)} write from the shell cannot be judged yet. Run the command again in a moment.` } : next(e);
       }
       // the checkout a grade with no cwd reads: where this loop was spawned, else the session's
-      const checkout = options.gateOutbound ? (await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(e.agentId))).checkout : undefined;
+      const checkoutOf = async () => (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout;
+      // a forge write from the shell goes through post, which names its destination; a loop without post has its text judged
+      const raw = shell !== undefined ? rawWriteOf(rt.forge, shell) : undefined;
+      if (raw) {
+        const gate = await gateShellWrite(rt, raw, spawns.has(e.agentId, POST_TOOL), checkoutOf, e as unknown as Record<string, unknown>, readFile);
+        const without = gate.fallback ? ' without post' : '';
+        if ('refused' in gate) {
+          record('outbound', options.shadow ? 'would-refuse' : 'refuse', { digest: `shell ${postKind(raw)}${without}` });
+          if (options.shadow) $.ui.log(`sift outbound (shadow): would refuse: ${gate.refused}`);
+          else return { deny: `sift outbound: ${gate.refused}.` };
+        } else if (gate.gated) {
+          const { outbound, decision } = gate.gated;
+          record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel}${without} ${outbound.text.length} chars: ${decision.reason}` });
+          for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
+          if (!decision.allow) {
+            if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
+            else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${fallbackNote(rt.forge)}. Rewrite the text or ask the user.` };
+          }
+        }
+      }
+      const checkout = options.gateOutbound && !raw ? await checkoutOf() : undefined;
       const gated = checkout ? await gateCall(rt, checkout, e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
       if (gated) {
         const { outbound, decision } = gated;
@@ -462,8 +513,10 @@ export const register: Register = (on, rawOptions) => {
       );
     };
     const r = await answer();
-    const mailbox = runtime?.mailbox;
-    if (!e.agentId || !mailbox || r.deny !== undefined) return r;
+    const rt = runtime;
+    const mailbox = rt?.mailbox;
+    // an instance a reload replaced while this call ran has only stale letters; the one that replaced it delivers
+    if (!e.agentId || !rt || !mailbox || r.deny !== undefined || !(await rt.tenure.holds())) return r;
     const letters = await mailbox.take(e.agentId);
     return letters.length === 0 ? r : { ...r, context: [...(r.context ?? []), ...letters] };
   });
@@ -483,7 +536,7 @@ export const register: Register = (on, rawOptions) => {
   on('tool.call', { tool: POST_TOOL }, async ($, e) => {
     try {
       const rt = ready();
-      const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(e.agentId))).checkout.packs['rules'];
+      const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout.packs['rules'];
       const input = e as unknown as PostInput;
       const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
       const { outbound, decision } = posted;
@@ -501,14 +554,16 @@ export const register: Register = (on, rawOptions) => {
 
   on('agent.spawn', async (_$, e, next) => {
     const r = await next(e);
-    spawnDirs.spawned(r.agentId, e.cwd, e.parentAgentId);
+    await spawns.spawned(r.agentId, e.cwd, e.parentAgentId, offered);
     pruneLoops.spawned(r.agentId, e.prompt);
     return r;
   });
 
   on('tool.call', { tool: 'mcp__sift__judge' }, async ($, e) => {
     const input = e as unknown as { state: unknown; questions: Questions };
-    const result = await ready().judge.ask(input.state, input.questions);
+    const rt = runtime;
+    if (!rt) return { deny: `sift judge: ${UNBOUND}. Call it again in a moment.` };
+    const result = await rt.judge.ask(input.state, input.questions);
     record('judge-tool', result.ok ? 'answered' : 'failed');
     const text = result.ok
       ? Object.entries(result.answers).map(([id, a]) => `${id}: ${answerLabel(a)}`).join('\n')
@@ -518,7 +573,9 @@ export const register: Register = (on, rawOptions) => {
 
   on('tool.call', { tool: 'mcp__sift__rank' }, async ($, e) => {
     const input = e as unknown as { items: RankItem[]; questions: Questions; mode?: RankOptions['mode']; context?: Record<string, unknown>; by?: string; choice?: string; fields?: string[] };
-    const result = await rank(input.items, input.questions, ready().judge, { mode: input.mode ?? 'batched', context: input.context, by: input.by, choice: input.choice, fields: input.fields });
+    const rt = runtime;
+    if (!rt) return { deny: `sift rank: ${UNBOUND}. Call it again in a moment.` };
+    const result = await rank(input.items, input.questions, rt.judge, { mode: input.mode ?? 'batched', context: input.context, by: input.by, choice: input.choice, fields: input.fields });
     record('rank-tool', result.ok ? 'ranked' : 'failed', { digest: `${input.items.length} items, ${result.requests} requests` });
     if (!result.ok) return { deny: `rank unavailable: ${failureText(result)}` };
     const lines = result.sorted.map((r) => `${r.index}: ${r.value.toFixed(3)} ${Object.entries(r.answers).map(([id, a]) => `${id}=${answerLabel(a)}`).join(' ')} ${digestOf(r.item)}`);
@@ -598,7 +655,7 @@ export const register: Register = (on, rawOptions) => {
     const sub = input.action ?? 'status';
     if (sub === 'list') return w.list().map(formatSubscription).join('\n') || 'no subscriptions';
     if (sub === 'start' || sub === 'subscribe') {
-      const checkout = await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(owner)).then((s) => s.checkout, (error: unknown) => ({ error: messageOf(error) }));
+      const checkout = await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(owner)).then((s) => s.checkout, (error: unknown) => ({ error: messageOf(error) }));
       if ('error' in checkout) return `watch cannot subscribe: ${checkout.error}`;
       const wanted = subscriptionOf(input, { start: sub === 'start', repo: checkout.repo, filter: defaultFilter(), owner });
       if ('error' in wanted) return `watch cannot subscribe: ${wanted.error}`;
@@ -640,9 +697,13 @@ export const register: Register = (on, rawOptions) => {
     const rt = runtime;
     const input = e as unknown as WatchInput;
     const action = String(input.action ?? 'status');
-    if (!rt) return { result: [{ type: 'text', text: 'sift is not bound yet' }] };
+    if (!rt) return { deny: `sift watch: ${UNBOUND}. Call it again in a moment.` };
     if (!(WATCH_ACTIONS as readonly string[]).includes(action)) return { deny: `unknown watch action ${action}` };
-    return { result: [{ type: 'text', text: await watchControl(rt, { ...input, action }, e.agentId) }] };
+    try {
+      return { result: [{ type: 'text', text: await watchControl(rt, { ...input, action }, e.agentId) }] };
+    } catch (error) {
+      return { deny: `sift watch ${action} failed: ${messageOf(error)}` };
+    }
   });
 
   on('tool.call', { tool: PRUNE_TOOL }, async ($, e) => {
@@ -655,12 +716,12 @@ export const register: Register = (on, rawOptions) => {
 
   on('tool.call', { tool: 'mcp__sift__status' }, async () => {
     const rt = runtime;
-    return { result: [{ type: 'text', text: rt ? await statusText(rt) : 'sift is not bound yet' }] };
+    return { result: [{ type: 'text', text: rt ? await statusText(rt) : UNBOUND }] };
   });
 
   on('command.run', { command: 'sift' }, async ($, e) => {
     const rt = runtime;
-    if (!rt) return { text: 'sift is not bound yet' };
+    if (!rt) return { text: UNBOUND };
     const [head = 'status', ...rest] = e.args.trim().split(/\s+/).filter(Boolean);
     if (head === 'log') {
       const n = Number(rest[0]) || 30;
@@ -688,6 +749,9 @@ export const register: Register = (on, rawOptions) => {
     return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift prune off [n]|on, /sift watch status|list|poll|pause|resume|reset|deferred [repo], /sift watch start [repo] [for <pr|branch>], /sift watch subscribe <repo> [scope], /sift watch unsubscribe <id>` };
   });
 };
+
+// what a call answered by an environment whose session start has not run yet is told
+const UNBOUND = 'sift is starting or reloading and not bound to the session yet';
 
 function pruneTools(options: Options): string[] {
   return options.pruneTools.split(',').map((t) => t.trim()).filter(Boolean);
