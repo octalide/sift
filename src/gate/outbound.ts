@@ -50,7 +50,7 @@ export async function gateOutbound(out: Outbound, subject: Subject, pack: Pack, 
   return { allow: true, reason: 'clear', report, warnings };
 }
 
-export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'store' | 'now'>;
+export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'store' | 'now' | 'notice'>;
 
 export type Gated = { outbound: Outbound; decision: OutboundDecision };
 
@@ -60,7 +60,7 @@ export async function gateCall(host: GateHost, checkout: Checkout, tool: string,
   const outbound = await outboundOf(tool, input, read, channelTable(defaultChannels(host.forge), checkout.config.outbound.channels));
   const pack = checkout.packs['rules'];
   if (!outbound || !pack) return undefined;
-  const subject = await rulesSubject({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), judge: host.judge, store: host.store, now: host.now }, { kind: 'text', ref: outbound.text, about: outbound.kind }, checkout.config);
+  const subject = await rulesSubject({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), judge: host.judge, store: host.store, now: host.now, notice: host.notice }, { kind: 'text', ref: outbound.text, about: outbound.kind }, checkout.config);
   return { outbound, decision: await gateOutbound(outbound, subject, pack, host.judge, checkout.config) };
 }
 

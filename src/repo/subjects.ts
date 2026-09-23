@@ -318,8 +318,9 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
 // what the rules are read against: an issue, or free text and, when known, what it is about to become in the words the judge reads
 export type RulesTarget = { kind: 'issue'; number: number } | { kind: 'text'; ref: string; about?: string };
 
-// the checkout or repository the rules are read from, the judge that discovers them, the store that caches them and the clock that marks the cache read
-export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; judge: Judge; store: StoreLike; now: () => number };
+// the checkout or repository the rules are read from, the judge that discovers them, the store that caches them, the clock that marks the cache read
+// and the session log a fresh discovery names what it kept in
+export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; judge: Judge; store: StoreLike; now: () => number; notice: (text: string) => void };
 
 export async function rulesSubject(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject> {
   const { forge, repo } = host;
@@ -335,7 +336,7 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
     subject = { kind: 'text', ...(about ? { about } : {}), text: truncate(target.ref, BODY_CAP) };
   }
   // the subject is read, and a pull request refused, before discovery spends judge calls
-  const found = await discoverRules(host.source, config.rules, host.judge, host.store, host.now);
+  const found = await discoverRules(host.source, config.rules, host.judge, host.store, host.now, host.notice);
   const rules = [...found.rules];
   const total = rules.length;
   rules.splice(config.rules.maxRules);
@@ -349,6 +350,7 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
       total_rules: total,
       docs: found.docs,
       candidates: found.candidates,
+      kept: found.kept,
       cached: found.cached,
       subject: about ? `The subject (${about})` : 'The subject',
     },
