@@ -7,7 +7,7 @@ import { channelTable, commandBody, defaultChannels, textAbout, type Channel } f
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
 import { materialize } from '../src/packs/run.ts';
-import { rulesSubject } from '../src/repo/subjects.ts';
+import { rulesSubject, textRulesSubjects } from '../src/repo/subjects.ts';
 import type { Subject } from '../src/packs/types.ts';
 import { shellWord } from '../src/shell.ts';
 import { memorySource, memoryStore, yesJudge } from './fake-source.ts';
@@ -135,6 +135,23 @@ describe('rules subject for outbound text', () => {
     expect(materialize(BUILTIN_PACKS['rules']!, s).steps[0]?.questions['rules']?.instructions).toMatch(/^The subject complies with this rule: \{text\}$/);
   });
 
+  it('reads text that fits as one subject, and longer text as its opening and parts', async () => {
+    const [one, ...none] = await textRulesSubjects(host(), { text: 'short', about: 'a comment on a pull request' }, config, 100);
+    expect(none).toEqual([]);
+    expect(one!.state['subject']).toEqual({ kind: 'text', about: 'a comment on a pull request', text: 'short' });
+    expect(one!.facts['section']).toBeUndefined();
+    const text = `# A\n\n${'a'.repeat(60)}\n\n# B\n\n${'b'.repeat(60)}\n`;
+    const parts = await textRulesSubjects(host(), { text }, config, 80);
+    expect(parts.map((p) => (p.state['subject'] as { text: string }).text).join('')).toBe(text);
+    expect(parts.map((p) => [p.facts['subject'], p.facts['part'], p.facts['section'] ?? false])).toEqual([
+      ['The opening, part 1 of 2 ("A"), of the subject', 'the opening, part 1 of 2 ("A")', false],
+      ['Part 2 of 2 ("B") of the subject', 'part 2 of 2 ("B")', true],
+    ]);
+    const [opening, later] = parts.map((p) => materialize(BUILTIN_PACKS['rules']!, p).steps[0]!);
+    expect(Object.keys(opening!.questions)).toEqual(['rules']);
+    expect(Object.keys(later!.questions)).toEqual(['section']);
+  });
+
   it('describes each artifact and action', () => {
     expect(textAbout({ kind: 'pr', action: 'comment' }, github.nouns)).toBe('a comment on a pull request');
     expect(textAbout({ kind: 'issue', action: 'edit' }, github.nouns)).toBe('the edited title and body of a GitHub issue');
@@ -155,7 +172,7 @@ describe('outbound gate', () => {
   const pack = BUILTIN_PACKS['rules']!;
 
   it('denies over the channel limit without asking the judge', async () => {
-    const d = await gateOutbound({ channel: 'discord', text: 'x'.repeat(2001), limit: 2000 }, subject, pack, judge([]), DEFAULT_CONFIG);
+    const d = await gateOutbound({ channel: 'discord', text: 'x'.repeat(2001), limit: 2000 }, [subject], pack, judge([]), DEFAULT_CONFIG);
     expect(d).toMatchObject({ allow: false, reason: 'discord text is 2001 chars, the limit is 2000' });
     expect(d.report).toBeUndefined();
   });
@@ -174,7 +191,7 @@ describe('outbound gate', () => {
         return { ok: true, backend: 'fake', latencyMs: 1, answers };
       },
     };
-    const d = await gateOutbound({ channel: 'github-issue-create', text: 'The watcher misses body edits.', kind: 'the body of a new GitHub issue' }, s, pack, j, config);
+    const d = await gateOutbound({ channel: 'github-issue-create', text: 'The watcher misses body edits.', kind: 'the body of a new GitHub issue' }, [s], pack, j, config);
     expect(asked[0]).toBe('The subject (the body of a new GitHub issue) complies with this rule: Pull requests: The body carries verification evidence.');
     expect(d).toMatchObject({ allow: true, reason: 'clear', warnings: ['unclear: Pull requests: The body carries verification evidence.'] });
   });
@@ -190,20 +207,20 @@ describe('outbound gate', () => {
       },
     };
     const fileSubject: Subject = { ...subject, state: { ...subject.state, subject: { kind: 'text', text: out!.text } } };
-    expect(await gateOutbound(out!, fileSubject, pack, j, DEFAULT_CONFIG)).toMatchObject({ allow: false, reason: 'breaks: No em dashes.' });
+    expect(await gateOutbound(out!, [fileSubject], pack, j, DEFAULT_CONFIG)).toMatchObject({ allow: false, reason: 'breaks: No em dashes.' });
     expect(seen).toEqual([{ kind: 'text', text: 'a — b' }]);
     const stdin = await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file -' }, async () => '', via);
-    const d = await gateOutbound(stdin!, subject, pack, judge([]), DEFAULT_CONFIG);
+    const d = await gateOutbound(stdin!, [subject], pack, judge([]), DEFAULT_CONFIG);
     expect(d).toMatchObject({ allow: false, reason: 'the body is read from stdin (--body-file -) with no heredoc in the command, so it cannot be judged; pass --body, a file path or a heredoc' });
     expect(d.report).toBeUndefined();
   });
 
   it('denies a broken rule, warns on an unclear one, allows the rest', async () => {
-    const broken = await gateOutbound({ channel: 'github', text: 'a — b' }, subject, pack, judge([0.1, 0.9]), DEFAULT_CONFIG);
+    const broken = await gateOutbound({ channel: 'github', text: 'a — b' }, [subject], pack, judge([0.1, 0.9]), DEFAULT_CONFIG);
     expect(broken).toMatchObject({ allow: false, reason: 'breaks: No em dashes.', warnings: [] });
-    const unclear = await gateOutbound({ channel: 'github', text: 'ok' }, subject, pack, judge([0.9, 0.5]), DEFAULT_CONFIG);
+    const unclear = await gateOutbound({ channel: 'github', text: 'ok' }, [subject], pack, judge([0.9, 0.5]), DEFAULT_CONFIG);
     expect(unclear).toMatchObject({ allow: true, reason: 'clear', warnings: ['unclear: Terse by default.'] });
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
-    expect((await gateOutbound({ channel: 'github', text: 'ok' }, subject, pack, off, DEFAULT_CONFIG)).allow).toBe(true);
+    expect((await gateOutbound({ channel: 'github', text: 'ok' }, [subject], pack, off, DEFAULT_CONFIG)).allow).toBe(true);
   });
 });

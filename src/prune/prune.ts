@@ -12,7 +12,7 @@ export type PruneOptions = {
 };
 
 export const PRUNE_DEFAULTS: PruneOptions = {
-  floorTokens: 4000,
+  floorTokens: 20000,
   chunkLines: 25,
   keepThreshold: 0.5,
   maxRequestTokens: Math.floor(JEV_LIMITS.requestTokens * 0.5),

@@ -1,5 +1,6 @@
 {
   "commits": { "convention": "conventional", "scope": "issue", "forbidTrailers": ["Co-Authored-By"] },
   "branches": { "protected": ["main", "dev"], "pattern": "^(feat|fix|docs|refactor|test|chore|style|ci|perf|hotfix)/\\d+$" },
-  "prs": { "linkIssue": true, "target": "dev" }
+  "prs": { "linkIssue": true, "target": "dev" },
+  "release": { "changelog": "CHANGELOG.md" }
 }

@@ -18,11 +18,13 @@ export type PackQuestion = (Exclude<Question, { type: 'choice' }> | PackChoice) 
   violates?: string[] | number[] | 'listed';
   // ask only when this subject fact is truthy
   when?: string;
+  // ask only when this subject fact is falsy
+  unless?: string;
   // for a noul: true when a high probability is the bad outcome (e.g. "scope creep")
   inverted?: boolean;
 };
 
-export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'tree' | 'plan' | 'log';
+export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'tree' | 'plan';
 
 // one rank over a subject list: every item is asked the step's questions, the subject state as context.
 // {field} in a question takes the item's field, {subject} the subject's own label

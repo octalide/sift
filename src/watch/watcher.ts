@@ -1,12 +1,11 @@
 import type { RepoConfig } from '../repo/config.ts';
-import type { Forge, Job, PullHead, Rate } from '../forge/forge.ts';
+import type { Forge, PullHead, Rate } from '../forge/forge.ts';
 import type { Judge } from '../judge/types.ts';
 import type { Finding, Pack } from '../packs/types.ts';
-import { formatReport, runChecks, runPack } from '../packs/run.ts';
+import { runChecks } from '../packs/run.ts';
 import { issueSubject } from '../repo/subjects.ts';
-import { downstreamLine, jobSubject, readFailure } from '../ci/log.ts';
 import type { StoreLike } from '../log.ts';
-import { currentState, diffItems, diffRuns, formatEvent, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type Run, type WatchEvent, type WatchState } from './poll.ts';
+import { currentState, diffItems, failureLines, diffRuns, formatEvent, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, toRuns, trimRuns, trimSettled, type Deferred, type Run, type WatchEvent, type WatchState } from './poll.ts';
 import { route, settles, type Subscription } from './subscription.ts';
 import { eventSubject, judgeEvent, type EventDetail, type WatchRules } from './triage.ts';
 
@@ -33,8 +32,6 @@ export type WatchHost = {
   pack: Pack;
   // the issue pack's mechanical checks run on every new issue, the filer's own included
   issuePack?: Pack;
-  // the ci pack runs on each failed check of a settled pr head and its report rides with the delivery
-  ciPack?: Pack;
   config: RepoConfig;
   now: () => number;
   deliver: (delivery: WatchDelivery) => Promise<void>;
@@ -344,10 +341,7 @@ export class Watcher {
   // then every until: settled subscription answered is retired. a poll's own delivery consumes the digest it carried;
   // an aged-out one leaves the held events held
   private async send(items: Delivery[], extra: Run[] = [], consume = false): Promise<void> {
-    for (const d of items) {
-      this.host.onDecision?.(d.event, 'deliver', d.label);
-      if (d.event.settled && d.event.conclusion === 'failure') d.event.reports = await this.ciReports(d.event);
-    }
+    for (const d of items) this.host.onDecision?.(d.event, 'deliver', d.label);
     const byId = this.byId();
     const ownerOf = (id: string) => byId.get(id)?.for;
     const owners = new Set(items.flatMap((d) => d.subs.map(ownerOf)));
@@ -516,37 +510,6 @@ export class Watcher {
     };
   }
 
-  // the ci pack over each failed check that has a log, one report per job; a check the forge keeps no log for is named alone,
-  // and a job that failed only because a job it needs failed is named in one line, since that job is judged on its own
-  private async ciReports(e: WatchEvent): Promise<string[]> {
-    const pack = this.host.ciPack;
-    if (!pack) return [];
-    const out: string[] = [];
-    const runs = new Map<string, Promise<Job[]>>();
-    const jobsOf = (run: string): Promise<Job[]> => {
-      if (!runs.has(run)) runs.set(run, this.host.forge.jobs(this.options.repo, run));
-      return runs.get(run)!;
-    };
-    for (const check of e.failed ?? []) {
-      if (check.id === undefined) {
-        out.push(`${check.name}: no log to read`);
-        continue;
-      }
-      try {
-        const read = await readFailure(this.host.forge, this.options.repo, check.id, jobsOf);
-        if (read.job && read.upstream.length > 0) {
-          out.push(downstreamLine(read.job, read.upstream));
-          continue;
-        }
-        const subject = await jobSubject(this.host.forge, this.options.repo, check.id, read.log);
-        out.push(formatReport(await runPack(pack, subject, this.host.judge, this.host.config)));
-      } catch (error) {
-        out.push(`${check.name}: could not read the log (${error instanceof Error ? error.message : String(error)})`);
-      }
-    }
-    return out;
-  }
-
   // every open head not yet tracked is looked up once: unfinished checks make it pending from now, so a head whose
   // checks never start still stalls; a head already finished is settled (delivered when no run reported it, silently on
   // the seed poll); a head with nothing on it is neither, so a repo without ci sees no verdicts
@@ -654,7 +617,7 @@ export class Watcher {
       lines.push(`${formatEvent(event)}${now}`);
       lines.push(`  by ${event.user || 'unknown'} · ${event.url}${label ? ` · ${label}` : ''} · ${subs.join(', ')}`);
       if (event.findings?.length) lines.push(`  filing: ${event.findings.join('; ')}`);
-      for (const report of event.reports ?? []) lines.push(...report.split('\n').map((l) => `  ${l}`));
+      if (event.settled && event.failed?.length) lines.push(...failureLines(event.failed, (run) => this.host.forge.logCommand(this.options.repo, run)).map((l) => `  ${l}`));
     }
     if (held.length > 0) lines.push(`deferred meanwhile: ${summarize(held)}`);
     return lines.join('\n');

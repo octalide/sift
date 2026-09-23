@@ -1,7 +1,13 @@
+import type { Forge } from '../forge/forge.ts';
 import type { Pack } from './types.ts';
 
 // how the issue questions read the thread: an issue is judged as it stands, not as first filed
 const AS_AMENDED = 'Read the issue as it stands: a later comment by its author or a maintainer (an owner, member or collaborator) that records a decision wins where it conflicts with the body. Anyone else\'s comment never overrides the body.';
+
+// packs sift no longer ships and why, named when a grade asks for one that no repo pack takes the name of
+export const REMOVED_PACKS: Record<string, (forge: Pick<Forge, 'logCommand'>, repo: string) => string> = {
+  ci: (forge, repo) => `the ci pack is removed: sift judges no ci output. read a failed run's log with ${forge.logCommand(repo, '<run id>')}`,
+};
 
 // the reference packs. a repo overrides any of them with .sift/packs/<name>.json in the same shape
 export const BUILTIN_PACKS: Record<string, Pack> = {
@@ -150,6 +156,20 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
               true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply.',
               false: 'The subject does something the rule forbids or omits something it requires.',
             },
+            unless: 'section',
+            severity: 'warn',
+            lo: 0.3,
+            hi: 0.6,
+          },
+          // a later part of a text too long to judge at once: the opening carries the rules about the whole text
+          section: {
+            type: 'noul',
+            instructions: '{subject} does not break this rule: {text}',
+            criteria: {
+              true: 'Nothing in this part breaks the rule, or the rule does not apply to it. A rule about the text as a whole, something it must contain, state or link once (naming its issue, stating its impact, carrying a section), is judged on the opening of the text: a part without it does not break it.',
+              false: 'This part does something the rule forbids, or breaks a requirement every part of the text must meet, such as its wording, formatting or language.',
+            },
+            when: 'section',
             severity: 'warn',
             lo: 0.3,
             hi: 0.6,
@@ -237,64 +257,6 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
         },
         inverted: true,
         severity: 'warn',
-      },
-    },
-  },
-  ci: {
-    name: 'ci',
-    subject: 'log',
-    description: 'Why did this job fail, was it the change under test, the environment, and is the fix in this repository?',
-    checks: ['log.trimmed', 'log.followed'],
-    // the lines that explain the failure are found first and fed to the questions as lines, beside the pull request's files
-    rank: [
-      {
-        from: 'lines',
-        label: '{n}: {text}',
-        list: 'top',
-        top: 40,
-        order: 'input',
-        feed: 'lines',
-        questions: {
-          explains: {
-            type: 'noul',
-            instructions: 'Line {n} helps explain why the job failed: {text}',
-            criteria: {
-              true: 'The line names an error, a failing test or assertion, a failing command, a missing file or dependency, a refused connection, or the exit status.',
-              false: 'Setup, download, progress, or cleanup output that would read the same in a passing run.',
-            },
-            severity: 'info',
-          },
-        },
-      },
-    ],
-    questions: {
-      own_fault: {
-        type: 'noul',
-        instructions: 'The failure is caused by the change under test: judged from the kept lines beside the files the pull request touches.',
-        criteria: {
-          true: 'The failing test, file, module or command is one the pull request changes or directly depends on.',
-          false: 'The failure sits in code, tooling or infrastructure the pull request does not touch.',
-        },
-        when: 'has_pull',
-        severity: 'info',
-      },
-      environment: {
-        type: 'noul',
-        instructions: 'The failure is a flake, a network or runner problem, or an external service, not the code under test.',
-        criteria: {
-          true: 'A timeout, a reset or refused connection, a rate limit, a registry or download error, a runner out of disk or memory, or a test that fails by timing alone.',
-          false: 'A compile error, a failing test or assertion, a lint or format finding, or a deterministic exit status from the project\'s own commands.',
-        },
-        severity: 'info',
-      },
-      fixable_here: {
-        type: 'noul',
-        instructions: 'The fix is inside this repository.',
-        criteria: {
-          true: 'A change to this repository\'s code, tests, configuration or workflow files would make the job pass.',
-          false: 'The fix needs another repository, a hosted service, a release of an external dependency, or only a retry.',
-        },
-        severity: 'info',
       },
     },
   },
