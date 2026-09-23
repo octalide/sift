@@ -6,7 +6,7 @@ import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { currentState, diffItems, diffRuns, hashOf, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, type Item, type WatchEvent, type WatchState } from '../src/watch/poll.ts';
 import { Watches, type WatchesHost } from '../src/watch/registry.ts';
-import { Sessions } from '../src/watch/sessions.ts';
+import { StoreKeys } from '../src/keys.ts';
 import { formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, subscriptionOf, type CiFilter, type Scope, type Subscription } from '../src/watch/subscription.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { Watcher, summarize, type WatchDelivery, type WatchHost } from '../src/watch/watcher.ts';
@@ -911,7 +911,7 @@ describe('subscriptions', () => {
     const store = memoryStore();
     const { w } = registry(forge, { now: 1_000_000 }, store, 'a');
     await w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
-    const sessions = new Sessions({ store, now: () => 1_000_000, log: () => {} });
+    const sessions = new StoreKeys({ store, now: () => 1_000_000, log: () => {} });
     await sessions.touch('a');
     // the subscribe's first poll is waiting on the forge
     const poller = w.poller('o/r')!;

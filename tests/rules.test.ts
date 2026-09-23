@@ -7,8 +7,13 @@ import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { runPack } from '../src/packs/run.ts';
 import { candidate, checkoutSource, discoverRules, excluded, forgeSource, ruleDoc } from '../src/rules/discover.ts';
 import { ruleParagraphs } from '../src/rules/paragraphs.ts';
+import { rulesKeys, STALE_MS, StoreKeys } from '../src/keys.ts';
 import { fakeForge } from './fake-forge.ts';
 import { memorySource, memoryStore, yesJudge } from './fake-source.ts';
+
+// a fixed clock: the cache's read mark is not what these tests check
+const now = () => 1;
+const D = 24 * 3600 * 1000;
 
 const rules = (over: Partial<typeof DEFAULT_CONFIG.rules> = {}) => ({ ...DEFAULT_CONFIG.rules, ...over });
 
@@ -70,7 +75,7 @@ describe('rule discovery', () => {
   it('ranks the candidates, then the paragraphs of the kept documents, and names the documents used', async () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
     const store = memoryStore();
-    const found = await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store);
+    const found = await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now);
     expect(found).toEqual({
       docs: ['CONTRIBUTING.md'],
       rules: [
@@ -93,29 +98,49 @@ describe('rule discovery', () => {
     expect(store.map.get('rules:mem')).toMatchObject({ version: 1, docs: ['CONTRIBUTING.md'] });
   });
 
+  it('marks the scope read on every discovery, so the sweep keeps a cache in use and removes one no longer read', async () => {
+    const store = memoryStore();
+    const clock = { now: 100 * D };
+    const tick = () => clock.now;
+    const keys = new StoreKeys({ store, now: tick, log: () => {} });
+    const judge = judgeBy(isRuleDoc, isRule);
+    await discoverRules(memorySource(files), rules(), judge, store, tick);
+    expect(store.map.get(rulesKeys('mem').seen)).toBe(100 * D);
+    clock.now += STALE_MS - 1;
+    // a cached answer marks the read too
+    expect((await discoverRules(memorySource(files), rules(), judge, store, tick)).cached).toBe(true);
+    expect(store.map.get(rulesKeys('mem').seen)).toBe(clock.now);
+    clock.now += STALE_MS - 1;
+    await keys.sweep('me');
+    expect(store.map.has(rulesKeys('mem').cache)).toBe(true);
+    clock.now += 1;
+    await keys.sweep('me');
+    expect([...store.map.keys()]).toEqual([]);
+  });
+
   it('answers from the cache while the files and config are unchanged, and reruns when one changes', async () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
     const store = memoryStore();
     const judge = judgeBy(isRuleDoc, isRule, asked);
-    const first = await discoverRules(memorySource(files), rules(), judge, store);
-    const again = await discoverRules(memorySource(files), rules(), judge, store);
+    const first = await discoverRules(memorySource(files), rules(), judge, store, now);
+    const again = await discoverRules(memorySource(files), rules(), judge, store, now);
     expect(again).toEqual({ ...first, cached: true });
     expect(asked).toHaveLength(2);
     const edited = { ...files, 'CONTRIBUTING.md': `${files['CONTRIBUTING.md']}- Tests must pass.\n` };
-    const third = await discoverRules(memorySource(edited), rules(), judge, store);
+    const third = await discoverRules(memorySource(edited), rules(), judge, store, now);
     expect(third.cached).toBe(false);
     expect(third.rules.map((r) => r.text)).toContain('Contributing: Tests must pass.');
     expect(asked).toHaveLength(4);
-    await discoverRules(memorySource(edited), rules({ exclude: ['README.md'] }), judge, store);
+    await discoverRules(memorySource(edited), rules({ exclude: ['README.md'] }), judge, store, now);
     expect(asked).toHaveLength(6);
-    await discoverRules(memorySource(edited, { scope: 'other' }), rules({ exclude: ['README.md'] }), judge, store);
+    await discoverRules(memorySource(edited, { scope: 'other' }), rules({ exclude: ['README.md'] }), judge, store, now);
     expect(asked).toHaveLength(8);
   });
 
   it('adds listed docs without judging them as documents, removes excluded paths, and reads forge templates', async () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
     const source = memorySource(files, { templates: { '.github/PULL_REQUEST_TEMPLATE.md': 'dup', '.github/ISSUE_TEMPLATE/bug.yml': 'name: Bug\nbody:\n  - type: markdown\n' }, remote: { 'o/r:MIGRATION.md@v2': '# Migration\n\nCallers must pass len.\n' } });
-    const found = await discoverRules(source, rules({ docs: ['README.md', 'o/r:MIGRATION.md@v2'], exclude: ['docs/**'] }), judgeBy(() => 0.1, isRule, asked), memoryStore());
+    const found = await discoverRules(source, rules({ docs: ['README.md', 'o/r:MIGRATION.md@v2'], exclude: ['docs/**'] }), judgeBy(() => 0.1, isRule, asked), memoryStore(), now);
     const docs = (asked[0]!.state as { items: { path: string }[] }).items.map((d) => d.path);
     expect(docs).toEqual(['.github/PULL_REQUEST_TEMPLATE.md', 'CONTRIBUTING.md', '.github/ISSUE_TEMPLATE/bug.yml']);
     expect(found.candidates).toBe(3);
@@ -127,7 +152,7 @@ describe('rule discovery', () => {
 
   it('finds nothing in a repository without prose and asks nothing', async () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
-    const found = await discoverRules(memorySource({ 'src/a.ts': 'x' }), rules(), yesJudge(0.9, asked), memoryStore());
+    const found = await discoverRules(memorySource({ 'src/a.ts': 'x' }), rules(), yesJudge(0.9, asked), memoryStore(), now);
     expect(found).toEqual({ docs: [], rules: [], candidates: 0, kept: 0, cached: false });
     expect(asked).toHaveLength(0);
   });
@@ -135,7 +160,7 @@ describe('rule discovery', () => {
   it('reports a judge failure and caches nothing', async () => {
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
     const store = memoryStore();
-    const found = await discoverRules(memorySource(files), rules(), off, store);
+    const found = await discoverRules(memorySource(files), rules(), off, store, now);
     expect(found).toMatchObject({ docs: [], rules: [], error: 'disabled: off', cached: false });
     expect(store.map.size).toBe(0);
   });
@@ -171,7 +196,7 @@ describe('rules subject', () => {
   const files = { 'CONTRIBUTING.md': '# Rules\n\n- No em dashes.\n- Tests must pass.\n' };
 
   it('carries the discovered rules, names the documents in rules.present, and sends each rule once in its question', async () => {
-    const s = await rulesSubject({ source: memorySource(files), judge: yesJudge(), store: memoryStore() }, { kind: 'text', ref: 'hello' }, resolveConfig(undefined));
+    const s = await rulesSubject({ source: memorySource(files), judge: yesJudge(), store: memoryStore(), now }, { kind: 'text', ref: 'hello' }, resolveConfig(undefined));
     expect(s.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Rules: No em dashes.' }, { source: 'CONTRIBUTING.md', text: 'Rules: Tests must pass.' }]);
     expect(s.facts['docs']).toEqual(['CONTRIBUTING.md']);
     expect(s.judgeError).toBeUndefined();
@@ -185,7 +210,7 @@ describe('rules subject', () => {
 
   it('says the rules came from the cache', async () => {
     const store = memoryStore();
-    const host = { source: memorySource(files), judge: yesJudge(), store };
+    const host = { source: memorySource(files), judge: yesJudge(), store, now };
     await rulesSubject(host, { kind: 'text', ref: 'a' }, resolveConfig(undefined));
     const s = await rulesSubject(host, { kind: 'text', ref: 'b' }, resolveConfig(undefined));
     const report = await runPack(BUILTIN_PACKS['rules']!, s, yesJudge(), resolveConfig(undefined));
@@ -194,7 +219,7 @@ describe('rules subject', () => {
 
   it('carries a discovery failure into the report as an unknown verdict', async () => {
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'unavailable', message: 'down', backend: 'off' }) };
-    const s = await rulesSubject({ source: memorySource(files), judge: off, store: memoryStore() }, { kind: 'text', ref: 'x' }, resolveConfig(undefined));
+    const s = await rulesSubject({ source: memorySource(files), judge: off, store: memoryStore(), now }, { kind: 'text', ref: 'x' }, resolveConfig(undefined));
     expect(s.judgeError).toBe('rule discovery: unavailable: down');
     const report = await runPack(BUILTIN_PACKS['rules']!, s, off, resolveConfig(undefined));
     expect(report.verdict).toBe('unknown');
