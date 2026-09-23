@@ -24,7 +24,7 @@ export class Gh {
     private readonly cwd: CwdLike = async () => undefined,
   ) {}
 
-  async api(path: string, opts: { etag?: string; accept?: string; paginate?: boolean; method?: string; fields?: Record<string, string>; raw?: boolean } = {}): Promise<ApiResponse> {
+  async api(path: string, opts: { etag?: string; accept?: string; paginate?: boolean; method?: string; fields?: Record<string, string>; input?: unknown; raw?: boolean } = {}): Promise<ApiResponse> {
     const argv = ['gh', 'api', '-i'];
     if (opts.method) argv.push('-X', opts.method);
     // gh refuses a body with terminal escapes (a job log) unless told to pass it through
@@ -33,8 +33,10 @@ export class Gh {
     if (opts.etag) argv.push('-H', `If-None-Match: ${opts.etag}`);
     if (opts.accept) argv.push('-H', `Accept: ${opts.accept}`);
     for (const [k, v] of Object.entries(opts.fields ?? {})) argv.push('-f', `${k}=${v}`);
+    // a json request body goes on stdin, so no text passes through argv
+    if (opts.input !== undefined) argv.push('--input', '-');
     argv.push(path);
-    const result = await this.run(argv, { cwd: await this.cwd(), timeoutMs: 60_000 });
+    const result = await this.run(argv, { cwd: await this.cwd(), timeoutMs: 60_000, ...(opts.input !== undefined ? { stdin: JSON.stringify(opts.input) } : {}) });
     const parsed = splitResponse(result.stdout);
     if (parsed.status === 0) {
       throw new GhError(result.stderr.trim() || `gh api ${path} produced no response`, result.exitCode);

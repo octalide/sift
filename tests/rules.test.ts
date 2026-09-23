@@ -5,7 +5,7 @@ import { rulesSubject } from '../src/repo/subjects.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { runPack } from '../src/packs/run.ts';
-import { candidate, checkoutSource, discoverRules, excluded, forgeSource, ruleDoc } from '../src/rules/discover.ts';
+import { candidate, checkoutSource, contributingGuide, discoverRules, excluded, forgeSource, ruleDoc } from '../src/rules/discover.ts';
 import { ruleParagraphs } from '../src/rules/paragraphs.ts';
 import { rulesKeys, STALE_MS, StoreKeys } from '../src/keys.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -14,6 +14,7 @@ import { memorySource, memoryStore, yesJudge } from './fake-source.ts';
 // a fixed clock: the cache's read mark is not what these tests check
 const now = () => 1;
 const D = 24 * 3600 * 1000;
+const quiet = () => {};
 
 const rules = (over: Partial<typeof DEFAULT_CONFIG.rules> = {}) => ({ ...DEFAULT_CONFIG.rules, ...over });
 
@@ -66,36 +67,57 @@ describe('rule discovery', () => {
     'README.md': '# sift\n\nA plugin that judges things.\n\nInstall it with npm.\n',
     'CONTRIBUTING.md': '# Contributing\n\nThanks for helping out.\n\n- Conventional commits, the issue number as the scope.\n- No em dashes anywhere.\n',
     'docs/design/notes.md': '# Notes\n\nThe watcher polls conditionally.\n',
+    'docs/style.md': '# Style\n\nA few notes on style.\n\n- Never a semicolon.\n',
     'src/README.md': '# src\n\nNever a candidate.\n',
     '.github/PULL_REQUEST_TEMPLATE.md': '## Summary\n\n## Testing\n',
   };
-  const isRuleDoc = (p: string) => (p === 'CONTRIBUTING.md' ? 0.9 : 0.1);
-  const isRule = (t: string) => (/commits|em dashes|must/.test(t) ? 0.9 : 0.2);
+  // the style guide is unclear to the judge, everything else confidently no rules; the contributing guide is never asked
+  const isRuleDoc = (p: string) => (p === 'docs/style.md' ? 0.5 : 0.1);
+  const isRule = (t: string) => (/commits|em dashes|must|Never/.test(t) ? 0.9 : 0.2);
 
-  it('ranks the candidates, then the paragraphs of the kept documents, and names the documents used', async () => {
+  it('ranks the candidates, keeps all but the ruled out and the contributing guide unjudged, then ranks the paragraphs of the kept', async () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
     const store = memoryStore();
-    const found = await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now);
+    const logged: string[] = [];
+    const found = await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now, (t) => logged.push(t));
     expect(found).toEqual({
-      docs: ['CONTRIBUTING.md'],
+      docs: ['CONTRIBUTING.md', 'docs/style.md'],
       rules: [
         { source: 'CONTRIBUTING.md', text: 'Contributing: Conventional commits, the issue number as the scope.' },
         { source: 'CONTRIBUTING.md', text: 'Contributing: No em dashes anywhere.' },
+        { source: 'docs/style.md', text: 'Style: Never a semicolon.' },
       ],
-      candidates: 4,
-      kept: 1,
+      candidates: 5,
+      kept: ['CONTRIBUTING.md', 'docs/style.md'],
       cached: false,
     });
-    // one batched request per rank: the documents with a path and an excerpt, then the paragraphs of the kept one alone
+    // one batched request per rank: the judged documents with a path, an excerpt and their headings, then the paragraphs of the kept
     expect(asked).toHaveLength(2);
-    const docs = (asked[0]!.state as { items: { k: number; path: string; excerpt: string }[] }).items;
-    expect(docs.map((d) => d.path)).toEqual(['.github/PULL_REQUEST_TEMPLATE.md', 'CONTRIBUTING.md', 'README.md', 'docs/design/notes.md']);
-    expect(docs[1]!.excerpt).toBe('# Contributing\nThanks for helping out.\n- Conventional commits, the issue number as the scope.\n- No em dashes anywhere.');
-    expect(asked[0]!.instructions[1]).toBe('The document CONTRIBUTING.md states rules contributors to this repository must follow.');
+    const docs = (asked[0]!.state as { items: { k: number; path: string; excerpt: string; headings: string[] }[] }).items;
+    expect(docs.map((d) => d.path)).toEqual(['.github/PULL_REQUEST_TEMPLATE.md', 'README.md', 'docs/design/notes.md', 'docs/style.md']);
+    expect(docs[3]).toEqual({ k: 3, path: 'docs/style.md', excerpt: '# Style\nA few notes on style.\n- Never a semicolon.', headings: ['Style'] });
+    expect(docs[0]!.headings).toEqual(['Summary', 'Testing']);
+    expect(asked[0]!.instructions[3]).toBe('The document docs/style.md states rules contributors to this repository must follow.');
     const paragraphs = (asked[1]!.state as { items: Record<string, unknown>[] }).items;
-    expect(paragraphs).toEqual([{ k: 0, doc: 'CONTRIBUTING.md' }, { k: 1, doc: 'CONTRIBUTING.md' }, { k: 2, doc: 'CONTRIBUTING.md' }]);
+    expect(paragraphs.map((p) => p['doc'])).toEqual(['CONTRIBUTING.md', 'CONTRIBUTING.md', 'CONTRIBUTING.md', 'docs/style.md', 'docs/style.md']);
     expect(asked[1]!.instructions[0]).toBe('This paragraph is a rule a contribution can break, not narrative or instruction: Contributing: Thanks for helping out.');
-    expect(store.map.get('rules:mem')).toMatchObject({ version: 1, docs: ['CONTRIBUTING.md'] });
+    expect(store.map.get('rules:mem')).toMatchObject({ version: 2, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
+    // the kept set is in the session log by name; a cached answer logs nothing new
+    expect(logged).toEqual(['sift rules mem: 5 candidates, kept CONTRIBUTING.md, docs/style.md; 3 rules from CONTRIBUTING.md, docs/style.md']);
+    await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now, (t) => logged.push(t));
+    expect(logged).toHaveLength(1);
+  });
+
+  it('keeps the contributing guide by name at the root, docs/ or .github/, whatever the judge would say of it', async () => {
+    for (const p of ['CONTRIBUTING.md', 'contributing.rst', 'docs/CONTRIBUTING.md', '.github/contributing.md']) expect(contributingGuide(p), p).toBe(true);
+    for (const p of ['src/CONTRIBUTING.md', 'docs/contributing-notes.md', 'CONTRIBUTORS.md', 'README.md', 'CONTRIBUTING']) expect(contributingGuide(p), p).toBe(false);
+    const asked: { state: unknown; instructions: string[] }[] = [];
+    const found = await discoverRules(memorySource({ '.github/CONTRIBUTING.md': '# Contributing\n\n- Commits must be signed.\n' }), rules(), judgeBy(() => 0, isRule, asked), memoryStore(), now, quiet);
+    expect(found.kept).toEqual(['.github/CONTRIBUTING.md']);
+    expect(found.rules).toEqual([{ source: '.github/CONTRIBUTING.md', text: 'Contributing: Commits must be signed.' }]);
+    // no document question was asked, only the paragraphs
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.instructions[0]).toMatch(/^This paragraph is a rule/);
   });
 
   it('marks the scope read on every discovery, so the sweep keeps a cache in use and removes one no longer read', async () => {
@@ -104,11 +126,11 @@ describe('rule discovery', () => {
     const tick = () => clock.now;
     const keys = new StoreKeys({ store, now: tick, log: () => {} });
     const judge = judgeBy(isRuleDoc, isRule);
-    await discoverRules(memorySource(files), rules(), judge, store, tick);
+    await discoverRules(memorySource(files), rules(), judge, store, tick, quiet);
     expect(store.map.get(rulesKeys('mem').seen)).toBe(100 * D);
     clock.now += STALE_MS - 1;
     // a cached answer marks the read too
-    expect((await discoverRules(memorySource(files), rules(), judge, store, tick)).cached).toBe(true);
+    expect((await discoverRules(memorySource(files), rules(), judge, store, tick, quiet)).cached).toBe(true);
     expect(store.map.get(rulesKeys('mem').seen)).toBe(clock.now);
     clock.now += STALE_MS - 1;
     await keys.sweep('me');
@@ -122,47 +144,132 @@ describe('rule discovery', () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
     const store = memoryStore();
     const judge = judgeBy(isRuleDoc, isRule, asked);
-    const first = await discoverRules(memorySource(files), rules(), judge, store, now);
-    const again = await discoverRules(memorySource(files), rules(), judge, store, now);
+    const first = await discoverRules(memorySource(files), rules(), judge, store, now, quiet);
+    const again = await discoverRules(memorySource(files), rules(), judge, store, now, quiet);
     expect(again).toEqual({ ...first, cached: true });
     expect(asked).toHaveLength(2);
     const edited = { ...files, 'CONTRIBUTING.md': `${files['CONTRIBUTING.md']}- Tests must pass.\n` };
-    const third = await discoverRules(memorySource(edited), rules(), judge, store, now);
+    const third = await discoverRules(memorySource(edited), rules(), judge, store, now, quiet);
     expect(third.cached).toBe(false);
     expect(third.rules.map((r) => r.text)).toContain('Contributing: Tests must pass.');
     expect(asked).toHaveLength(4);
-    await discoverRules(memorySource(edited), rules({ exclude: ['README.md'] }), judge, store, now);
+    await discoverRules(memorySource(edited), rules({ exclude: ['README.md'] }), judge, store, now, quiet);
     expect(asked).toHaveLength(6);
-    await discoverRules(memorySource(edited, { scope: 'other' }), rules({ exclude: ['README.md'] }), judge, store, now);
+    await discoverRules(memorySource(edited, { scope: 'other' }), rules({ exclude: ['README.md'] }), judge, store, now, quiet);
     expect(asked).toHaveLength(8);
   });
 
   it('adds listed docs without judging them as documents, removes excluded paths, and reads forge templates', async () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
     const source = memorySource(files, { templates: { '.github/PULL_REQUEST_TEMPLATE.md': 'dup', '.github/ISSUE_TEMPLATE/bug.yml': 'name: Bug\nbody:\n  - type: markdown\n' }, remote: { 'o/r:MIGRATION.md@v2': '# Migration\n\nCallers must pass len.\n' } });
-    const found = await discoverRules(source, rules({ docs: ['README.md', 'o/r:MIGRATION.md@v2'], exclude: ['docs/**'] }), judgeBy(() => 0.1, isRule, asked), memoryStore(), now);
+    const found = await discoverRules(source, rules({ docs: ['README.md', 'o/r:MIGRATION.md@v2'], exclude: ['docs/**'] }), judgeBy(() => 0.1, isRule, asked), memoryStore(), now, quiet);
     const docs = (asked[0]!.state as { items: { path: string }[] }).items.map((d) => d.path);
-    expect(docs).toEqual(['.github/PULL_REQUEST_TEMPLATE.md', 'CONTRIBUTING.md', '.github/ISSUE_TEMPLATE/bug.yml']);
+    expect(docs).toEqual(['.github/PULL_REQUEST_TEMPLATE.md', '.github/ISSUE_TEMPLATE/bug.yml']);
     expect(found.candidates).toBe(3);
-    expect(found.kept).toBe(0);
+    // the listed docs and the contributing guide, never a judged document ruled out
+    expect(found.kept).toEqual(['README.md', 'o/r:MIGRATION.md@v2', 'CONTRIBUTING.md']);
     // README.md holds no rule, so it is not named as used; the remote doc is
-    expect(found.docs).toEqual(['o/r:MIGRATION.md@v2']);
-    expect(found.rules).toEqual([{ source: 'o/r:MIGRATION.md@v2', text: 'Migration: Callers must pass len.' }]);
+    expect(found.docs).toEqual(['o/r:MIGRATION.md@v2', 'CONTRIBUTING.md']);
+    expect(found.rules[0]).toEqual({ source: 'o/r:MIGRATION.md@v2', text: 'Migration: Callers must pass len.' });
   });
 
   it('finds nothing in a repository without prose and asks nothing', async () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
-    const found = await discoverRules(memorySource({ 'src/a.ts': 'x' }), rules(), yesJudge(0.9, asked), memoryStore(), now);
-    expect(found).toEqual({ docs: [], rules: [], candidates: 0, kept: 0, cached: false });
+    const found = await discoverRules(memorySource({ 'src/a.ts': 'x' }), rules(), yesJudge(0.9, asked), memoryStore(), now, quiet);
+    expect(found).toEqual({ docs: [], rules: [], candidates: 0, kept: [], cached: false });
     expect(asked).toHaveLength(0);
   });
 
   it('reports a judge failure and caches nothing', async () => {
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
     const store = memoryStore();
-    const found = await discoverRules(memorySource(files), rules(), off, store, now);
+    const logged: string[] = [];
+    const found = await discoverRules(memorySource(files), rules(), off, store, now, (t) => logged.push(t));
     expect(found).toMatchObject({ docs: [], rules: [], error: 'disabled: off', cached: false });
     expect(store.map.size).toBe(0);
+    expect(logged).toEqual(['sift rules mem: discovery failed, nothing cached (disabled: off)']);
+  });
+
+  // an outage at either rank step, or a judge that answers ok with an item missing, leaves no cache, and the next call asks again
+  it.each([
+    ['an outage at the document step', (q: string) => q.startsWith('The document'), false],
+    ['an outage at the paragraph step', (q: string) => q.startsWith('This paragraph'), false],
+    ['an answer missing at the document step', (q: string) => q.startsWith('The document'), true],
+    ['an answer missing at the paragraph step', (q: string) => q.startsWith('This paragraph'), true],
+  ])('caches nothing after %s and rediscovers on the next call', async (_, hit, omit) => {
+    const healthy = judgeBy(isRuleDoc, isRule);
+    const failing: Judge = {
+      name: 'fake',
+      ask: async (state, q) => {
+        if (!Object.values(q).some((x) => hit(x.instructions))) return healthy.ask(state, q);
+        if (!omit) return { ok: false, reason: 'unavailable', message: 'http 403: forbidden', backend: 'fake' };
+        const answered = await healthy.ask(state, q);
+        if (!answered.ok) return answered;
+        const [first, ...rest] = Object.entries(answered.answers);
+        return { ...answered, answers: Object.fromEntries(first ? rest : []) };
+      },
+    };
+    const store = memoryStore();
+    const down = await discoverRules(memorySource(files), rules(), failing, store, now, quiet);
+    expect(down.error).toMatch(omit ? /^malformed: no answer for / : /^unavailable: http 403/);
+    expect(down.rules).toEqual([]);
+    expect(store.map.size).toBe(0);
+    const asked: { state: unknown; instructions: string[] }[] = [];
+    const up = await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now, quiet);
+    expect(up.cached).toBe(false);
+    expect(asked).toHaveLength(2);
+    expect(up.docs).toEqual(['CONTRIBUTING.md', 'docs/style.md']);
+    expect(store.map.get(rulesKeys('mem').cache)).toMatchObject({ docs: ['CONTRIBUTING.md', 'docs/style.md'] });
+  });
+
+  // briar-systems/mach's root: the contributing guide opens with thanks and build steps, so its excerpt reads as a tutorial
+  it('finds the contributing rules of a mach-shaped tree', async () => {
+    const mach = {
+      'CHANGELOG.md': '# Changelog\n\nAll notable changes to this project will be documented in this file.\n\n## [Unreleased]\n\n### Added\n\n- A shared library build warns at a `fwd` of a generic.\n',
+      'CODE_OF_CONDUCT.md': '# Contributor Covenant Code of Conduct\n\n## Our Pledge\n\nWe pledge to make participation in our community a harassment-free experience for everyone.\n\n## Our Standards\n\n- Using welcoming and inclusive language.\n',
+      'CONTRIBUTING.md': [
+        '# Contributing to Mach',
+        'Thank you for your interest in contributing to Mach. Be respectful, constructive, and professional.',
+        '## Building',
+        'Mach is self-hosting, so building it needs an existing Mach compiler.',
+        '```bash\ngit clone https://github.com/briar-systems/mach.git\ncd mach\nmach build .\n```',
+        '## Branches',
+        'Feature and fix branches are named feat/<issue> or fix/<issue>, branch off dev and open their pull request against dev.',
+        '## Commits',
+        'Commit messages must follow conventional commits with the issue number as the scope: fix(#1234): description.',
+        '## Pull requests',
+        'Pull requests merge with a merge commit, never squash or rebase.',
+      ].join('\n\n'),
+      'README.md': '# MACH\n\n# Overview\n\nMach is a self hosted, statically-typed, compiled systems language.\n',
+      'SECURITY.md': '# Security Policy\n\n## Reporting a Vulnerability\n\nPlease report security vulnerabilities privately rather than opening a public issue.\n',
+      'doc/language/secrecy.md': '# Secrecy\n\nNot a candidate: doc/ is not docs/.\n',
+      '.github/workflows/ci.yml': 'name: CI\n',
+    };
+    // what jev said of mach's excerpts: the code of conduct 0.83, the contributing guide 0.63 (unclear), security 0.21, the rest 0.03
+    const docScore: Record<string, number> = { 'CODE_OF_CONDUCT.md': 0.83, 'CONTRIBUTING.md': 0.63, 'SECURITY.md': 0.21, 'CHANGELOG.md': 0.03, 'README.md': 0.03 };
+    const isMachRule = (t: string) => (/must|never|named|report security|welcoming/i.test(t) ? 0.9 : 0.1);
+    const asked: { state: unknown; instructions: string[] }[] = [];
+    const logged: string[] = [];
+    const found = await discoverRules(memorySource(mach), rules(), judgeBy((p) => docScore[p]!, isMachRule, asked), memoryStore(), now, (t) => logged.push(t));
+    expect(found.candidates).toBe(5);
+    expect(found.kept).toEqual(['CONTRIBUTING.md', 'CODE_OF_CONDUCT.md']);
+    expect(found.docs).toEqual(['CONTRIBUTING.md', 'CODE_OF_CONDUCT.md']);
+    expect(found.rules.filter((r) => r.source === 'CONTRIBUTING.md').map((r) => r.text)).toEqual([
+      'Branches: Feature and fix branches are named feat/<issue> or fix/<issue>, branch off dev and open their pull request against dev.',
+      'Commits: Commit messages must follow conventional commits with the issue number as the scope: fix(#1234): description.',
+      'Pull requests: Pull requests merge with a merge commit, never squash or rebase.',
+    ]);
+    // the contributing guide is never put to the document question
+    const judged = (asked[0]!.state as { items: { path: string }[] }).items.map((d) => d.path);
+    expect(judged).toEqual(['CHANGELOG.md', 'CODE_OF_CONDUCT.md', 'README.md', 'SECURITY.md']);
+    expect(logged).toEqual(['sift rules mem: 5 candidates, kept CONTRIBUTING.md, CODE_OF_CONDUCT.md; 4 rules from CONTRIBUTING.md, CODE_OF_CONDUCT.md']);
+  });
+
+  it('keeps an unclear document the contributing prior does not cover, and drops one the judge rules out', async () => {
+    const tree = { 'docs/workflow.md': '# Workflow\n\nHow we work.\n\n## Commits\n\n- Commits must be small.\n', 'SECURITY.md': '# Security\n\nReport privately.\n' };
+    const found = await discoverRules(memorySource(tree), rules(), judgeBy((p) => (p === 'docs/workflow.md' ? 0.63 : 0.21), isRule), memoryStore(), now, quiet);
+    expect(found.kept).toEqual(['docs/workflow.md']);
+    expect(found.rules).toEqual([{ source: 'docs/workflow.md', text: 'Commits: Commits must be small.' }]);
   });
 
   it('reads a checkout from git ls-files and the working tree, a repository from the forge tree', async () => {
@@ -196,7 +303,7 @@ describe('rules subject', () => {
   const files = { 'CONTRIBUTING.md': '# Rules\n\n- No em dashes.\n- Tests must pass.\n' };
 
   it('carries the discovered rules, names the documents in rules.present, and sends each rule once in its question', async () => {
-    const s = await rulesSubject({ source: memorySource(files), judge: yesJudge(), store: memoryStore(), now }, { kind: 'text', ref: 'hello' }, resolveConfig(undefined));
+    const s = await rulesSubject({ source: memorySource(files), judge: yesJudge(), store: memoryStore(), now, notice: quiet }, { kind: 'text', ref: 'hello' }, resolveConfig(undefined));
     expect(s.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Rules: No em dashes.' }, { source: 'CONTRIBUTING.md', text: 'Rules: Tests must pass.' }]);
     expect(s.facts['docs']).toEqual(['CONTRIBUTING.md']);
     expect(s.judgeError).toBeUndefined();
@@ -210,7 +317,7 @@ describe('rules subject', () => {
 
   it('says the rules came from the cache', async () => {
     const store = memoryStore();
-    const host = { source: memorySource(files), judge: yesJudge(), store, now };
+    const host = { source: memorySource(files), judge: yesJudge(), store, now, notice: quiet };
     await rulesSubject(host, { kind: 'text', ref: 'a' }, resolveConfig(undefined));
     const s = await rulesSubject(host, { kind: 'text', ref: 'b' }, resolveConfig(undefined));
     const report = await runPack(BUILTIN_PACKS['rules']!, s, yesJudge(), resolveConfig(undefined));
@@ -219,12 +326,12 @@ describe('rules subject', () => {
 
   it('carries a discovery failure into the report as an unknown verdict', async () => {
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'unavailable', message: 'down', backend: 'off' }) };
-    const s = await rulesSubject({ source: memorySource(files), judge: off, store: memoryStore(), now }, { kind: 'text', ref: 'x' }, resolveConfig(undefined));
+    const s = await rulesSubject({ source: memorySource(files), judge: off, store: memoryStore(), now, notice: quiet }, { kind: 'text', ref: 'x' }, resolveConfig(undefined));
     expect(s.judgeError).toBe('rule discovery: unavailable: down');
     const report = await runPack(BUILTIN_PACKS['rules']!, s, off, resolveConfig(undefined));
     expect(report.verdict).toBe('unknown');
     expect(report.judgeError).toBe('rule discovery: unavailable: down');
-    expect(report.mechanical).toEqual([{ check: 'rules.present', severity: 'info', message: 'no rules found in 1 candidate document' }]);
+    expect(report.mechanical).toEqual([{ check: 'rules.present', severity: 'info', message: 'no rules found in 1 candidate document, kept CONTRIBUTING.md' }]);
   });
 
   it('parses paragraphs, list items and table rows', () => {

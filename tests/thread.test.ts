@@ -11,11 +11,13 @@ import { CHATTER, DESIGN, HELD_BEHIND, HOLD, OPEN_QUESTION, OUTSIDER_OVERRIDE, R
 const forgeFor = (issue: typeof OPEN_QUESTION, comments: Comment[]) =>
   fakeForge({ issue: async () => issue, comments: async () => comments, openIssues: async () => [HELD_BEHIND, { number: issue.number, title: issue.title }] });
 
+const ISSUE = { pack: 'issue', kind: 'issue' } as const;
+
 const say = (login: string, association: string, at: string, body: string): Comment => ({ author: { login, bot: false }, association, createdAt: at, body });
 
 describe('issue thread', () => {
   it('carries every comment oldest first with its author, standing and time', async () => {
-    const s = await issueSubject(forgeFor(OPEN_QUESTION, [RULING, OUTSIDER_OVERRIDE, HOLD]), 'o/r', 3778, DEFAULT_CONFIG);
+    const s = await issueSubject(forgeFor(OPEN_QUESTION, [RULING, OUTSIDER_OVERRIDE, HOLD]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     const comments = s.state['comments'] as ThreadComment[];
     expect(comments.map((c) => [c.by, c.association, c.at])).toEqual([
       ['octalide', 'MEMBER', '2026-09-22T20:29:33Z'],
@@ -28,7 +30,7 @@ describe('issue thread', () => {
   });
 
   it('keeps a ruling that six other comments follow', async () => {
-    const s = await issueSubject(forgeFor(OPEN_QUESTION, [RULING, ...CHATTER]), 'o/r', 3778, DEFAULT_CONFIG);
+    const s = await issueSubject(forgeFor(OPEN_QUESTION, [RULING, ...CHATTER]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     const comments = s.state['comments'] as ThreadComment[];
     expect(comments).toHaveLength(7);
     expect(comments[0]).toMatchObject({ by: 'octalide', association: 'MEMBER', text: RULING.body });
@@ -51,19 +53,19 @@ describe('issue thread', () => {
   });
 
   it('offers the author and maintainer comments as rulings, never an outsider', async () => {
-    const s = await issueSubject(forgeFor(OPEN_QUESTION, [RULING, OUTSIDER_OVERRIDE, HOLD]), 'o/r', 3778, DEFAULT_CONFIG);
+    const s = await issueSubject(forgeFor(OPEN_QUESTION, [RULING, OUTSIDER_OVERRIDE, HOLD]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     expect(Object.keys(s.options['rulings']!)).toEqual(['octalide at 2026-09-22T20:29:33Z', 'octalide at 2026-09-22T21:45:34Z']);
     expect(s.facts['has_rulings']).toBe(true);
-    const outsider = await issueSubject(forgeFor(OPEN_QUESTION, [OUTSIDER_OVERRIDE]), 'o/r', 3778, DEFAULT_CONFIG);
+    const outsider = await issueSubject(forgeFor(OPEN_QUESTION, [OUTSIDER_OVERRIDE]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     expect(outsider.options['rulings']).toEqual({});
     expect(outsider.facts['has_rulings']).toBe(false);
-    const bare = await issueSubject(forgeFor(TWO_DESIGNS, []), 'o/r', 3747, DEFAULT_CONFIG);
+    const bare = await issueSubject(forgeFor(TWO_DESIGNS, []), 'o/r', 3747, DEFAULT_CONFIG, ISSUE);
     expect(bare.facts['is_new']).toBe(true);
     expect(rulingsOf(fakeForge(), 'octalide', threadOf(fakeForge(), 'octalide', [DESIGN]))).toEqual({ 'octalide at 2026-09-22T12:00:00Z': expect.stringMatching(/^Design \(steward decision/) });
   });
 
   it('asks which comment rules and names it in the report', async () => {
-    const s = await issueSubject(forgeFor(OPEN_QUESTION, [RULING, OUTSIDER_OVERRIDE]), 'o/r', 3778, DEFAULT_CONFIG);
+    const s = await issueSubject(forgeFor(OPEN_QUESTION, [RULING, OUTSIDER_OVERRIDE]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     const { questions } = materialize(BUILTIN_PACKS['issue']!, s);
     expect(questions['ruling']).toMatchObject({ type: 'choice', criteria: { 'octalide at 2026-09-22T20:29:33Z': expect.any(String), none: expect.any(String) } });
     for (const id of ['substantive', 'implementable', 'scope_clear', 'blocked_by']) expect(questions[id]!.instructions).toMatch(/comment/);
@@ -80,7 +82,7 @@ describe('issue thread', () => {
     };
     const report = await runPack(BUILTIN_PACKS['issue']!, s, judge, DEFAULT_CONFIG);
     expect(formatReport(report)).toContain('ruling = octalide at 2026-09-22T20:29:33Z (0.90)');
-    const outsider = await issueSubject(forgeFor(OPEN_QUESTION, [OUTSIDER_OVERRIDE]), 'o/r', 3778, DEFAULT_CONFIG);
+    const outsider = await issueSubject(forgeFor(OPEN_QUESTION, [OUTSIDER_OVERRIDE]), 'o/r', 3778, DEFAULT_CONFIG, ISSUE);
     expect(materialize(BUILTIN_PACKS['issue']!, outsider).questions['ruling']).toBeUndefined();
   });
 

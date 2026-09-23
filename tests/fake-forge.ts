@@ -42,6 +42,8 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     },
     jobs: async () => [],
     jobLog: async (_r, id) => ({ job: `job ${id}`, run: '', sha: '', url: '', steps: [] }),
+    post: async (repo, post) => `https://fake/${repo}/${post.kind}/posted`,
+    writeOf: () => undefined,
     ...over,
   };
 }
