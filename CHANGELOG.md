@@ -6,6 +6,8 @@ Notes begin at 0.10.0. Earlier releases, and 0.10.1 and 0.10.2, have no recorded
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-23
+
 This release removes the `ci` pack and is a minor bump on 0.x. Judging CI output cost more than it told: the pack scored every line of a failed job's log, env dumps and YAML keys included, and its headline `own_fault` answered unclear on a failure whose error text was the literal bug the PR fixed.
 
 Removed: the `ci` pack, with its `job:<id>`, `run:<id>`, run id and `text` subject forms, the `log` subject kind and its `log.trimmed` and `log.followed` checks. `grade` refuses `pack: "ci"` with the removal and the command that reads a run's log named, unless a repo-defined pack takes the name, and a repo pack that declares `subject: "log"` is refused at load. No code path sends CI log text to the judge. The `Forge` interface loses `jobs` and `jobLog`, with the `Job`, `JobLog` and `LogStep` types and the workflow file reader that filled a job's needs, and gains `logCommand`, the command a caller runs to read a failed run's log. `Check.id` (a job id) is replaced by `Check.run`, the ci run the check belongs to, read on GitHub from the check run's details url.
