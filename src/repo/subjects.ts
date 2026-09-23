@@ -318,8 +318,8 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
 // what the rules are read against: an issue, or free text and, when known, what it is about to become in the words the judge reads
 export type RulesTarget = { kind: 'issue'; number: number } | { kind: 'text'; ref: string; about?: string };
 
-// the checkout or repository the rules are read from, the judge that discovers them and the store that caches them
-export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; judge: Judge; store: StoreLike };
+// the checkout or repository the rules are read from, the judge that discovers them, the store that caches them and the clock that marks the cache read
+export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; judge: Judge; store: StoreLike; now: () => number };
 
 export async function rulesSubject(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject> {
   const { forge, repo } = host;
@@ -335,7 +335,7 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
     subject = { kind: 'text', ...(about ? { about } : {}), text: truncate(target.ref, BODY_CAP) };
   }
   // the subject is read, and a pull request refused, before discovery spends judge calls
-  const found = await discoverRules(host.source, config.rules, host.judge, host.store);
+  const found = await discoverRules(host.source, config.rules, host.judge, host.store, host.now);
   const rules = [...found.rules];
   const total = rules.length;
   rules.splice(config.rules.maxRules);
@@ -360,6 +360,7 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
 // a plan for an issue: the issue's title and body beside the plan text, so the judge reads the plan against what was asked
 export async function planSubject(forge: Forge, repo: string, n: number, plan: string): Promise<Subject> {
   const issue = await forge.issue(repo, n);
+  if (issue.pr) throw refusal('issue', `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
   return {
     kind: 'plan',
     ref: `${repo}#${n}`,

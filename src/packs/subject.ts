@@ -41,7 +41,7 @@ export function expectedSubject(kind: ParsedKind, forge: Pick<Forge, 'name'>): s
     case 'release':
       return 'a tag or version (v1.4.0), or "release" for the required bump alone';
     case 'mixed':
-      return `an issue or pull request number (N or #N), a ${forge.name} issue or pull request URL, a commit ref or range, or free text`;
+      return `an issue number (N or #N), a ${forge.name} issue or pull request URL, a commit ref or range, or free text`;
     case 'rules':
       return `an issue number (N or #N), a ${forge.name} issue URL, or free text (in text)`;
   }

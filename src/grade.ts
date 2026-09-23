@@ -5,7 +5,7 @@ import type { Judge } from './judge/types.ts';
 import { indexTree, treeSubject } from './locate/tree.ts';
 import type { StoreLike } from './log.ts';
 import { runPack } from './packs/run.ts';
-import { parseSubject, type ParsedKind } from './packs/subject.ts';
+import { parseSubject, refusal, type ParsedKind } from './packs/subject.ts';
 import type { Report, Subject } from './packs/types.ts';
 import type { Checkout, CheckoutFs, Checkouts } from './repo/checkout.ts';
 import { defaultTarget, type RepoConfig } from './repo/config.ts';
@@ -27,6 +27,7 @@ export type GradeHost = {
   forge: Forge;
   judge: Judge;
   store: StoreLike;
+  now: () => number;
   fs: CheckoutFs;
   checkouts: Checkouts;
 };
@@ -116,7 +117,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, kind: strin
         at = checkout.repo;
       } else at = needRepo();
       const config = await configOf(at);
-      const rules = { forge, repo, source: ruleSource(host, scope, at), judge: host.judge, store: host.store };
+      const rules = { forge, repo, source: ruleSource(host, scope, at), judge: host.judge, store: host.store, now: host.now };
       if (p.kind === 'text') return { subject: await rulesSubject(rules, { kind: 'text', ref: opts.text ?? p.text }, config), config };
       return { subject: await rulesSubject({ ...rules, repo: p.repo ?? needRepo() }, { kind: 'issue', number: p.number }, config), config };
     }
@@ -132,6 +133,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, kind: strin
       } else {
         const at = p.repo ?? needRepo();
         const item = p.kind === 'issue' ? await forge.issue(at, p.number) : await forge.pull(at, p.number);
+        if (p.kind === 'issue' && item.pr) throw refusal('mixed', `#${p.number}`, `subject is ${at}#${p.number}, a pull request, not an issue`, forge);
         text = `${item.title}\n\n${item.body}`;
         label = `${at}#${p.number}`;
       }
