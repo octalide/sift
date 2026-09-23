@@ -59,7 +59,7 @@
     "pruneFloorTokens": {
       "type": "number",
       "title": "Prune floor (estimated tokens)",
-      "default": 4000,
+      "default": 20000,
       "description": "Tool outputs under this estimated size pass through untouched."
     },
     "pruneChunkLines": {
