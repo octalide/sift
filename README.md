@@ -476,6 +476,10 @@ CI runs the same four commands on every pull request and reports them through a 
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
 - The prune module estimates tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT).
 
+## Unreleased
+
+Fixed: a subject refusal names the pack that was asked, where it named the kind of subject the pack parses. `locate` refused as `mixed pack:` and `plan` as `issue pack:`, both when parsing and after the forge read, and a repo-defined pack refused under its subject kind. Every refusal now starts with the pack the caller named, the missing subject, a missing plan and a malformed `ci` subject included, and still names the forms its subject kind takes.
+
 ## Changes in 0.12.1
 
 Fixed: a bare number given to the `locate` or `plan` pack that names a pull request is refused with the forms the pack takes, as `issue` and `rules` already were, where it was read as an issue. The forms `locate` names no longer offer a pull request number: a bare number there names an issue, and a pull request is given by URL.

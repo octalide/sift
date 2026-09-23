@@ -6,7 +6,7 @@ import { indexTree, treeSubject } from './locate/tree.ts';
 import type { StoreLike } from './log.ts';
 import { runPack } from './packs/run.ts';
 import { parseSubject, refusal, type ParsedKind } from './packs/subject.ts';
-import type { Report, Subject } from './packs/types.ts';
+import type { Pack, Report, Subject } from './packs/types.ts';
 import type { Checkout, CheckoutFs, Checkouts } from './repo/checkout.ts';
 import { defaultTarget, type RepoConfig } from './repo/config.ts';
 import { localSource, remoteSource } from './repo/source.ts';
@@ -40,13 +40,13 @@ export type Graded = { report: Report; subject: Subject };
 export async function grade(host: GradeHost, scope: GradeScope, packName: string, ref: string, opts: GradeOptions = {}): Promise<Graded> {
   const pack = scope.checkout.packs[packName];
   if (!pack) throw new Error(`unknown pack ${packName} (have: ${Object.keys(scope.checkout.packs).join(', ')})`);
-  const { subject, config } = await subjectFor(host, scope, pack.subject, ref, opts);
+  const { subject, config } = await subjectFor(host, scope, pack, ref, opts);
   const report = await runPack(pack, subject, host.judge, config, { top: opts.top });
   return { report, subject };
 }
 
-// the subject a pack grades and the conventions of the repository it is in
-export async function subjectFor(host: GradeHost, scope: GradeScope, kind: string, ref: string, opts: GradeOptions = {}): Promise<{ subject: Subject; config: RepoConfig }> {
+// the subject a pack grades and the conventions of the repository it is in; a refusal names the pack by the name it was asked for
+export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<Pack, 'name' | 'subject'>, ref: string, opts: GradeOptions = {}): Promise<{ subject: Subject; config: RepoConfig }> {
   const { forge } = host;
   const { checkout } = scope;
   const repo = opts.repo ?? checkout.repo;
@@ -67,13 +67,13 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, kind: strin
   // release and rules read the checkout when it serves the repo; a named cwd always does, else another repo comes from the forge
   const readsCheckout = () => checkout.git !== undefined && (scope.named || opts.repo === undefined || opts.repo === checkout.repo);
   // the subject is parsed, and a bad one refused, before any forge request; a url names its own repo
-  const parsed = <K extends ParsedKind>(k: K) => parseSubject(k, ref, forge, opts.repo);
-  switch (kind) {
+  const parsed = <K extends ParsedKind>(kind: K) => parseSubject({ pack: pack.name, kind }, ref, forge, opts.repo);
+  switch (pack.subject) {
     case 'issue': {
       const p = parsed('issue');
       const at = p.repo ?? needRepo();
       const config = await configOf(at);
-      return { subject: await issueSubject(forge, at, p.number, config), config };
+      return { subject: await issueSubject(forge, at, p.number, config, { pack: pack.name, kind: 'issue' }), config };
     }
     case 'pr': {
       const p = parsed('pr');
@@ -119,7 +119,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, kind: strin
       const config = await configOf(at);
       const rules = { forge, repo, source: ruleSource(host, scope, at), judge: host.judge, store: host.store, now: host.now };
       if (p.kind === 'text') return { subject: await rulesSubject(rules, { kind: 'text', ref: opts.text ?? p.text }, config), config };
-      return { subject: await rulesSubject({ ...rules, repo: p.repo ?? needRepo() }, { kind: 'issue', number: p.number }, config), config };
+      return { subject: await rulesSubject({ ...rules, repo: p.repo ?? needRepo() }, { kind: 'issue', number: p.number, pack: pack.name }, config), config };
     }
     case 'tree': {
       // text is the subject when given; otherwise an issue or pull request is its title and body, anything else the text itself
@@ -133,7 +133,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, kind: strin
       } else {
         const at = p.repo ?? needRepo();
         const item = p.kind === 'issue' ? await forge.issue(at, p.number) : await forge.pull(at, p.number);
-        if (p.kind === 'issue' && item.pr) throw refusal('mixed', `#${p.number}`, `subject is ${at}#${p.number}, a pull request, not an issue`, forge);
+        if (p.kind === 'issue' && item.pr) throw refusal({ pack: pack.name, kind: 'mixed' }, `#${p.number}`, `subject is ${at}#${p.number}, a pull request, not an issue`, forge);
         text = `${item.title}\n\n${item.body}`;
         label = `${at}#${p.number}`;
       }
@@ -146,17 +146,17 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, kind: strin
       return { subject: treeSubject(text, label, index), config: checkout.config };
     }
     case 'plan': {
-      if (opts.text === undefined) throw new Error('the plan pack reads the plan from text: grade(pack: "plan", subject: "<issue number>", text: "<plan>")');
+      if (opts.text === undefined) throw new Error(`${pack.name} pack: no plan; the pack reads the plan from text: grade(pack: "${pack.name}", subject: "<issue number>", text: "<plan>")`);
       const p = parsed('issue');
       const at = p.repo ?? needRepo();
-      return { subject: await planSubject(forge, at, p.number, opts.text), config: await configOf(at) };
+      return { subject: await planSubject(forge, at, p.number, opts.text, pack.name), config: await configOf(at) };
     }
     case 'log': {
       // job:<id> or run:<id> through the forge, a bare number is a run, text is the log itself
       const config = await configOf(repo);
       if (opts.text !== undefined) return { subject: await ciSubject(forge, repo, { text: opts.text }), config };
       const m = /^(job|run):(\d+)$|^#?(\d+)$/.exec(ref);
-      if (!m) throw new Error(`log subject: expected run:<id>, job:<id>, a run id, or the log in text, got ${ref}`);
+      if (!m) throw new Error(`${pack.name} pack: expected run:<id>, job:<id>, a run id, or the log in text, got ${ref}`);
       return { subject: await ciSubject(forge, repo, m[1] === 'job' ? { job: m[2]! } : { run: m[2] ?? m[3]! }), config };
     }
     default:

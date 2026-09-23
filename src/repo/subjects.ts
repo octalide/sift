@@ -1,6 +1,6 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
-import { refusal } from '../packs/subject.ts';
+import { refusal, type Asked } from '../packs/subject.ts';
 import type { Check, Comment, Forge } from '../forge/forge.ts';
 import type { Git } from '../forge/git.ts';
 import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, splitLog, type Bump, type ParsedCommit } from './commits.ts';
@@ -93,10 +93,10 @@ export function rulingsOf(forge: Pick<Forge, 'maintains'>, author: string, threa
   return out;
 }
 
-// an issue graded for a pack of the given kind; a number that names a pull request is refused with the forms that pack takes
-export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, pack: 'issue' | 'rules' = 'issue'): Promise<Subject> {
+// an issue graded for the pack that was asked; a number that names a pull request is refused with the pack and the forms of its kind named
+export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, asked: Asked<'issue' | 'rules'>): Promise<Subject> {
   const issue = await forge.issue(repo, n);
-  if (issue.pr) throw refusal(pack, `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
+  if (issue.pr) throw refusal(asked, `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
   const [all, open, parent] = await Promise.all([forge.comments(repo, 'issue', n), forge.openIssues(repo), forge.parent(repo, n)]);
   const comments = threadOf(forge, issue.author.login, all);
   const rulings = rulingsOf(forge, issue.author.login, comments);
@@ -316,7 +316,7 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
 }
 
 // what the rules are read against: an issue, or free text and, when known, what it is about to become in the words the judge reads
-export type RulesTarget = { kind: 'issue'; number: number } | { kind: 'text'; ref: string; about?: string };
+export type RulesTarget = { kind: 'issue'; number: number; pack: string } | { kind: 'text'; ref: string; about?: string };
 
 // the checkout or repository the rules are read from, the judge that discovers them, the store that caches them and the clock that marks the cache read
 export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; judge: Judge; store: StoreLike; now: () => number };
@@ -327,7 +327,7 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
   let subject: Record<string, unknown> = { kind: target.kind, ref };
   let about: string | undefined;
   if (forge && repo && target.kind === 'issue') {
-    const s = await issueSubject(forge, repo, target.number, config, 'rules');
+    const s = await issueSubject(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' });
     subject = { kind: 'issue', ...s.state };
     about = `issue ${ref}`;
   } else if (target.kind === 'text') {
@@ -357,10 +357,11 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
   };
 }
 
-// a plan for an issue: the issue's title and body beside the plan text, so the judge reads the plan against what was asked
-export async function planSubject(forge: Forge, repo: string, n: number, plan: string): Promise<Subject> {
+// a plan for an issue: the issue's title and body beside the plan text, so the judge reads the plan against what was asked.
+// a number that names a pull request is refused with the pack that was asked and the forms of an issue named
+export async function planSubject(forge: Forge, repo: string, n: number, plan: string, pack: string): Promise<Subject> {
   const issue = await forge.issue(repo, n);
-  if (issue.pr) throw refusal('issue', `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
+  if (issue.pr) throw refusal({ pack, kind: 'issue' }, `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
   return {
     kind: 'plan',
     ref: `${repo}#${n}`,
