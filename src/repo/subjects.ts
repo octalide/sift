@@ -1,5 +1,6 @@
 import { truncate } from '../tokens.ts';
 import type { Subject } from '../packs/types.ts';
+import { refusal } from '../packs/subject.ts';
 import type { Check, Comment, Forge } from '../forge/forge.ts';
 import type { Git } from '../forge/git.ts';
 import { LOG_FORMAT, maxBump, parseCommit, parseLog, requiredBump, splitLog, type Bump, type ParsedCommit } from './commits.ts';
@@ -92,8 +93,10 @@ export function rulingsOf(forge: Pick<Forge, 'maintains'>, author: string, threa
   return out;
 }
 
-export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig): Promise<Subject> {
+// an issue graded for a pack of the given kind; a number that names a pull request is refused with the forms that pack takes
+export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, pack: 'issue' | 'rules' = 'issue'): Promise<Subject> {
   const issue = await forge.issue(repo, n);
+  if (issue.pr) throw refusal(pack, `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
   const [all, open, parent] = await Promise.all([forge.comments(repo, 'issue', n), forge.openIssues(repo), forge.parent(repo, n)]);
   const comments = threadOf(forge, issue.author.login, all);
   const rulings = rulingsOf(forge, issue.author.login, comments);
@@ -328,7 +331,7 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
   let subject: Record<string, unknown> = { kind: target.kind, ref };
   let about: string | undefined;
   if (forge && repo && target.kind === 'issue') {
-    const s = await issueSubject(forge, repo, target.number, config);
+    const s = await issueSubject(forge, repo, target.number, config, 'rules');
     subject = { kind: 'issue', ...s.state };
     about = `issue ${ref}`;
   } else if (target.kind === 'text') {

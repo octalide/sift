@@ -111,6 +111,7 @@ const issue = (i: GhIssue): Issue => ({
   url: i.html_url,
   createdAt: i.created_at,
   updatedAt: i.updated_at,
+  pr: i.pull_request != null,
 });
 
 export function toWatchItem(raw: RawItem): WatchItem {
@@ -276,6 +277,7 @@ export class GitHubForge implements Forge {
     const pr = await this.gh.json<GhPull>(`repos/${repo}/pulls/${number}`);
     return {
       ...issue(pr),
+      pr: true,
       base: pr.base.ref,
       head: { branch: pr.head.ref, sha: pr.head.sha },
       draft: pr.draft,
