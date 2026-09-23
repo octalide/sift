@@ -9,7 +9,8 @@ import { manifestChanges, manifestFormat, type ManifestChange } from './manifest
 import { driftOf, lineDiff } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
-import { discoverRules, type RuleSource } from '../rules/discover.ts';
+import { discoverRules, type Rule, type RuleSource } from '../rules/discover.ts';
+import { partName, partsOf } from './parts.ts';
 import type { Judge } from '../judge/types.ts';
 import type { StoreLike } from '../log.ts';
 
@@ -336,26 +337,61 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
     subject = { kind: 'text', ...(about ? { about } : {}), text: truncate(target.ref, BODY_CAP) };
   }
   // the subject is read, and a pull request refused, before discovery spends judge calls
-  const found = await discoverRules(host.source, config.rules, host.judge, host.store, host.now, host.notice);
-  const rules = [...found.rules];
+  const found = await rulesFound(host, config);
+  return rulesOf(found, `${target.kind}:${truncate(ref, 40)}`, subject, about ? `The subject (${about})` : 'The subject', {});
+}
+
+// text about to be written, as the rules read it: one subject when it fits the judge's state, otherwise one per part, so
+// every character written is judged. the opening part (where a post's title is) is judged against every rule, a rule
+// about the whole text among them; each later part against what a part can break, named by its place and headings
+export async function textRulesSubjects(host: RulesHost, target: { text: string; about?: string }, config: RepoConfig, cap = BODY_CAP): Promise<Subject[]> {
+  const { text, about } = target;
+  const parts = partsOf(text, cap);
+  const found = await rulesFound(host, config);
+  const ref = `text:${truncate(text, 40)}`;
+  const named = about ? ` (${about})` : '';
+  if (parts.length === 1) return [rulesOf(found, ref, { kind: 'text', ...(about ? { about } : {}), text }, `The subject${named}`, {})];
+  const of = `a ${text.length}-character text in ${parts.length} parts`;
+  return parts.map((part, i) => {
+    const name = partName(part, i, parts.length);
+    if (i === 0) {
+      const note = `the opening of ${of}, judged against every rule, the rules about the whole text among them; the parts after it are judged on their own`;
+      return rulesOf(found, ref, { kind: 'text', ...(about ? { about } : {}), note, text: part.text }, `The opening, ${name}, of the subject${named}`, { part: `the opening, ${name}` });
+    }
+    const note = `${name} of ${of}, judged on its own; the opening is judged against the rules about the whole text`;
+    return rulesOf(found, ref, { kind: 'section', ...(about ? { about } : {}), note, text: part.text }, `${name[0]!.toUpperCase()}${name.slice(1)} of the subject${named}`, { part: name, section: true });
+  });
+}
+
+type Found = { rules: Rule[]; total: number; discovery: Awaited<ReturnType<typeof discoverRules>> };
+
+async function rulesFound(host: RulesHost, config: RepoConfig): Promise<Found> {
+  const discovery = await discoverRules(host.source, config.rules, host.judge, host.store, host.now, host.notice);
+  const rules = [...discovery.rules];
   const total = rules.length;
   rules.splice(config.rules.maxRules);
+  return { rules, total, discovery };
+}
+
+function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, label: string, facts: Record<string, unknown>): Subject {
+  const { rules, total, discovery } = found;
   return {
     kind: 'rules',
-    ref: `${target.kind}:${truncate(ref, 40)}`,
+    ref,
     state: { subject },
     facts: {
       rules,
       has_rules: rules.length > 0,
       total_rules: total,
-      docs: found.docs,
-      candidates: found.candidates,
-      kept: found.kept,
-      cached: found.cached,
-      subject: about ? `The subject (${about})` : 'The subject',
+      docs: discovery.docs,
+      candidates: discovery.candidates,
+      kept: discovery.kept,
+      cached: discovery.cached,
+      subject: label,
+      ...facts,
     },
     options: {},
-    ...(found.error === undefined ? {} : { judgeError: `rule discovery: ${found.error}` }),
+    ...(discovery.error === undefined ? {} : { judgeError: `rule discovery: ${discovery.error}` }),
   };
 }
 

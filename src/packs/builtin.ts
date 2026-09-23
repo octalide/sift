@@ -156,6 +156,20 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
               true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply.',
               false: 'The subject does something the rule forbids or omits something it requires.',
             },
+            unless: 'section',
+            severity: 'warn',
+            lo: 0.3,
+            hi: 0.6,
+          },
+          // a later part of a text too long to judge at once: the opening carries the rules about the whole text
+          section: {
+            type: 'noul',
+            instructions: '{subject} does not break this rule: {text}',
+            criteria: {
+              true: 'Nothing in this part breaks the rule, or the rule does not apply to it. A rule about the text as a whole, something it must contain, state or link once (naming its issue, stating its impact, carrying a section), is judged on the opening of the text: a part without it does not break it.',
+              false: 'This part does something the rule forbids, or breaks a requirement every part of the text must meet, such as its wording, formatting or language.',
+            },
+            when: 'section',
             severity: 'warn',
             lo: 0.3,
             hi: 0.6,
