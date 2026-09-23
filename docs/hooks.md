@@ -12,7 +12,7 @@ Three modules act inside the session without being asked.
 
 ## Prune
 
-Output over `pruneFloorTokens` (estimated) from the tools in `pruneTools` is split into chunks of `pruneChunkLines` lines and ranked, batched, against the calling loop's task: is this chunk needed for the current task. A chunk below `pruneKeepThreshold` is dropped. Nothing is kept on disk. In its place stands a one-line note with the omitted line range, how to get it back, and how to keep such output whole:
+Output over `pruneFloorTokens` (estimated, 20000 by default, so only genuinely large output is judged) from the tools in `pruneTools` is split into chunks of `pruneChunkLines` lines and ranked, batched, against the calling loop's task: is this chunk needed for the current task. A chunk below `pruneKeepThreshold` is dropped. Nothing is kept on disk. In its place stands a one-line note with the omitted line range, how to get it back, and how to keep such output whole:
 
 ```
 [sift: lines 51-75 (25 lines) omitted as not needed for the current task, re-read src/watch/watcher.ts with offset 51 limit 25, or call mcp__sift__prune off to read files whole]

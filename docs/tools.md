@@ -7,7 +7,7 @@ sift asks one of two backends a set of typed questions about some state and gets
 - **Jev** (TypeSafe's System One model) when `TYPESAFE_API_KEY` is set. Sub-second, cheap, calibrated.
 - **a small model** otherwise, `fallbackModel` (`haiku` by default), through the engine's own client. Slower and less calibrated, but it needs no extra account.
 
-Two primitives sit on that call: `judge`, typed questions over one state, and `rank`, the same questions over many items. Everything else is data over them. A pack is questions and checks over a repository subject (an issue, a pull request, a release, a job log, the file tree). The hooks that act inside a session (prune, the outbound gate, classify) and the repository watch are packs and ranks with a policy attached. Every module is a toggle, every module logs what it decided, and every module falls back to the engine's normal behaviour when the judge is unavailable. Correctness never depends on the judge.
+Two primitives sit on that call: `judge`, typed questions over one state, and `rank`, the same questions over many items. Everything else is data over them. A pack is questions and checks over a repository subject (an issue, a pull request, a release, the file tree). The hooks that act inside a session (prune, the outbound gate, classify) and the repository watch are packs and ranks with a policy attached. Every module is a toggle, every module logs what it decided, and every module falls back to the engine's normal behaviour when the judge is unavailable. Correctness never depends on the judge.
 
 `judge(state, questions)` asks typed questions about one state. A question is a `noul` (a probability that a proposition holds), a `choice` (one key of a criteria map, with a probability per key) or a `score` (a position on an ordered list of legends). The answer is numbers, never text.
 
@@ -84,7 +84,7 @@ Every option, with its default. `/config` shows the shorter descriptions in `.cl
 | `fallbackModel` | `haiku` | model used by the model backend, an alias or a full id |
 | `shadow` | `false` | every module logs what it would have done and does nothing |
 | `prune` | `true` | score long tool outputs against the calling loop's task before the model reads them and drop the chunks the judge marks unneeded. Targeted reads, repeats of pruned output and reads of paths the task names pass whole, and `# sift: full` or the `prune` tool keep output whole on purpose |
-| `pruneFloorTokens` | `4000` | tool outputs under this estimated size pass through untouched |
+| `pruneFloorTokens` | `20000` | tool outputs under this estimated size pass through untouched |
 | `pruneChunkLines` | `25` | lines per scored chunk |
 | `pruneKeepThreshold` | `0.5` | minimum probability that a chunk is needed. Below it the chunk is replaced by an omission note |
 | `pruneTools` | `Bash,Read` | comma separated tool names whose output is pruned. Bash and Read are supported |

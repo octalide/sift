@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { Decision } from '../src/judge/index.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { pruneCall, type PruneCallOptions } from '../src/prune/call.ts';
@@ -46,6 +47,14 @@ function stdout(r: { result?: unknown }): string {
 function content(r: { result?: unknown }): string {
   return (r.result as { file: { content: string } }).file.content;
 }
+
+describe('prune floor', () => {
+  it('defaults to 20000 estimated tokens, in code and in the plugin option', () => {
+    const manifest = JSON.parse(readFileSync('.claude-plugin/plugin.json', 'utf8')) as { userConfig: Record<string, { default: unknown }> };
+    expect(PRUNE_DEFAULTS.floorTokens).toBe(20000);
+    expect(manifest.userConfig['pruneFloorTokens']!.default).toBe(20000);
+  });
+});
 
 describe('prune per loop', () => {
   it('judges a subagent call against the prompt it was spawned with, not the main loop task', async () => {

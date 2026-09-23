@@ -159,6 +159,12 @@ describe('grade in a named checkout', () => {
     await expect(grade(host, await sessionScope(), 'only-b', 'HEAD')).rejects.toThrow(/unknown pack only-b/);
   });
 
+  it('refuses the removed ci pack, naming the removal and the command that reads a run\'s log', async () => {
+    fresh();
+    const refused = grade(host, await named(wt), 'ci', 'run:123', { text: 'FAIL x' });
+    await expect(refused).rejects.toThrow("the ci pack is removed: sift judges no ci output. read a failed run's log with gh run view <run id> --log-failed -R o/b");
+  });
+
   it('reads a release from the checkout, its uncommitted changelog under its own root', async () => {
     fresh();
     const { subject, config } = await subjectFor(host, await named(wt), builtin('release'), 'release');
@@ -257,7 +263,6 @@ describe('forge-only grades', () => {
     await expect(subjectFor(host, scope, { name: 'triage-commit', subject: 'commit' }, '#3')).rejects.toThrow('triage-commit pack: subject is an issue number, not a ref');
     await expect(subjectFor(host, scope, { name: 'triage-release', subject: 'release' }, '#3')).rejects.toThrow('triage-release pack: subject is an issue number, not a version');
     await expect(subjectFor(host, scope, { name: 'triage-plan', subject: 'plan' }, '5')).rejects.toThrow('triage-plan pack: no plan');
-    await expect(subjectFor(host, scope, { name: 'triage-ci', subject: 'log' }, 'nope')).rejects.toThrow('triage-ci pack: expected run:<id>');
   });
 });
 

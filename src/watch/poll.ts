@@ -45,10 +45,8 @@ export type WatchEvent = {
   stalled?: boolean;
   // ci run on the head of an open pr: the head's checks still running, or its verdict already out
   head?: 'pending' | 'settled';
-  // settled only: the checks that failed, with the job id of each whose log the forge keeps
+  // settled only: the checks that failed, with the run of each whose log the forge keeps
   failed?: FailedCheck[];
-  // settled failure only: the ci pack's report on each failed check with a log, attached at delivery
-  reports?: string[];
   // mechanical findings of the issue pack on a new issue
   findings?: string[];
   // set when the event is new
@@ -252,13 +250,25 @@ export function trimSettled(settled: Record<string, string>, keep = 200): Record
   return Object.fromEntries(keys.map((k) => [k, settled[k]!]));
 }
 
-export type FailedCheck = Pick<Check, 'name' | 'id'>;
+export type FailedCheck = Pick<Check, 'name' | 'run'>;
 
 // the verdict on a head once every check has finished, undefined while any is pending
 export function settleChecks(checks: Check[]): { conclusion: 'success' | 'failure'; total: number; failed: FailedCheck[] } | undefined {
   if (checks.some((c) => !c.done)) return undefined;
-  const bad = checks.filter((c) => !c.ok).map((c) => ({ name: c.name, ...(c.id === undefined ? {} : { id: c.id }) }));
+  const bad = checks.filter((c) => !c.ok).map((c) => ({ name: c.name, ...(c.run === undefined ? {} : { run: c.run }) }));
   return { conclusion: bad.length > 0 ? 'failure' : 'success', total: checks.length, failed: bad };
+}
+
+// the lines a settled failure names its failed checks in: each run with its failed checks and the command that reads
+// its log, then the checks the forge keeps no log for. nothing is read or judged
+export function failureLines(failed: FailedCheck[], logCommand: (run: string) => string): string[] {
+  const runs = new Map<string, string[]>();
+  const bare: string[] = [];
+  for (const c of failed) {
+    if (c.run === undefined) bare.push(c.name);
+    else runs.set(c.run, [...(runs.get(c.run) ?? []), c.name]);
+  }
+  return [...[...runs].map(([run, names]) => `run ${run} failed: ${names.join(', ')} · log: ${logCommand(run)}`), ...(bare.length > 0 ? [`no log: ${bare.join(', ')}`] : [])];
 }
 
 // the checks on a head that have not finished, named as the settled verdict names failures

@@ -24,7 +24,7 @@ export type PackQuestion = (Exclude<Question, { type: 'choice' }> | PackChoice) 
   inverted?: boolean;
 };
 
-export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'tree' | 'plan' | 'log';
+export type SubjectKind = 'issue' | 'pr' | 'commit' | 'release' | 'rules' | 'event' | 'text' | 'tree' | 'plan';
 
 // one rank over a subject list: every item is asked the step's questions, the subject state as context.
 // {field} in a question takes the item's field, {subject} the subject's own label

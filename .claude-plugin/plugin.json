@@ -1,7 +1,7 @@
 {
   "name": "sift",
   "version": "0.13.0",
-  "description": "Typed judgement calls for Claude Code: two primitives, judge and rank, under packs that grade issues, pull requests, plans, commits, CI logs, releases and rules, a repository watch, tool output pruning and an outbound text gate, backed by TypeSafe Jev or the session's small model.",
+  "description": "Typed judgement calls for Claude Code: two primitives, judge and rank, under packs that grade issues, pull requests, plans, commits, releases and rules, a repository watch, tool output pruning and an outbound text gate, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
   },
@@ -59,7 +59,7 @@
     "pruneFloorTokens": {
       "type": "number",
       "title": "Prune floor (estimated tokens)",
-      "default": 4000,
+      "default": 20000,
       "description": "Tool outputs under this estimated size pass through untouched."
     },
     "pruneChunkLines": {
@@ -159,7 +159,7 @@
     "grade": {
       "type": "boolean",
       "title": "Grading tools",
-      "description": "Register the grade (packs: issue, pr, plan, commit, ci, rules, release, locate, and any under .sift/packs), judge (typed questions over one state) and rank (the same questions over many items) tools.",
+      "description": "Register the grade (packs: issue, pr, plan, commit, rules, release, locate, and any under .sift/packs), judge (typed questions over one state) and rank (the same questions over many items) tools.",
       "default": true
     },
     "config": {

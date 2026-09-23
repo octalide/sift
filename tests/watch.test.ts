@@ -11,8 +11,6 @@ import { formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, 
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { Watcher, summarize, type WatchDelivery, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
-import { MACH_CI, MACH_JOBS, MACH_RUN } from './fixtures/mach-ci.ts';
-import { fillNeeds, workflowJobs } from '../src/forge/workflow.ts';
 import { memoryStore } from './fake-source.ts';
 
 const rules: WatchRules = { ignoreSelf: true, ignoreBots: true, triage: true, login: 'me', protectedBranches: ['main', 'dev'], branchPattern: '^(feat|fix)/\\d+$' };
@@ -54,7 +52,7 @@ describe('item diffing', () => {
     expect(settleChecks([done, ext('pending')])).toBeUndefined();
     expect(settleChecks([done, { ...running, done: true, conclusion: 'success', ok: true }, ext('success')])).toEqual({ conclusion: 'success', total: 3, failed: [] });
     expect(settleChecks([done, { ...running, done: true, conclusion: 'failure' }])).toEqual({ conclusion: 'failure', total: 2, failed: [{ name: 'test' }] });
-    expect(settleChecks([{ ...running, id: '7', done: true, conclusion: 'failure' }])!.failed).toEqual([{ name: 'test', id: '7' }]);
+    expect(settleChecks([{ ...running, run: '7', done: true, conclusion: 'failure' }])!.failed).toEqual([{ name: 'test', run: '7' }]);
     expect(settleChecks([])).toEqual({ conclusion: 'success', total: 0, failed: [] });
     expect(pendingChecks([done, running, ext('pending')])).toEqual({ pending: ['test', 'ext'], total: 3 });
   });
@@ -276,77 +274,43 @@ describe('watcher', () => {
     expect(watcher.snapshot().pending).toEqual({});
   });
 
-  it('attaches the ci pack report on each failed check, one job per check, to a settled failure', async () => {
+  it('names each failed check of a settled failure under its run with the command that reads the log, and asks the judge nothing', async () => {
     const forge = fakeForge({
       login: async () => 'me',
       items: script(changed([slim(1)])),
-      // tick 1: running, the pr not yet open. tick 2: both finished, test failed; the log read lists the open prs once more
+      // tick 1: running, the pr not yet open. tick 2: every check finished, three failed across two runs, one with no run
       runs: script(changed([run(10, 'build', false, null)]), changed([run(10, 'build', true, 'failure')], 'r2')),
-      pulls: script(same(), changed([pull()]), changed([pull()])),
-      checks: async () => [check('build', true), { ...check('test', true, 'failure'), id: '7' }, check('ext', true, 'error')],
-      jobLog: async (_r, id) => ({ job: `job ${id}`, run: '10', sha: 'abc1234def', url: `https://x/job/${id}`, steps: [{ name: 'Run npm test', ok: false, text: '2026-09-21T02:35:35.0000000Z FAIL tests/a.test.ts\n2026-09-21T02:35:36.0000000Z ##[error]Process completed with exit code 1.' }] }),
-      diff: async () => 'diff --git a/tests/a.test.ts b/tests/a.test.ts\n+x\n',
+      pulls: script(same(), changed([pull()])),
+      checks: async () => [
+        { ...check('build', true), run: '10' },
+        { ...check('test', true, 'failure'), run: '10' },
+        { ...check('lint', true, 'failure'), run: '10' },
+        { ...check('docs', true, 'failure'), run: '11' },
+        check('ext', true, 'error'),
+      ],
     });
+    let asked = 0;
     const judge: Judge = {
       name: 'fake',
-      ask: async (_s, q: Questions) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k) => [k, { type: 'noul' as const, p: k === 'environment' ? 0.1 : 0.9 }])) }),
+      ask: async (_s, q: Questions) => (asked++, { ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k) => [k, { type: 'noul' as const, p: 0.9 }])) }),
     };
     const delivered: string[] = [];
     const watcher = new Watcher(
-      { forge, ...silent({ judge, ciPack: BUILTIN_PACKS['ci']! }), now: () => 1_000_000, deliver: async (d) => void delivered.push(d.text) },
+      { forge, ...silent({ judge }), now: () => 1_000_000, deliver: async (d) => void delivered.push(d.text) },
       { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules },
     );
     await watcher.start();
     await watcher.tick();
     await watcher.tick();
     expect(delivered).toHaveLength(1);
-    const lines = delivered[0]!.split('\n');
-    expect(lines[1]).toBe('ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (3 checks, failed: test, ext) · now: open, head unchanged');
-    expect(lines[2]).toBe('  by me · https://x/pull/3 · ci settled on pr · s1');
-    expect(lines[3]).toBe('  sift ci o/r job 7: PASS (judge: fake)');
-    expect(lines[4]).toBe('    [info] log.trimmed: 2 of 2 lines read from the failing step Run npm test');
-    expect(lines[5]).toBe('    lines: top 2 of 2, 2 not ruled out');
-    expect(lines[6]).toBe('      1. [satisfied] 1: FAIL tests/a.test.ts = 0.90');
-    expect(lines.slice(8, 11).map((l) => l.slice(0, 28))).toEqual(['    [satisfied] own_fault = ', '    [violated] environment =', '    [satisfied] fixable_here']);
-    expect(lines[11]).toBe('  ext: no log to read');
-  });
-
-  it('judges the job that failed and names an aggregate that failed because of it in one line', async () => {
-    // mach's run 35781279928: docs failed, and gate, which needs every job, failed because docs did
-    const jobs = fillNeeds(
-      MACH_JOBS.map((j) => ({ id: String(j.id), name: j.name, run: String(j.run_id), sha: 'abc1234def', done: true, conclusion: j.conclusion, ok: j.conclusion !== 'failure', url: j.html_url })),
-      workflowJobs(MACH_CI)!,
-    );
-    const failed = jobs.filter((j) => !j.ok);
-    const reads: string[] = [];
-    const forge = fakeForge({
-      login: async () => 'me',
-      items: script(changed([slim(1)])),
-      runs: script(changed([run(10, 'CI', false, null)]), changed([run(10, 'CI', true, 'failure')], 'r2')),
-      pulls: script(same(), changed([pull()]), changed([pull()])),
-      checks: async () => jobs.map((j) => ({ name: j.name, id: j.id, done: true, conclusion: j.conclusion, ok: j.ok })),
-      jobs: async (_r, id) => (reads.push(`jobs ${id}`), jobs),
-      jobLog: async (_r, id) => (reads.push(`log ${id}`), { job: jobs.find((j) => j.id === id)!.name, run: String(MACH_RUN), sha: 'abc1234def', url: `https://x/job/${id}`, steps: [{ name: 'Run it', ok: false, text: 'FAIL doc/mach differs\n##[error]Process completed with exit code 1.' }] }),
-    });
-    const judge: Judge = {
-      name: 'fake',
-      ask: async (_s, q: Questions) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k) => [k, { type: 'noul' as const, p: 0.9 }])) }),
-    };
-    const delivered: string[] = [];
-    const watcher = new Watcher(
-      { forge, ...silent({ judge, ciPack: BUILTIN_PACKS['ci']! }), now: () => 1_000_000, deliver: async (d) => void delivered.push(d.text) },
-      { repo: 'o/r', minIntervalMs: 1, maxIntervalMs: 2, deferMaxAgeMs: 1e9, stallMs: 1e9, seedWindowMs: 1e12, rateFloor: 10, shadow: false, rules: ciRules },
-    );
-    await watcher.start();
-    await watcher.tick();
-    await watcher.tick();
-    expect(delivered).toHaveLength(1);
-    const lines = delivered[0]!.split('\n');
-    expect(lines[1]).toBe(`ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (${jobs.length} checks, failed: docs, gate) · now: open, head unchanged`);
-    const reports = lines.filter((l) => /^  sift ci |^  gate: /.test(l));
-    expect(reports).toEqual([`  sift ci o/r job ${failed[0]!.id}: PASS (judge: fake)`, '  gate: failed because docs failed']);
-    // the run's jobs are read once for both failed checks
-    expect(reads).toEqual([`log ${failed[0]!.id}`, `jobs ${MACH_RUN}`, `log ${failed[1]!.id}`]);
+    expect(delivered[0]!.split('\n').slice(1)).toEqual([
+      'ci settled failure: pr #3 feat/3 @abc1234: Feat 3 (5 checks, failed: test, lint, docs, ext) · now: open, head unchanged',
+      '  by me · https://x/pull/3 · ci settled on pr · s1',
+      '  run 10 failed: test, lint · log: gh run view 10 --log-failed -R o/r',
+      '  run 11 failed: docs · log: gh run view 11 --log-failed -R o/r',
+      '  no log: ext',
+    ]);
+    expect(asked).toBe(0);
   });
 
   it('delivers a pr head whose checks stay unfinished past the stall interval as stalled, once, then its verdict when it settles', async () => {

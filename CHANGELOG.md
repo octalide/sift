@@ -6,6 +6,14 @@ Notes begin at 0.10.0. Earlier releases, and 0.10.1 and 0.10.2, have no recorded
 
 ## [Unreleased]
 
+This release removes the `ci` pack and is a minor bump on 0.x. Judging CI output cost more than it told: the pack scored every line of a failed job's log, env dumps and YAML keys included, and its headline `own_fault` answered unclear on a failure whose error text was the literal bug the PR fixed.
+
+Removed: the `ci` pack, with its `job:<id>`, `run:<id>`, run id and `text` subject forms, the `log` subject kind and its `log.trimmed` and `log.followed` checks. `grade` refuses `pack: "ci"` with the removal and the command that reads a run's log named, unless a repo-defined pack takes the name, and a repo pack that declares `subject: "log"` is refused at load. No code path sends CI log text to the judge. The `Forge` interface loses `jobs` and `jobLog`, with the `Job`, `JobLog` and `LogStep` types and the workflow file reader that filled a job's needs, and gains `logCommand`, the command a caller runs to read a failed run's log. `Check.id` (a job id) is replaced by `Check.run`, the ci run the check belongs to, read on GitHub from the check run's details url.
+
+Changed: a settled CI failure from the watch no longer carries the `ci` pack's report on each failed check. It names each failed check under its run with the command that reads the run's log (`gh run view <run> --log-failed -R <owner/name>` on GitHub), names the checks the forge keeps no log for on a `no log` line, reads no log and asks the judge nothing. `WatchHost.ciPack` and `WatchEvent.reports` are gone.
+
+Changed: `pruneFloorTokens` defaults to 20000, where it was 4000. Pruning output between those sizes cost about 13 judge tokens for each context token it saved, and most such outputs lost nothing.
+
 Fixed: the rules gate judged only the first 20,000 characters of a post or other outbound text and wrote the rest unjudged. Text over that length is now judged in parts split at headings, then paragraphs, then lines, every part under the judge's state budget and together the exact text: the opening against every rule, the rules about the whole text among them, and each later part against what a part can break. A rule broken in any part refuses the write, naming the part. `gateOutbound` takes the subjects of every part, `textRulesSubjects` builds them, and a pack question takes `unless`, a subject fact that must be falsy for it to be asked. The rules pack's `rules` question is skipped on a later part, which is asked the new `section` question instead.
 
 ## [0.13.0] - 2026-09-22

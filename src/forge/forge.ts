@@ -44,11 +44,9 @@ export type Review = { author: ForgeUser; state: string; body: string };
 
 export type ReviewComment = { author: ForgeUser; path: string; body: string };
 
-// one check on a commit, whatever the forge calls it: a check run, a commit status, a pipeline job
-export type Check = {
+// how a check or a run ended, whatever the forge calls it
+export type Outcome = {
   name: string;
-  // the forge's handle for the check's log when it keeps one (a job id); a plain status has none
-  id?: string;
   done: boolean;
   // the forge's own word for the outcome, null until done
   conclusion: string | null;
@@ -56,8 +54,14 @@ export type Check = {
   ok: boolean;
 };
 
+// one check on a commit: a check run, a commit status, a pipeline job
+export type Check = Outcome & {
+  // the ci run the check belongs to when the forge keeps its log (a workflow run id); a plain status has none
+  run?: string;
+};
+
 // a ci run the forge reports on its own: a workflow run, a pipeline
-export type Run = Check & {
+export type Run = Outcome & {
   id: string;
   branch: string;
   sha: string;
@@ -69,22 +73,6 @@ export type Run = Check & {
   url: string;
   updatedAt: string;
 };
-
-// one job of a ci run: what jobLog reads by id
-export type Job = Check & {
-  id: string;
-  run: string;
-  sha: string;
-  url: string;
-  // the ids of the jobs in the same run this one waits on; undefined when the forge cannot tell, and the job reads as a leaf
-  needs?: string[];
-};
-
-// one step of a job's log as the forge marks it; a forge that marks no steps hands the whole log as one step
-export type LogStep = { name: string; ok: boolean; text: string };
-
-// a job's log with the commit it ran on, so the pull request under test is found without another read
-export type JobLog = { job: string; run: string; sha: string; url: string; steps: LogStep[] };
 
 export type Commit = { sha: string; message: string; merge: boolean };
 
@@ -204,10 +192,8 @@ export interface Forge {
   run(repo: string, id: string): Promise<Run>;
   // the open pull request heads; without a token the read always answers changed
   pulls(repo: string, token?: string): Promise<Conditional<PullHead[]>>;
-  // the jobs of a ci run, each with the jobs it needs when the forge can tell
-  jobs(repo: string, run: string): Promise<Job[]>;
-  // a job's log split at the forge's own step marks
-  jobLog(repo: string, job: string): Promise<JobLog>;
+  // the command a caller runs to read the log of a failed ci run; sift reads and judges no ci log itself
+  logCommand(repo: string, run: string): string;
 
   // the issue or pull request a url in the forge's own shape names, undefined for any other text
   parseUrl(url: string): ForgeLink | undefined;
