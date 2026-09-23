@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { templateKind } from '../src/forge/github.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
-import { rulesSubject, textRulesSubjects } from '../src/repo/subjects.ts';
+import { textRulesSubjects } from '../src/repo/subjects.ts';
 import { gateOutbound } from '../src/gate/outbound.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
@@ -354,7 +354,7 @@ describe('rules subject', () => {
   const files = { 'CONTRIBUTING.md': '# Rules\n\n- No em dashes.\n- Tests must pass.\n' };
 
   it('carries the discovered rules, names the documents in rules.present, and sends each rule once in its question', async () => {
-    const s = await rulesSubject({ source: memorySource(files), discoveries: discoveries(yesJudge()) }, { kind: 'text', ref: 'hello' }, resolveConfig(undefined));
+    const s = (await textRulesSubjects({ source: memorySource(files), discoveries: discoveries(yesJudge()) }, { text: 'hello' }, resolveConfig(undefined)))[0]!;
     expect(s.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Rules: No em dashes.' }, { source: 'CONTRIBUTING.md', text: 'Rules: Tests must pass.' }]);
     expect(s.facts['docs']).toEqual(['CONTRIBUTING.md']);
     expect(s.judgeError).toBeUndefined();
@@ -369,15 +369,15 @@ describe('rules subject', () => {
   it('says the rules came from the cache', async () => {
     const store = memoryStore();
     const host = { source: memorySource(files), discoveries: discoveries(yesJudge(), store) };
-    await rulesSubject(host, { kind: 'text', ref: 'a' }, resolveConfig(undefined));
-    const s = await rulesSubject(host, { kind: 'text', ref: 'b' }, resolveConfig(undefined));
+    await textRulesSubjects(host, { text: 'a' }, resolveConfig(undefined));
+    const s = (await textRulesSubjects(host, { text: 'b' }, resolveConfig(undefined)))[0]!;
     const report = await runPack(BUILTIN_PACKS['rules']!, s, yesJudge(), resolveConfig(undefined));
     expect(report.mechanical[0]!.message).toBe('2 rules from CONTRIBUTING.md (cached)');
   });
 
   it('carries a discovery failure into the report as an unknown verdict', async () => {
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'unavailable', message: 'down', backend: 'off' }) };
-    const s = await rulesSubject({ source: memorySource(files), discoveries: discoveries(off) }, { kind: 'text', ref: 'x' }, resolveConfig(undefined));
+    const s = (await textRulesSubjects({ source: memorySource(files), discoveries: discoveries(off) }, { text: 'x' }, resolveConfig(undefined)))[0]!;
     expect(s.judgeError).toBe('rule discovery: unavailable: down');
     const report = await runPack(BUILTIN_PACKS['rules']!, s, off, resolveConfig(undefined));
     expect(report.verdict).toBe('unknown');
@@ -394,7 +394,7 @@ describe('rules subject', () => {
     const timers: (() => void)[] = [];
     const store = memoryStore();
     const host = { source: memorySource(files), discoveries: discoveries(slow, store, { schedule: (_, fn) => (timers.push(fn), { cancel: () => {} }), waitMs: 5_000 }) };
-    const first = rulesSubject(host, { kind: 'text', ref: 'a' }, resolveConfig(undefined));
+    const first = textRulesSubjects(host, { text: 'a' }, resolveConfig(undefined)).then((s) => s[0]!);
     await Promise.resolve();
     timers.shift()!();
     const s = await first;
@@ -403,7 +403,7 @@ describe('rules subject', () => {
     const report = await runPack(BUILTIN_PACKS['rules']!, s, inner, resolveConfig(undefined));
     expect(report.verdict).toBe('unknown');
     // the second call joins the same run rather than starting another, and answers once it lands
-    const second = rulesSubject(host, { kind: 'text', ref: 'b' }, resolveConfig(undefined));
+    const second = textRulesSubjects(host, { text: 'b' }, resolveConfig(undefined)).then((s) => s[0]!);
     release();
     const done = await second;
     expect(done.pending).toBeUndefined();

@@ -269,7 +269,7 @@ describe('post', () => {
       const body = notes(false);
       const r = await postCall(longHost(posted, seen), pack, post(body));
       expect(r).toMatchObject({ url: 'https://github.com/o/long/release/1', decision: { allow: true, reason: 'clear' } });
-      expect(r.decision?.parts?.length).toBeGreaterThan(1);
+      expect(r.decision?.report?.parts?.length).toBeGreaterThan(1);
       // the post's text is its title and body joined; the parts the judge read, in order, are exactly that text
       const text = `v1.0.0\n${body}`;
       const read = [...seen].sort((a, b) => text.indexOf(a.text) - text.indexOf(b.text));

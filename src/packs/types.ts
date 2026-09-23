@@ -78,6 +78,8 @@ export type Judged = {
   band: Band;
   severity: Severity;
   instructions: string;
+  // a subject judged in parts: the parts this band was found in
+  parts?: string[];
 };
 
 // one item of a rank step: judged on the step's ordering question, with every answer it got and every question
@@ -104,6 +106,8 @@ export type Report = {
   verdict: Verdict;
   backend: string;
   judgeError?: string;
+  // a subject too long to judge at once: the parts it was judged in, every one read
+  parts?: string[];
   // answers under an id no question asked for, and answers the judge left out of a ranked item, dropped without touching the verdict
   dropped?: number;
 };

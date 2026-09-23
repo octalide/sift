@@ -7,7 +7,7 @@ import { channelTable, commandBody, defaultChannels, textAbout, type Channel } f
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
 import { materialize } from '../src/packs/run.ts';
-import { rulesSubject, textRulesSubjects } from '../src/repo/subjects.ts';
+import { textRulesSubjects } from '../src/repo/subjects.ts';
 import type { Subject } from '../src/packs/types.ts';
 import { shellWord } from '../src/shell.ts';
 import { discoveries, memorySource, yesJudge } from './fake-source.ts';
@@ -119,7 +119,7 @@ describe('rules subject for outbound text', () => {
 
   it('names the artifact in the subject and in every rule question', async () => {
     const body = 'The watcher misses body edits. Steps: edit an issue body, wait a poll.';
-    const s = await rulesSubject({ forge: github, ...host() }, { kind: 'text', ref: body, about: 'the body of a new GitHub issue' }, config);
+    const s = (await textRulesSubjects({ forge: github, ...host() }, { text: body, about: 'the body of a new GitHub issue' }, config))[0]!;
     expect(s.state['subject']).toEqual({ kind: 'text', about: 'the body of a new GitHub issue', text: body });
     expect(s.facts['subject']).toBe('The subject (the body of a new GitHub issue)');
     const step = materialize(BUILTIN_PACKS['rules']!, s).steps[0]!;
@@ -129,7 +129,7 @@ describe('rules subject for outbound text', () => {
   });
 
   it('leaves plain text unlabelled', async () => {
-    const s = await rulesSubject(host(), { kind: 'text', ref: 'free text' }, config);
+    const s = (await textRulesSubjects(host(), { text: 'free text' }, config))[0]!;
     expect(s.state['subject']).toEqual({ kind: 'text', text: 'free text' });
     expect(s.facts['subject']).toBe('The subject');
     expect(materialize(BUILTIN_PACKS['rules']!, s).steps[0]?.questions['rules']?.instructions).toMatch(/^The subject complies with this rule: \{text\}$/);
@@ -180,7 +180,7 @@ describe('outbound gate', () => {
   it('passes an issue body when pull request rules do not apply to it', async () => {
     const docs = { 'CONTRIBUTING.md': '## Pull requests\n\nThe body carries verification evidence.\n\n## Prose\n\nNo em dashes.\n' };
     const config = { ...DEFAULT_CONFIG, rules: { docs: ['CONTRIBUTING.md'], exclude: [], maxRules: 200 } };
-    const s = await rulesSubject({ forge: github, source: memorySource(docs), discoveries: discoveries(yesJudge()) }, { kind: 'text', ref: 'The watcher misses body edits.', about: 'the body of a new GitHub issue' }, config);
+    const s = (await textRulesSubjects({ forge: github, source: memorySource(docs), discoveries: discoveries(yesJudge()) }, { text: 'The watcher misses body edits.', about: 'the body of a new GitHub issue' }, config))[0]!;
     const asked: string[] = [];
     const j: Judge = {
       name: 'fake',
