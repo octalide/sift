@@ -152,21 +152,84 @@ describe('github forge', () => {
     expect(calls[0]).toContain('pullRequest(number: 7)');
   });
 
-  it('lists the artifact writes gh makes with their body flags', () => {
-    const { writes } = github({});
-    expect(writes.map((w) => `${w.kind} ${w.action}`)).toEqual(['pr create', 'pr comment', 'pr edit', 'pr review', 'pr merge', 'issue create', 'issue comment', 'issue edit', 'release create', 'release edit']);
-    const comment = writes.find((w) => w.kind === 'pr' && w.action === 'comment')!;
-    expect(comment).toMatchObject({ body: ['--body', '-b'], file: ['--body-file', '-F'] });
-    expect(new RegExp(comment.command).test('gh pr comment 3 -b x')).toBe(true);
-    expect(new RegExp(comment.command).test('gh pr view 5')).toBe(false);
-    expect(writes.find((w) => w.kind === 'release' && w.action === 'create')).toMatchObject({ body: ['--notes', '-n'], file: ['--notes-file', '-F'] });
-    const review = writes.find((w) => w.kind === 'pr' && w.action === 'review')!;
-    expect(review).toMatchObject({ body: ['--body', '-b'], file: ['--body-file', '-F'] });
-    expect(new RegExp(review.command).test('gh pr review 3 --approve -b x')).toBe(true);
-    expect(new RegExp(review.command).test('gh pr reviews 3')).toBe(false);
-    const merge = writes.find((w) => w.kind === 'pr' && w.action === 'merge')!;
-    expect(merge).toMatchObject({ body: ['--body', '-b'], file: ['--body-file', '-F'] });
-    expect(new RegExp(merge.command).test('gh pr merge 3 --merge --body x')).toBe(true);
+  it('lists the writes post makes', () => {
+    expect(github({}).writes.map((w) => `${w.kind} ${w.action}`)).toEqual(['pr create', 'pr comment', 'pr edit', 'pr review', 'pr merge', 'issue create', 'issue comment', 'issue edit', 'release create', 'release edit']);
+  });
+
+  it('names the text write a gh command makes through the cli, and nothing else', () => {
+    const { writeOf } = github({});
+    const w = (line: string) => writeOf(line.split(' '));
+    expect(w('gh pr create --fill')).toEqual({ kind: 'pr', action: 'create' });
+    expect(w('gh issue new -t t')).toEqual({ kind: 'issue', action: 'create' });
+    expect(w('gh issue comment 3 --edit-last')).toEqual({ kind: 'issue', action: 'comment' });
+    expect(w('gh pr comment 3 -bx')).toEqual({ kind: 'pr', action: 'comment' });
+    expect(w('gh release create v1')).toEqual({ kind: 'release', action: 'create' });
+    expect(w('/usr/bin/gh pr edit 3 --body=x')).toEqual({ kind: 'pr', action: 'edit' });
+    expect(w('gh pr edit 3 -t new')).toEqual({ kind: 'pr', action: 'edit' });
+    expect(w('gh pr review 3 --approve -F r.md')).toEqual({ kind: 'pr', action: 'review' });
+    expect(w('gh pr merge 3 --merge --subject s')).toEqual({ kind: 'pr', action: 'merge' });
+    expect(w('gh release edit v1 --notes-file n.md')).toEqual({ kind: 'release', action: 'edit' });
+    // a write with no text, and every read, passes
+    expect(w('gh pr merge 3 --merge --delete-branch')).toBeUndefined();
+    expect(w('gh pr review 3 --approve')).toBeUndefined();
+    expect(w('gh issue edit 3 --add-label bug -B x')).toBeUndefined();
+    expect(w('gh release edit v1 --draft=false')).toBeUndefined();
+    expect(w('gh pr view 3 --json body')).toBeUndefined();
+    expect(w('gh pr reviews 3')).toBeUndefined();
+    expect(w('gh issue close 3 -c done')).toBeUndefined();
+    expect(w('git commit -m x')).toBeUndefined();
+    expect(w('gh')).toBeUndefined();
+  });
+
+  it('names the text write a gh api call makes, by method and path or graphql mutation', () => {
+    const { writeOf } = github({});
+    expect(writeOf(['gh', 'api', 'repos/o/r/issues', '-f', 'title=t', '-f', 'body=b'])).toEqual({ kind: 'issue', action: 'create' });
+    expect(writeOf(['gh', 'api', '/repos/{owner}/{repo}/issues/4/comments', '-F', 'body=@c.md'])).toEqual({ kind: 'issue', action: 'comment' });
+    expect(writeOf(['gh', 'api', '-X', 'PATCH', 'repos/o/r/issues/comments/99', '--input', 'c.json'])).toEqual({ kind: 'issue', action: 'comment' });
+    expect(writeOf(['gh', 'api', '--method=PATCH', 'repos/o/r/issues/4', '-f', 'body=x'])).toEqual({ kind: 'issue', action: 'edit' });
+    expect(writeOf(['gh', 'api', 'repos/o/r/pulls', '--input', '-'])).toEqual({ kind: 'pr', action: 'create' });
+    expect(writeOf(['gh', 'api', 'repos/o/r/pulls/4/reviews', '-f', 'event=COMMENT', '-f', 'body=x'])).toEqual({ kind: 'pr', action: 'review' });
+    expect(writeOf(['gh', 'api', 'repos/o/r/pulls/4/comments/7/replies', '-f', 'body=x'])).toEqual({ kind: 'pr', action: 'comment' });
+    expect(writeOf(['gh', 'api', '-XPUT', 'repos/o/r/pulls/4/merge', '-f', 'commit_title=t'])).toEqual({ kind: 'pr', action: 'merge' });
+    expect(writeOf(['gh', 'api', 'repos/o/r/releases', '-f', 'tag_name=v1'])).toEqual({ kind: 'release', action: 'create' });
+    expect(writeOf(['gh', 'api', '-X', 'PATCH', 'repos/o/r/releases/12', '-f', 'body=n'])).toEqual({ kind: 'release', action: 'edit' });
+    expect(writeOf(['gh', 'api', 'graphql', '-f', 'query=mutation { addComment(input: {subjectId: "x", body: "y"}) { clientMutationId } }'])).toEqual({ kind: 'issue', action: 'comment' });
+    expect(writeOf(['gh', 'api', 'graphql', '-f', 'query=mutation($id: ID!) { mergePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'])).toEqual({ kind: 'pr', action: 'merge' });
+    // reads, and writes that carry no text
+    expect(writeOf(['gh', 'api', 'repos/o/r/issues'])).toBeUndefined();
+    expect(writeOf(['gh', 'api', 'repos/o/r/issues/4/comments', '--jq', '.[].body'])).toBeUndefined();
+    expect(writeOf(['gh', 'api', '-X', 'PATCH', 'repos/o/r/issues/4', '-f', 'state=closed'])).toBeUndefined();
+    expect(writeOf(['gh', 'api', '-X', 'PUT', 'repos/o/r/pulls/4/merge', '-f', 'merge_method=merge'])).toBeUndefined();
+    expect(writeOf(['gh', 'api', 'repos/o/r/issues/4/labels', '-f', 'labels[]=bug'])).toBeUndefined();
+    expect(writeOf(['gh', 'api', 'graphql', '-f', 'query=query { viewer { login } }'])).toBeUndefined();
+    expect(writeOf(['gh', 'api', 'graphql', '-f', 'query=mutation { addLabelsToLabelable(input: {}) { clientMutationId } }'])).toBeUndefined();
+  });
+
+  it('posts each write to the repo it names, the json on stdin, and answers the url', async () => {
+    const calls: { argv: string; stdin?: unknown }[] = [];
+    const forge = new GitHubForge(async (argv, init) => {
+      const path = argv[argv.length - 1]!;
+      calls.push({ argv: argv.join(' '), stdin: init?.stdin === undefined ? undefined : JSON.parse(init.stdin) });
+      const body = path.endsWith('/merge') ? { merged: true } : path.includes('releases/tags/') ? { id: 12 } : /pulls\/\d+$/.test(path) ? { html_url: 'https://github.com/o/r/pull/4', number: 4, title: '', body: '', state: 'open', user: { login: 'a' }, labels: [], milestone: null, created_at: '', updated_at: '', base: { ref: 'dev' }, head: { ref: 'f', sha: 's' } } : { html_url: `https://github.com/${path}` };
+      return { exitCode: 0, stdout: `HTTP/2.0 200 OK\r\nEtag: "e"\r\n\r\n${JSON.stringify(body)}`, stderr: '' };
+    });
+    expect(await forge.post('o/r', { kind: 'issue', action: 'create', title: 't', body: 'b' })).toBe('https://github.com/repos/o/r/issues');
+    expect(calls.pop()).toEqual({ argv: 'gh api -i -X POST --input - repos/o/r/issues', stdin: { title: 't', body: 'b' } });
+    await forge.post('o/r', { kind: 'pr', action: 'create', title: 't', body: 'b', base: 'dev', head: 'feat/1' });
+    expect(calls.pop()).toEqual({ argv: 'gh api -i -X POST --input - repos/o/r/pulls', stdin: { title: 't', body: 'b', base: 'dev', head: 'feat/1', draft: false } });
+    await forge.post('o/r', { kind: 'pr', action: 'comment', number: 4, body: 'c' });
+    expect(calls.pop()).toEqual({ argv: 'gh api -i -X POST --input - repos/o/r/issues/4/comments', stdin: { body: 'c' } });
+    await forge.post('o/r', { kind: 'issue', action: 'edit', number: 4, body: 'e' });
+    expect(calls.pop()).toEqual({ argv: 'gh api -i -X PATCH --input - repos/o/r/issues/4', stdin: { body: 'e' } });
+    await forge.post('o/r', { kind: 'pr', action: 'review', number: 4, verdict: 'request-changes', body: 'r' });
+    expect(calls.pop()).toEqual({ argv: 'gh api -i -X POST --input - repos/o/r/pulls/4/reviews', stdin: { event: 'REQUEST_CHANGES', body: 'r' } });
+    expect(await forge.post('o/r', { kind: 'pr', action: 'merge', number: 4, method: 'merge', body: 'm' })).toBe('https://github.com/o/r/pull/4');
+    expect(calls.slice(-2).map((c) => c.argv)).toEqual(['gh api -i -X PUT --input - repos/o/r/pulls/4/merge', 'gh api -i repos/o/r/pulls/4']);
+    expect(calls[calls.length - 2]!.stdin).toEqual({ merge_method: 'merge', commit_message: 'm' });
+    await forge.post('o/r', { kind: 'release', action: 'create', tag: 'v1', body: 'n', target: 'main' });
+    expect(calls.pop()).toEqual({ argv: 'gh api -i -X POST --input - repos/o/r/releases', stdin: { tag_name: 'v1', body: 'n', draft: false, prerelease: false, target_commitish: 'main' } });
+    expect(await forge.post('o/r', { kind: 'release', action: 'edit', tag: 'v1', title: 'One' })).toBe('https://github.com/repos/o/r/releases/12');
+    expect(calls.slice(-2)).toEqual([{ argv: 'gh api -i repos/o/r/releases/tags/v1', stdin: undefined }, { argv: 'gh api -i -X PATCH --input - repos/o/r/releases/12', stdin: { name: 'One' } }]);
   });
 
   it('reads a job log under gh\'s default accept from the download it is redirected to and splits it at the runner\'s step marks', async () => {
