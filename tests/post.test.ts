@@ -112,6 +112,7 @@ describe('post', () => {
     judge: judge(asked),
     store: memoryStore(),
     now: () => 1,
+    notice: () => undefined,
     config: async (repo: string) => configs[repo] ?? DEFAULT_CONFIG,
   });
   const pack = BUILTIN_PACKS['rules']!;

@@ -484,7 +484,7 @@ export const register: Register = (on, rawOptions) => {
       const rt = ready();
       const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(e.agentId))).checkout.packs['rules'];
       const input = e as unknown as PostInput;
-      const posted = await postCall({ forge: rt.forge, judge: rt.judge, store: rt.store, now: rt.now, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
+      const posted = await postCall({ forge: rt.forge, judge: rt.judge, store: rt.store, now: rt.now, notice: rt.notice, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
       const { outbound, decision } = posted;
       if (outbound && decision) {
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}` });

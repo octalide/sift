@@ -78,6 +78,8 @@ export type PostHost = {
   judge: Judge;
   store: StoreLike;
   now: () => number;
+  // the session log a fresh rule discovery names what it kept in
+  notice: (text: string) => void;
   // the conventions of a repository on the forge
   config: (repo: string) => Promise<RepoConfig>;
 };
@@ -98,7 +100,7 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
   const outbound = await outboundOf(POST_TOOL, input as Record<string, unknown>, noFile, channelTable(defaultChannels(host.forge), config.outbound.channels));
   let decision: OutboundDecision | undefined;
   if (outbound && pack) {
-    const subject = await rulesSubject({ forge: host.forge, repo, source: forgeSource(host.forge, repo), judge: host.judge, store: host.store, now: host.now }, { kind: 'text', ref: outbound.text, about: outbound.kind }, config);
+    const subject = await rulesSubject({ forge: host.forge, repo, source: forgeSource(host.forge, repo), judge: host.judge, store: host.store, now: host.now, notice: host.notice }, { kind: 'text', ref: outbound.text, about: outbound.kind }, config);
     decision = await gateOutbound(outbound, subject, pack, host.judge, config);
     if (!decision.allow && !shadow) return { outbound, decision, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
   }
