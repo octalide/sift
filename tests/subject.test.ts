@@ -73,7 +73,7 @@ describe('grade subject', () => {
     expect(refused('mixed', '  ')).toContain(expectedSubject('mixed', forge));
     expect(refused('mixed', 'https://elsewhere.example/o/r/issues/3')).toContain('a URL Fake does not serve as an issue or a pull request');
     expect(refused('mixed', 'https://fake/o/r/issue/3', 'x/y')).toContain('names o/r but repo is x/y');
-    expect(expectedSubject('mixed', forge)).toBe('an issue or pull request number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text');
+    expect(expectedSubject('mixed', forge)).toBe('an issue number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text');
   });
 
   it('reads an issue or free text for the rules and refuses a pull request or a commit, naming what it takes', () => {

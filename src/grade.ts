@@ -5,7 +5,7 @@ import type { Judge } from './judge/types.ts';
 import { indexTree, treeSubject } from './locate/tree.ts';
 import type { StoreLike } from './log.ts';
 import { runPack } from './packs/run.ts';
-import { parseSubject, type ParsedKind } from './packs/subject.ts';
+import { parseSubject, refusal, type ParsedKind } from './packs/subject.ts';
 import type { Report, Subject } from './packs/types.ts';
 import type { Checkout, CheckoutFs, Checkouts } from './repo/checkout.ts';
 import { defaultTarget, type RepoConfig } from './repo/config.ts';
@@ -133,6 +133,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, kind: strin
       } else {
         const at = p.repo ?? needRepo();
         const item = p.kind === 'issue' ? await forge.issue(at, p.number) : await forge.pull(at, p.number);
+        if (p.kind === 'issue' && item.pr) throw refusal('mixed', `#${p.number}`, `subject is ${at}#${p.number}, a pull request, not an issue`, forge);
         text = `${item.title}\n\n${item.body}`;
         label = `${at}#${p.number}`;
       }
