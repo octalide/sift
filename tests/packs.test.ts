@@ -390,6 +390,27 @@ describe('issue pack', () => {
     const clear = await runPack(BUILTIN_PACKS['issue']!, subject, answering({ ...ready, implementable: { type: 'noul', p: 0.9 }, scope_clear: { type: 'noul', p: 0.9 } }), config);
     expect(clear.verdict).toBe('pass');
   });
+
+  it('never counts duplicate_of = none as a finding, and warns only on a confident duplicate', async () => {
+    const subject: Subject = { kind: 'issue', ref: 'r#1', state: {}, facts: { labels: [], sections: {}, has_others: true }, options: { open_issues: { '#3': 'three', '#4': 'four' } } };
+    const config = resolveConfig(undefined);
+    const clean = { substantive: { type: 'noul' as const, p: 0.9 }, implementable: { type: 'noul' as const, p: 0.9 }, scope_clear: { type: 'noul' as const, p: 0.9 }, single_repo: { type: 'noul' as const, p: 0.9 } };
+    const pick = (choice: string, confidence: number) => ({ type: 'choice' as const, choice, probabilities: { [choice]: confidence }, confidence });
+    const grade = (duplicate: ReturnType<typeof pick>) => runPack(BUILTIN_PACKS['issue']!, subject, answering({ ...clean, duplicate_of: duplicate, blocked_by: pick('none', 1) }), config);
+    for (const confidence of [0.16, 0.32, 0.5, 0.99]) {
+      const none = await grade(pick('none', confidence));
+      expect(none.verdict).toBe('pass');
+      expect(none.judged.find((j) => j.id === 'duplicate_of')!.band).toBe(confidence >= 0.7 ? 'satisfied' : 'unclear');
+    }
+    const duplicate = await grade(pick('#3', 0.9));
+    expect(duplicate.verdict).toBe('warn');
+    expect(duplicate.judged.find((j) => j.id === 'duplicate_of')).toMatchObject({ band: 'violated', severity: 'warn' });
+    for (const confidence of [0.16, 0.5]) {
+      const unsure = await grade(pick('#3', confidence));
+      expect(unsure.verdict).toBe('pass');
+      expect(unsure.judged.find((j) => j.id === 'duplicate_of')!.band).toBe('unclear');
+    }
+  });
 });
 
 describe('pack materialization', () => {
@@ -442,6 +463,11 @@ describe('pack materialization', () => {
     expect(validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x' } } }, 'ok').name).toBe('ok');
     expect(() => validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', criteria: 'prose' } } }, 'bad')).toThrow(/true, false/);
     expect(validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', criteria: { true: 'yes', false: 'no' } } } }, 'ok').name).toBe('ok');
+    expect(() => validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', violates: ['a'] } } }, 'bad')).toThrow(/needs a choice/);
+    expect(() => validatePack({ subject: 'text', questions: { q: { type: 'choice', instructions: 'x', criteria: { a: 'a' }, violates: 'listed' } } }, 'bad')).toThrow(/listed with options/);
+    expect(() => validatePack({ subject: 'text', questions: { q: { type: 'choice', instructions: 'x', criteria: { a: 'a' }, violates: 'a' } } }, 'bad')).toThrow(/list of option keys/);
+    expect(validatePack({ subject: 'text', questions: { q: { type: 'choice', instructions: 'x', criteria: { a: 'a' }, violates: ['a'] } } }, 'ok').name).toBe('ok');
+    expect(validatePack({ subject: 'issue', questions: { q: { type: 'choice', instructions: 'x', options: 'open_issues', violates: 'listed' } } }, 'ok').name).toBe('ok');
   });
   it('drops an answer to a question it did not ask and reports the count without touching the verdict', async () => {
     // answers every question asked at 0.9 and one nobody asked, for the pack and for the rank step

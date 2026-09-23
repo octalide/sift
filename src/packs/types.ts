@@ -13,6 +13,9 @@ export type PackQuestion = (Exclude<Question, { type: 'choice' }> | PackChoice) 
   severity?: Severity;
   // for a choice: name of a subject option set filled at runtime, e.g. "open_issues"
   options?: string;
+  // for a choice: the options whose confident pick is a finding, as criteria keys, or listed for every option of
+  // its options set (never the added none); a choice without it has no violating option
+  violates?: string[] | 'listed';
   // ask only when this subject fact is truthy
   when?: string;
   // for a noul: true when a high probability is the bad outcome (e.g. "scope creep")
