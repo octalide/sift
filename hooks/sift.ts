@@ -9,8 +9,8 @@ import { grade, scopeOf, type GradeHost, type GradeOptions } from '../src/grade.
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
 import { configLayers, globalConfigPath, readConfig } from '../src/repo/config.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
-import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
-import { failureText, type Answer, type KeyOrigin, type Questions } from '../src/judge/types.ts';
+import { rank, type RankItem, type RankOptions, type RankResult } from '../src/judge/rank.ts';
+import { failureText, type Answer, type Judgement, type KeyOrigin, type Questions } from '../src/judge/types.ts';
 import { DecisionLog, type Cost } from '../src/log.ts';
 import { formatReport } from '../src/packs/run.ts';
 import type { Report } from '../src/packs/types.ts';
@@ -24,6 +24,7 @@ import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
 import { SEEN_EVERY_MS, sessionKeys, StoreKeys } from '../src/keys.ts';
 import { Spawns } from '../src/spawns.ts';
 import { Tenure, tenureToken } from '../src/tenure.ts';
+import type { SiftAnswer, SiftGradeOptions, SiftJudgement, SiftQuestion, SiftRankOptions, SiftRankResult, SiftReport } from '../types/sift.d.ts';
 
 type Options = {
   backend: Backend;
@@ -178,6 +179,19 @@ export const register: Register = (on, rawOptions) => {
     record('grade', report.verdict, { digest: `${packName} ${subject.ref}` });
     return report;
   }
+
+  // $.sift as other plugins see it is declared in types/sift.d.ts: each declared type is held to the one it declares
+  type Same<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+  type Holds<T extends true> = T;
+  type _Contract = [
+    Holds<Same<SiftQuestion, Questions[string]>>,
+    Holds<Same<SiftAnswer, Answer>>,
+    Holds<Same<SiftJudgement, Judgement>>,
+    Holds<Same<SiftRankOptions, RankOptions>>,
+    Holds<Same<SiftRankResult<RankItem>, RankResult<RankItem>>>,
+    Holds<Same<SiftGradeOptions, GradeOptions>>,
+    Holds<Same<SiftReport, Report>>,
+  ];
 
   on('engine.create', async (_$, e, next) => {
     const built = await next(e);
