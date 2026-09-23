@@ -478,6 +478,8 @@ CI runs the same four commands on every pull request and reports them through a 
 
 ## Unreleased
 
+Fixed: a subject refusal names the pack that was asked, where it named the kind of subject the pack parses. `locate` refused as `mixed pack:` and `plan` as `issue pack:`, both when parsing and after the forge read, and a repo-defined pack refused under its subject kind. Every refusal now starts with the pack the caller named, the missing subject, a missing plan and a malformed `ci` subject included, and still names the forms its subject kind takes.
+
 Fixed: rule discovery dropped the contributing guide. The document step judged a 12-line excerpt and kept only the satisfied band, so a `CONTRIBUTING.md` that opens with thanks and build steps (mach's scored 0.63, just under the band) was dropped with every branch, commit and pull request rule it holds. The contributing guide at the root, `docs/` or `.github/` is now kept without being judged, the document question sees each document's headings beside its excerpt, and every document the judge does not rule out is kept, since the paragraph step still filters what is not a rule. The cache version is bumped, so every checkout rediscovers once. A discovery whose judge left an answer out is now reported as a failure and not cached, where it threw, and a judge failure at either step is tested to leave no cache and to be retried on the next grade. Every discovery that asks the judge logs the documents it kept by name, and `rules.present` names them when no rule was found. `discoverRules` takes a log function after its clock, and `RulesHost`, `GradeHost` and `GateHost` carry it as `notice`.
 
 ## Changes in 0.12.1

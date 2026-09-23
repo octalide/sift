@@ -6,6 +6,7 @@ import type { Forge } from '../src/forge/forge.ts';
 import { gateCall } from '../src/gate/outbound.ts';
 import { grade, scopeOf, SpawnDirs, subjectFor, type GradeHost, type GradeScope } from '../src/grade.ts';
 import type { Judge } from '../src/judge/types.ts';
+import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { Checkouts, type CheckoutFs } from '../src/repo/checkout.ts';
 import type { RunLike } from '../src/process.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -37,6 +38,7 @@ function write(path: string, text: string): void {
 // a channel both repositories define, each with its own limit
 const note = (limit: number) => ({ name: 'note', tool: '^mcp__note__send$', text: { fields: ['text'] }, limit, kind: 'a note' });
 
+const builtin = (name: string) => BUILTIN_PACKS[name]!;
 const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
 
 // two repositories: a is the session's, b is another with a worktree on a branch of its own and an uncommitted changelog
@@ -159,7 +161,7 @@ describe('grade in a named checkout', () => {
 
   it('reads a release from the checkout, its uncommitted changelog under its own root', async () => {
     fresh();
-    const { subject, config } = await subjectFor(host, await named(wt), 'release', 'release');
+    const { subject, config } = await subjectFor(host, await named(wt), builtin('release'), 'release');
     expect(config.release.changelog).toBe('CHANGELOG.md');
     expect(subject.facts['changelogAdded']).toContain('an unreleased line');
     expect((subject.facts['commits'] as { subject: string }[]).map((c) => c.subject)).toContain('fix(#2): in the worktree');
@@ -167,15 +169,15 @@ describe('grade in a named checkout', () => {
 
   it('discovers rules in the checkout', async () => {
     fresh();
-    const there = await subjectFor(host, await named(wt), 'rules', 'x', { text: 'a change' });
-    const here = await subjectFor(host, await sessionScope(), 'rules', 'x', { text: 'a change' });
+    const there = await subjectFor(host, await named(wt), builtin('rules'), 'x', { text: 'a change' });
+    const here = await subjectFor(host, await sessionScope(), builtin('rules'), 'x', { text: 'a change' });
     // b carries CONTRIBUTING.md and CHANGELOG.md beside what a carries
     expect(there.subject.facts['candidates']).toBe((here.subject.facts['candidates'] as number) + 2);
   });
 
   it('locates in the checkout', async () => {
     fresh();
-    const { subject } = await subjectFor(host, await named(wt), 'tree', 'x', { text: 'a change' });
+    const { subject } = await subjectFor(host, await named(wt), builtin('locate'), 'x', { text: 'a change' });
     const paths = (subject.facts['files'] as { path: string }[]).map((f) => f.path);
     expect(paths).toContain('b.txt');
     expect(paths).not.toContain('a.txt');
@@ -183,7 +185,7 @@ describe('grade in a named checkout', () => {
 
   it('grades a pr range from the checkout under its conventions', async () => {
     fresh();
-    const { subject, config } = await subjectFor(host, await named(wt), 'pr', 'main..HEAD');
+    const { subject, config } = await subjectFor(host, await named(wt), builtin('pr'), 'main..HEAD');
     expect(subject.facts['head']).toBe('fix/2');
     expect((subject.facts['commits'] as { message: string }[]).map((c) => c.message.split('\n')[0])).toEqual(['fix(#2): in the worktree']);
     expect(config.prs.targets).toEqual(['trunk']);
@@ -191,27 +193,27 @@ describe('grade in a named checkout', () => {
 
   it('refuses a repo that is not the checkout, naming both', async () => {
     fresh();
-    for (const kind of ['commit', 'release', 'rules', 'tree']) {
-      await expect(subjectFor(host, await named(wt), kind, kind === 'release' ? 'release' : 'HEAD', { repo: 'o/a', text: kind === 'rules' || kind === 'tree' ? 't' : undefined })).rejects.toThrow(/o\/b.*o\/a/);
+    for (const name of ['commit', 'release', 'rules', 'locate']) {
+      await expect(subjectFor(host, await named(wt), builtin(name), name === 'release' ? 'release' : 'HEAD', { repo: 'o/a', text: name === 'rules' || name === 'locate' ? 't' : undefined })).rejects.toThrow(/o\/b.*o\/a/);
     }
-    await expect(subjectFor(host, await named(wt), 'pr', 'main..HEAD', { repo: 'o/a' })).rejects.toThrow(/o\/b.*o\/a/);
+    await expect(subjectFor(host, await named(wt), builtin('pr'), 'main..HEAD', { repo: 'o/a' })).rejects.toThrow(/o\/b.*o\/a/);
     // without a named cwd, a commit still refuses, and a release of another repo reads the forge
-    await expect(subjectFor(host, await sessionScope(), 'commit', 'HEAD', { repo: 'o/b' })).rejects.toThrow(/o\/a.*o\/b/);
-    await expect(subjectFor(host, await sessionScope(), 'release', 'release', { repo: 'o/b' })).resolves.toBeDefined();
+    await expect(subjectFor(host, await sessionScope(), builtin('commit'), 'HEAD', { repo: 'o/b' })).rejects.toThrow(/o\/a.*o\/b/);
+    await expect(subjectFor(host, await sessionScope(), builtin('release'), 'release', { repo: 'o/b' })).resolves.toBeDefined();
   });
 });
 
 describe('forge-only grades', () => {
   it('apply the conventions of the repository the subject is in', async () => {
     fresh({ 'o/c:.sift/config.json': JSON.stringify({ prs: { targets: ['release'] } }) });
-    const other = await subjectFor(host, await sessionScope(), 'issue', '5', { repo: 'o/c' });
+    const other = await subjectFor(host, await sessionScope(), builtin('issue'), '5', { repo: 'o/c' });
     expect(other.config.prs.targets).toEqual(['release']);
-    const own = await subjectFor(host, await sessionScope(), 'pr', '5');
+    const own = await subjectFor(host, await sessionScope(), builtin('pr'), '5');
     expect(own.config.prs.targets).toEqual(['dev']);
     expect(issuesRead[0]).toBe('o/c#5');
     // a checkout named by cwd is the repository a bare number is in
     issuesRead = [];
-    const there = await subjectFor(host, await named(wt), 'issue', '5');
+    const there = await subjectFor(host, await named(wt), builtin('issue'), '5');
     expect(issuesRead).toEqual(['o/b#5']);
     expect(there.config.prs.targets).toEqual(['trunk']);
   });
@@ -220,22 +222,42 @@ describe('forge-only grades', () => {
     fresh();
     const plain = fakeForge();
     host = { ...host, forge: fakeForge({ issue: async (repo, n) => ({ ...(await plain.issue(repo, n)), pr: n === 7 }) }) };
-    await expect(subjectFor(host, await sessionScope(), 'issue', '7')).rejects.toThrow('issue pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
-    await expect(subjectFor(host, await sessionScope(), 'rules', '#7')).rejects.toThrow('rules pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue URL, or free text (in text)');
+    await expect(subjectFor(host, await sessionScope(), builtin('issue'), '7')).rejects.toThrow('issue pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
+    await expect(subjectFor(host, await sessionScope(), builtin('rules'), '#7')).rejects.toThrow('rules pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue URL, or free text (in text)');
     // an issue number grades as before
-    expect((await subjectFor(host, await sessionScope(), 'issue', '5')).subject.kind).toBe('issue');
-    expect((await subjectFor(host, await sessionScope(), 'rules', '5')).subject.state).toMatchObject({ subject: { kind: 'issue', number: 5 } });
+    expect((await subjectFor(host, await sessionScope(), builtin('issue'), '5')).subject.kind).toBe('issue');
+    expect((await subjectFor(host, await sessionScope(), builtin('rules'), '5')).subject.state).toMatchObject({ subject: { kind: 'issue', number: 5 } });
   });
 
-  it('refuse a pull request number given to the locate or plan pack, naming the forms each takes', async () => {
+  it('refuse a pull request number given to the locate or plan pack, naming the pack and the forms each takes', async () => {
     fresh();
     const plain = fakeForge();
     host = { ...host, forge: fakeForge({ issue: async (repo, n) => ({ ...(await plain.issue(repo, n)), pr: n === 7 }) }) };
-    await expect(subjectFor(host, await sessionScope(), 'tree', '7')).rejects.toThrow('mixed pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text');
-    await expect(subjectFor(host, await sessionScope(), 'plan', '#7', { text: 'the plan' })).rejects.toThrow('issue pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
+    await expect(subjectFor(host, await sessionScope(), builtin('locate'), '7')).rejects.toThrow('locate pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text');
+    await expect(subjectFor(host, await sessionScope(), builtin('plan'), '#7', { text: 'the plan' })).rejects.toThrow('plan pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
     // an issue number grades as before
-    expect((await subjectFor(host, await sessionScope(), 'tree', '5')).subject.kind).toBe('tree');
-    expect((await subjectFor(host, await sessionScope(), 'plan', '5', { text: 'the plan' })).subject.state).toMatchObject({ number: 5, plan: 'the plan' });
+    expect((await subjectFor(host, await sessionScope(), builtin('locate'), '5')).subject.kind).toBe('tree');
+    expect((await subjectFor(host, await sessionScope(), builtin('plan'), '5', { text: 'the plan' })).subject.state).toMatchObject({ number: 5, plan: 'the plan' });
+  });
+
+  it('name the pack that was asked in every refusal, before and after the forge read', async () => {
+    fresh();
+    const plain = fakeForge();
+    host = { ...host, forge: fakeForge({ issue: async (repo, n) => ({ ...(await plain.issue(repo, n)), pr: n === 7 }) }) };
+    const scope = await sessionScope();
+    const expected = { issue: 'an issue number (N or #N) or a Fake issue URL', rules: 'an issue number (N or #N), a Fake issue URL, or free text (in text)', tree: 'an issue number (N or #N), a Fake issue or pull request URL, a commit ref or range, or free text', plan: 'an issue number (N or #N) or a Fake issue URL' };
+    for (const [kind, forms] of Object.entries(expected) as [keyof typeof expected, string][]) {
+      // a repo-defined pack is named by its own name, whatever kind of subject it takes
+      const pack = { name: `triage-${kind}`, subject: kind };
+      const text = kind === 'plan' ? { text: 'the plan' } : {};
+      await expect(subjectFor(host, scope, pack, '#7', text)).rejects.toThrow(`triage-${kind} pack: subject is o/a#7, a pull request, not an issue ("#7"); expected ${forms}`);
+      await expect(subjectFor(host, scope, pack, '', text)).rejects.toThrow(`triage-${kind} pack: no subject; expected ${forms}`);
+    }
+    await expect(subjectFor(host, scope, { name: 'triage-pr', subject: 'pr' }, 'https://fake/o/a/issue/3')).rejects.toThrow('triage-pr pack: subject is an issue URL, not a pull request');
+    await expect(subjectFor(host, scope, { name: 'triage-commit', subject: 'commit' }, '#3')).rejects.toThrow('triage-commit pack: subject is an issue number, not a ref');
+    await expect(subjectFor(host, scope, { name: 'triage-release', subject: 'release' }, '#3')).rejects.toThrow('triage-release pack: subject is an issue number, not a version');
+    await expect(subjectFor(host, scope, { name: 'triage-plan', subject: 'plan' }, '5')).rejects.toThrow('triage-plan pack: no plan');
+    await expect(subjectFor(host, scope, { name: 'triage-ci', subject: 'log' }, 'nope')).rejects.toThrow('triage-ci pack: expected run:<id>');
   });
 });
 
