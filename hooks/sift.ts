@@ -1,12 +1,10 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
-import { channelTable, defaultChannels } from '../src/gate/channels.ts';
-import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
+import { gateCall } from '../src/gate/outbound.ts';
 import { GitHubForge } from '../src/forge/github.ts';
-import { grade, ruleSource, scopeOf, SpawnDirs, type GradeHost, type GradeOptions } from '../src/grade.ts';
+import { grade, scopeOf, SpawnDirs, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
 import { configLayers, globalConfigPath } from '../src/repo/config.ts';
-import { rulesSubject } from '../src/repo/subjects.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
 import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
 import { failureText, type Answer, type KeyOrigin, type Questions } from '../src/judge/types.ts';
@@ -19,6 +17,7 @@ import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
+import { SEEN_EVERY_MS, Sessions, watchKeys } from '../src/watch/sessions.ts';
 
 type Options = {
   backend: Backend;
@@ -103,6 +102,8 @@ type Runtime = GradeHost & {
   // the channels a delivery reaches its recipient by; with the watches
   mailbox?: Mailbox;
   sessionId: string;
+  // the lifetime of the session's watch keys
+  sessions: Sessions;
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -181,8 +182,14 @@ export const register: Register = (on, rawOptions) => {
   on('session.start', async ($, e, next) => {
     readFile = (p) => $.fs.read(p);
     const fs = { read: (p: string) => $.fs.read(p), exists: (p: string) => $.fs.exists(p), list: (p: string) => $.fs.list(p), stat: (p: string) => $.fs.stat(p) };
-    const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) };
+    const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v), delete: (k: string) => $.store.delete(k), keys: () => $.store.keys() };
     const sessionId = await $.session.id();
+    const keys = watchKeys(sessionId);
+    const sessions = new Sessions({ store, now: () => Date.now(), log: (text) => $.ui.log(text) });
+    await sessions.touch(sessionId);
+    await sessions.sweep(sessionId);
+    // a reload cancels the old interval with the old environment
+    $.clock.every(SEEN_EVERY_MS, () => void sessions.touch(sessionId));
     const log = new DecisionLog(store, sessionId);
     const apiKey = await apiKeyOf($, options);
     const inner = makeJudge(
@@ -209,7 +216,7 @@ export const register: Register = (on, rawOptions) => {
     let watches: Watches | undefined;
     const mailbox = new Mailbox({
       store,
-      key: `watch-mail:${sessionId}`,
+      key: keys.mail,
       agents: () => $.agent.list(),
       now: () => Date.now(),
       submit: async (text) => void (await $.prompt.submit({ text })),
@@ -221,7 +228,8 @@ export const register: Register = (on, rawOptions) => {
     watches = triagePack
       ? new Watches({
           store,
-          key: `watch-subs:${sessionId}`,
+          key: keys.subs,
+          stateKey: keys.state,
           now: () => Date.now(),
           log: (text) => $.ui.log(text),
           status: (text) => $.ui.status(text),
@@ -264,7 +272,7 @@ export const register: Register = (on, rawOptions) => {
           },
         })
       : undefined;
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, watches, mailbox: watches ? mailbox : undefined, sessionId };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, watches, mailbox: watches ? mailbox : undefined, sessionId, sessions };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     if (options.grade) {
@@ -375,6 +383,18 @@ export const register: Register = (on, rawOptions) => {
     return next(e);
   });
 
+  // the session's watch keys go with it. clear and resume leave the process running under the id bound at start, so
+  // its keys stay in use
+  on('classic.SessionEnd', async (_$, e, next) => {
+    if (runtime && e.reason !== 'clear' && e.reason !== 'resume') {
+      const rt = runtime;
+      await rt.watches?.end();
+      await rt.mailbox?.stop();
+      await rt.sessions.end(rt.sessionId);
+    }
+    return next(e);
+  });
+
   // registered first, so outermost over every tool. a delivery waiting for a subagent rides the result of its next
   // tool call, whichever tool and whichever hook answers it; beneath that, outbound gate before, prune after
   on('tool.call', async ($, e, next) => {
@@ -382,21 +402,16 @@ export const register: Register = (on, rawOptions) => {
       if (e.tool.startsWith('mcp__sift__')) return next(e);
       const rt = runtime;
       if (!rt) return next(e);
-      const session = options.gateOutbound ? await rt.session() : undefined;
-      // the outbound channel table: the defaults for the forge, then the config's entries over them
-      const outbound = session ? await outboundOf(e.tool, e as unknown as Record<string, unknown>, readFile, channelTable(defaultChannels(rt.forge), session.config.outbound.channels)) : undefined;
-      if (session && outbound) {
-        const rulesPack = session.packs['rules'];
-        const scope = { checkout: session, named: false };
-        const subject = rulesPack ? await rulesSubject({ forge: rt.forge, repo: session.repo, source: ruleSource(rt, scope, undefined), judge: rt.judge, store: rt.store }, { kind: 'text', ref: outbound.text, about: outbound.kind }, session.config) : undefined;
-        if (rulesPack && subject) {
-          const decision = await gateOutbound(outbound, subject, rulesPack, rt.judge, session.config);
-          record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
-          for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-          if (!decision.allow) {
-            if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-            else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
-          }
+      // the checkout a grade with no cwd reads: where this loop was spawned, else the session's
+      const checkout = options.gateOutbound ? (await scopeOf(rt.checkouts, rt.session, undefined, spawnDirs.of(e.agentId))).checkout : undefined;
+      const gated = checkout ? await gateCall(rt, checkout, e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
+      if (gated) {
+        const { outbound, decision } = gated;
+        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
+        for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
+        if (!decision.allow) {
+          if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
+          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
         }
       }
       const r = await next(e);

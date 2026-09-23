@@ -17,6 +17,8 @@ export type Issue = {
   url: string;
   createdAt: string;
   updatedAt: string;
+  // the number names a pull request; a forge that reads both through one endpoint says which it found
+  pr: boolean;
 };
 
 export type PullRequest = Issue & {
@@ -137,6 +139,7 @@ export interface Forge {
   login(): Promise<string | undefined>;
   defaultBranch(repo: string): Promise<string>;
 
+  // the issue a number names, or the pull request it names with pr set
   issue(repo: string, number: number): Promise<Issue>;
   // open issues, pull requests excluded
   openIssues(repo: string): Promise<IssueSummary[]>;

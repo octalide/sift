@@ -3,12 +3,13 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import type { Forge } from '../src/forge/forge.ts';
+import { gateCall } from '../src/gate/outbound.ts';
 import { grade, scopeOf, SpawnDirs, subjectFor, type GradeHost, type GradeScope } from '../src/grade.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { Checkouts, type CheckoutFs } from '../src/repo/checkout.ts';
 import type { RunLike } from '../src/process.ts';
 import { fakeForge } from './fake-forge.ts';
-import { memoryStore } from './fake-source.ts';
+import { memoryStore, yesJudge } from './fake-source.ts';
 
 const run: RunLike = async (argv, init) => {
   const r = spawnSync(argv[0]!, argv.slice(1), { cwd: init?.cwd, encoding: 'utf8', input: init?.stdin });
@@ -33,6 +34,9 @@ function write(path: string, text: string): void {
   writeFileSync(path, text);
 }
 
+// a channel both repositories define, each with its own limit
+const note = (limit: number) => ({ name: 'note', tool: '^mcp__note__send$', text: { fields: ['text'] }, limit, kind: 'a note' });
+
 const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
 
 // two repositories: a is the session's, b is another with a worktree on a branch of its own and an uncommitted changelog
@@ -47,7 +51,8 @@ let issuesRead: string[];
 
 const forgeAt = (dir: string): Forge => {
   lookups.push(dir);
-  return fakeForge({ checkout: async () => ({ repo: dir === a ? 'o/a' : 'o/b', defaultBranch: 'main' }) });
+  const repo = dir === a ? 'o/a' : dir.startsWith(b) ? 'o/b' : undefined;
+  return fakeForge({ checkout: async () => (repo ? { repo, defaultBranch: 'main' } : undefined) });
 };
 
 beforeAll(() => {
@@ -57,14 +62,15 @@ beforeAll(() => {
   wt = `${base}/b-wt`;
   mkdirSync(a);
   git(a, 'init', '-q');
-  write(`${a}/.sift/config.json`, JSON.stringify({ prs: { targets: ['dev'] } }));
+  write(`${a}/.sift/config.json`, JSON.stringify({ prs: { targets: ['dev'] }, rules: { docs: ['STYLE.md'] }, outbound: { channels: [note(100)] } }));
+  write(`${a}/STYLE.md`, '# Style\n\nSay it in one line.\n');
   write(`${a}/a.txt`, 'a\n');
   git(a, 'add', '-A');
   git(a, 'commit', '-q', '-m', 'feat(#1): a');
 
   mkdirSync(b);
   git(b, 'init', '-q');
-  write(`${b}/.sift/config.json`, JSON.stringify({ prs: { targets: ['trunk'] }, release: { changelog: 'CHANGELOG.md' } }));
+  write(`${b}/.sift/config.json`, JSON.stringify({ prs: { targets: ['trunk'] }, release: { changelog: 'CHANGELOG.md' }, outbound: { channels: [note(5)] } }));
   write(`${b}/.sift/packs/only-b.json`, JSON.stringify({ subject: 'commit', checks: ['commit.format'] }));
   write(`${b}/CONTRIBUTING.md`, '# Contributing\n\nEvery commit names its issue.\n');
   write(`${b}/CHANGELOG.md`, '# Changelog\n');
@@ -209,6 +215,17 @@ describe('forge-only grades', () => {
     expect(issuesRead).toEqual(['o/b#5']);
     expect(there.config.prs.targets).toEqual(['trunk']);
   });
+
+  it('refuse a pull request number given to the issue or rules pack, naming the forms each takes', async () => {
+    fresh();
+    const plain = fakeForge();
+    host = { ...host, forge: fakeForge({ issue: async (repo, n) => ({ ...(await plain.issue(repo, n)), pr: n === 7 }) }) };
+    await expect(subjectFor(host, await sessionScope(), 'issue', '7')).rejects.toThrow('issue pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
+    await expect(subjectFor(host, await sessionScope(), 'rules', '#7')).rejects.toThrow('rules pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue URL, or free text (in text)');
+    // an issue number grades as before
+    expect((await subjectFor(host, await sessionScope(), 'issue', '5')).subject.kind).toBe('issue');
+    expect((await subjectFor(host, await sessionScope(), 'rules', '5')).subject.state).toMatchObject({ subject: { kind: 'issue', number: 5 } });
+  });
 });
 
 describe('the subagent default', () => {
@@ -225,5 +242,50 @@ describe('the subagent default', () => {
     expect(await scopeOf(checkouts, session, a, dirs.of('child'))).toMatchObject({ named: true, checkout: { root: a } });
     const r = await grade(host, child, 'commit', 'HEAD');
     expect((r.subject.facts['commits'] as { subject: string }[])[0]!.subject).toBe('fix(#2): in the worktree');
+  });
+});
+
+describe('the outbound gate', () => {
+  const noRead = async (p: string): Promise<string> => {
+    throw new Error(`ENOENT ${p}`);
+  };
+
+  it('judges a subagent\'s text under the checkout it was spawned in, else the session\'s', async () => {
+    fresh();
+    const dirs = new SpawnDirs();
+    dirs.spawned('there', wt, undefined);
+    dirs.spawned('loose', undefined, undefined);
+    dirs.spawned('outside', base, undefined);
+    const gate = async (agentId: string | undefined, text: string, tool = 'mcp__note__send') => {
+      const asked: { state: unknown; instructions: string[] }[] = [];
+      const { checkout } = await scopeOf(checkouts, session, undefined, dirs.of(agentId));
+      const gated = await gateCall({ ...host, judge: yesJudge(0.9, asked) }, checkout, tool, tool === 'mcp__note__send' ? { text } : { content: text }, noRead);
+      return { gated, rules: asked.flatMap((q) => q.instructions).filter((i) => /complies with this rule/.test(i)) };
+    };
+
+    // o/b's channel table and rule documents
+    const there = await gate('there', 'ten chars.');
+    expect(there.gated).toMatchObject({ outbound: { channel: 'note', limit: 5 }, decision: { allow: false, reason: 'note text is 10 chars, the limit is 5' } });
+    const thereOk = await gate('there', 'ok');
+    expect(thereOk.gated!.decision.allow).toBe(true);
+    expect(thereOk.rules.some((r) => r.endsWith('Every commit names its issue.'))).toBe(true);
+    expect(thereOk.rules.some((r) => r.endsWith('Say it in one line.'))).toBe(false);
+
+    // the session's, from the main loop and from a subagent spawned without a cwd
+    for (const agentId of [undefined, 'loose']) {
+      const here = await gate(agentId, 'ten chars.');
+      expect(here.gated).toMatchObject({ outbound: { channel: 'note', limit: 100 }, decision: { allow: true } });
+      expect(here.rules.some((r) => r.endsWith('Say it in one line.'))).toBe(true);
+      expect(here.rules.some((r) => r.endsWith('Every commit names its issue.'))).toBe(false);
+    }
+
+    // a directory in no repository: the default table, no rule documents
+    expect((await gate('outside', 'ten chars.')).gated).toBeUndefined();
+    const long = await gate('outside', 'x'.repeat(2001), 'mcp__discord__send_message');
+    expect(long.gated!.decision).toMatchObject({ allow: false, reason: 'discord-message text is 2001 chars, the limit is 2000' });
+    const outside = await gate('outside', 'hello', 'mcp__discord__send_message');
+    expect(outside.gated!.decision).toMatchObject({ allow: true, reason: 'clear' });
+    expect(outside.gated!.decision.report!.mechanical).toEqual([{ check: 'rules.present', severity: 'info', message: 'no rule documents found in the repo' }]);
+    expect(outside.rules).toEqual([]);
   });
 });

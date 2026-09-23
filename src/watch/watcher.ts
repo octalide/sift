@@ -27,6 +27,8 @@ export type WatchOptions = {
 export type WatchHost = {
   forge: Forge;
   store: StoreLike;
+  // the store key this poller's state persists under, its own per session so no other session moves its cursor
+  key: string;
   judge: Judge;
   pack: Pack;
   // the issue pack's mechanical checks run on every new issue, the filer's own included
@@ -46,7 +48,8 @@ export type WatchHost = {
   retire?: (ids: string[], why: string) => Promise<void>;
   // runs before each poll: the owner reaps what no longer has anyone to deliver to
   prepare?: () => Promise<void>;
-  // the epoch ms before which no poll on this token runs, shared by every poller on it
+  // the epoch ms before which no poll on this token runs, shared by the session's pollers. each session reads the
+  // remaining count on its own polls and holds its own
   rate?: { until: number };
 };
 
@@ -76,13 +79,9 @@ export class Watcher {
     private readonly options: WatchOptions,
   ) {}
 
-  private get key(): string {
-    return `watch:${this.options.repo}`;
-  }
-
   async start(): Promise<void> {
     this.stopped = false;
-    const stored = (await this.host.store.get(this.key)) as WatchState | undefined;
+    const stored = (await this.host.store.get(this.host.key)) as WatchState | undefined;
     if (stored && stored.version !== STATE_VERSION) this.host.log(`sift watch ${this.options.repo}: stored state is from an older version, reseeding`);
     this.state = stored && stored.version === STATE_VERSION ? stored : this.fresh();
     if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.forge.login();
@@ -99,6 +98,11 @@ export class Watcher {
     this.timer?.cancel();
     this.timer = undefined;
     this.host.status(undefined);
+  }
+
+  // resolves once the poll in flight, if any, has saved
+  async idle(): Promise<void> {
+    await this.inflight;
   }
 
   async pause(): Promise<void> {
@@ -148,7 +152,7 @@ export class Watcher {
   }
 
   private async save(): Promise<void> {
-    await this.host.store.set(this.key, this.state);
+    await this.host.store.set(this.host.key, this.state);
   }
 
   private schedule(ms: number): void {
@@ -273,7 +277,8 @@ export class Watcher {
     if (reached.length > 0) await this.host.retire?.(reached.map((s) => s.id), 'until reached');
   }
 
-  // the floor is per token: a poller that reads it low holds every poller on the token until the window refills
+  // a poller that reads the token's remaining calls below the floor holds every poller of its session until the window
+  // refills
   private rateWait({ remaining, reset }: Rate, now: number): number {
     if (remaining === undefined || remaining >= this.options.rateFloor) return 0;
     const wait = Math.max(reset ? reset * 1000 - now + 5000 : this.options.maxIntervalMs, this.options.maxIntervalMs);

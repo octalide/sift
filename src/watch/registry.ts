@@ -6,11 +6,13 @@ export type WatchesHost = {
   store: StoreLike;
   // the store key the subscriptions persist under
   key: string;
+  // the store key a repository's poll state persists under, one per session and repository
+  stateKey: (repo: string) => string;
   now: () => number;
   log: (text: string) => void;
   status: (text: string | undefined) => void;
   // what every poller shares; the registry supplies the per-repository rest
-  watcher: Omit<WatchHost, 'subscriptions' | 'retire' | 'prepare' | 'rate' | 'status'>;
+  watcher: Omit<WatchHost, 'key' | 'subscriptions' | 'retire' | 'prepare' | 'rate' | 'status'>;
   options: Omit<WatchOptions, 'repo'>;
 };
 
@@ -23,6 +25,7 @@ export class Watches {
   private next = 1;
   private readonly pollers = new Map<string, Watcher>();
   private readonly statuses = new Map<string, string>();
+  // this session's alone: another session on the token finds the low count on its own next poll
   private readonly rate = { until: 0 };
 
   constructor(private readonly host: WatchesHost) {}
@@ -105,12 +108,19 @@ export class Watches {
     for (const p of this.pollers.values()) p.stop();
   }
 
+  // stops every poller and resolves once none is mid-poll, so nothing writes a key after the session's are removed
+  async end(): Promise<void> {
+    this.stop();
+    await Promise.all([...this.pollers.values()].map((p) => p.idle()));
+  }
+
   private async ensure(repo: string): Promise<Watcher> {
     const have = this.pollers.get(repo);
     if (have) return have;
     const poller = new Watcher(
       {
         ...this.host.watcher,
+        key: this.host.stateKey(repo),
         subscriptions: () => this.on(repo),
         retire: (ids, why) => this.remove(ids, why),
         prepare: () => this.reap(),

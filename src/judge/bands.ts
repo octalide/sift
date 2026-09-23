@@ -1,11 +1,15 @@
 import { DEFAULT_THRESHOLDS, type Answer, type Band, type Thresholds } from './types.ts';
 
-// a noul is banded on its probability, a choice or score on its confidence
-export function bandOf(answer: Answer, thresholds: Thresholds = DEFAULT_THRESHOLDS): Band {
-  const p = answer.type === 'noul' ? answer.p : answer.confidence;
-  if (p >= thresholds.hi) return 'satisfied';
-  if (p <= thresholds.lo) return 'violated';
-  return 'unclear';
+// a noul is banded on its probability, a choice or score on what it picked: a confident pick of a violating option
+// key or level index is violated, a confident other pick satisfied, and any pick below hi unclear
+export function bandOf(answer: Answer, thresholds: Thresholds = DEFAULT_THRESHOLDS, violates: readonly (string | number)[] = []): Band {
+  if (answer.type === 'noul') {
+    if (answer.p >= thresholds.hi) return 'satisfied';
+    if (answer.p <= thresholds.lo) return 'violated';
+    return 'unclear';
+  }
+  if (answer.confidence < thresholds.hi) return 'unclear';
+  return violates.includes(answer.type === 'choice' ? answer.choice : answer.score) ? 'violated' : 'satisfied';
 }
 
 export function probabilityOf(answer: Answer): number {

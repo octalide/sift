@@ -6,7 +6,7 @@ import { CHECKS } from './checks.ts';
 import type { Finding, Judged, Pack, PackQuestion, RankedItem, RankedStep, RankStep, Report, Subject, Verdict } from './types.ts';
 import { batchQuestions, estimateTokensOf, JEV_LIMITS } from '../tokens.ts';
 
-type Meta = { lo: number; hi: number; severity: Judged['severity']; inverted: boolean };
+type Meta = { lo: number; hi: number; severity: Judged['severity']; inverted: boolean; violates: (string | number)[] };
 
 // a rank step as rank input: the subject list as items, the questions asked of each with {subject} already filled
 export type Step = { step: RankStep; items: Record<string, unknown>[]; questions: Questions; meta: Record<string, Meta>; by: string };
@@ -21,18 +21,21 @@ export type RunOptions = {
 export const TOP_DEFAULT = 20;
 
 function buildQuestion(q: PackQuestion, subject: Subject): { question: Question; meta: Meta } | undefined {
-  const { lo, hi, severity, options, when, inverted, ...question } = q;
+  const { lo, hi, severity, options, when, inverted, violates, ...question } = q;
   let built: Question;
+  let violating: (string | number)[] = [];
   if (question.type === 'choice') {
     const set = options ? subject.options[options] : question.criteria;
     if (!set || Object.keys(set).length === 0) return undefined;
     built = { ...question, criteria: options ? { ...set, none: 'none of the listed options applies' } : set };
+    violating = violates === 'listed' ? Object.keys(set) : (violates ?? []);
   } else {
     built = question;
+    if (question.type === 'score' && Array.isArray(violates)) violating = violates;
   }
   return {
     question: built,
-    meta: { lo: lo ?? DEFAULT_THRESHOLDS.lo, hi: hi ?? DEFAULT_THRESHOLDS.hi, severity: severity ?? 'warn', inverted: inverted ?? false },
+    meta: { lo: lo ?? DEFAULT_THRESHOLDS.lo, hi: hi ?? DEFAULT_THRESHOLDS.hi, severity: severity ?? 'warn', inverted: inverted ?? false, violates: violating },
   };
 }
 
@@ -95,7 +98,7 @@ export function verdictOf(mechanical: Finding[], judged: Judged[], judgeFailed: 
 }
 
 function judge(id: string, answer: Answer, m: Meta, instructions: string): Judged {
-  let band = bandOf(answer, m);
+  let band = bandOf(answer, m, m.violates);
   if (m.inverted && answer.type === 'noul') {
     band = band === 'satisfied' ? 'violated' : band === 'violated' ? 'satisfied' : band;
   }
