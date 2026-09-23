@@ -134,8 +134,7 @@ export function route(e: WatchEvent, subs: Subscription[], rules: WatchRules): R
   return { action: 'drop', reason: routes[0]!.r.reason, subs: [] };
 }
 
-// the delivery that uses up an until: settled subscription: a pr's verdict, or elsewhere a completed run or verdict. a
-// pr subscription whose pull request closes first goes too, since no verdict comes after
+// the delivery that uses up an until: settled subscription: a pr's verdict, or elsewhere a completed run or verdict
 export function settles(e: WatchEvent, scope: Scope): boolean {
   if (e.kind !== 'ci' || e.stalled) return false;
   return scope.kind === 'pr' ? e.settled === true : e.settled === true || e.run !== undefined;

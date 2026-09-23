@@ -273,29 +273,28 @@ export class Watcher {
   }
 
   // a pr subscription until merged or closed goes once the pr's state reaches it, as the item cache holds it, and one
-  // until settled once its pr closes, since a closed pr's head is never settled
+  // until settled once its pr closes first, since a closed pr's head is never settled
   private async retireReached(): Promise<void> {
-    const closed = (n: number) => {
-      const item = this.state.items[String(n)];
-      return item !== undefined && (item.merged || item.state === 'closed');
-    };
-    const reached = this.host.subscriptions().filter((s) => {
-      if (s.scope.kind !== 'pr' || (s.until !== 'merged' && s.until !== 'closed')) return false;
+    const reached = (s: Subscription): boolean => {
+      if (s.scope.kind !== 'pr' || !['merged', 'closed', 'settled'].includes(s.until ?? '')) return false;
       const item = this.state.items[String(s.scope.number)];
-      return item !== undefined && (item.merged || (s.until === 'closed' && item.state === 'closed'));
-    });
-    if (reached.length > 0) await this.host.retire?.(reached.map((s) => s.id), 'until reached');
-    const orphaned = this.host.subscriptions().filter((s) => s.scope.kind === 'pr' && s.until === 'settled' && closed(s.scope.number));
-    if (orphaned.length > 0) await this.host.retire?.(orphaned.map((s) => s.id), 'its pull request closed before a verdict');
+      return item !== undefined && (item.merged || (s.until !== 'merged' && item.state === 'closed'));
+    };
+    const subs = this.host.subscriptions().filter(reached);
+    const until = subs.filter((s) => s.until !== 'settled').map((s) => s.id);
+    const orphaned = subs.filter((s) => s.until === 'settled').map((s) => s.id);
+    if (until.length > 0) await this.host.retire?.(until, 'until reached');
+    if (orphaned.length > 0) await this.host.retire?.(orphaned, 'its pull request closed before a verdict');
   }
 
   // each joined pr subscription is answered once its pull request's open head is known: a head settled before it
-  // subscribed delivers that verdict to it alone, read again for its failed checks; a pending or checkless head leaves
-  // it to the poll, which delivers the verdict when the head settles; a closed pr leaves it to retireReached
+  // subscribed delivers that verdict to the joined subscriptions alone, its checks read again for the failed ones; a
+  // pending or checkless head leaves it to the poll, which delivers the verdict when the head settles; a closed pr leaves
+  // it to retireReached
   private async answerJoined(): Promise<void> {
     if (this.state.joined.length === 0) return;
     const live = this.byId();
-    const verdicts = new Map<string, Delivery>();
+    const waiting = new Map<string, { pull: Pull; subs: Subscription[] }>();
     const left: string[] = [];
     for (const id of this.state.joined) {
       const sub = live.get(id);
@@ -309,27 +308,21 @@ export class Watcher {
       }
       const key = headKey(pull);
       if (this.state.pending[key] || this.state.unchecked[key]) continue;
-      if (!this.state.settled[key]) {
-        left.push(id);
-        continue;
-      }
-      const have = verdicts.get(key);
-      if (have) {
-        const routed = route(have.event, [sub], this.rules());
-        if (routed.action === 'deliver') have.subs.push(id);
-        continue;
-      }
+      if (!this.state.settled[key]) left.push(id);
+      else waiting.set(key, { pull, subs: [...(waiting.get(key)?.subs ?? []), sub] });
+    }
+    const out: Delivery[] = [];
+    for (const { pull, subs } of waiting.values()) {
       const head = await this.settle(pull.sha).catch(() => undefined);
       if (!head?.verdict) {
-        left.push(id);
+        left.push(...subs.map((s) => s.id));
         continue;
       }
       const event = this.settledEvent(pull, head.verdict, pull.user, this.host.now());
-      const routed = route(event, [sub], this.rules());
-      verdicts.set(key, { event, label: routed.action === 'deliver' ? `${routed.reason}, before it subscribed` : routed.reason, subs: routed.action === 'deliver' ? [id] : [] });
+      const routed = route(event, subs, this.rules());
+      if (routed.action === 'deliver') out.push({ event, label: `${routed.reason}, before it subscribed`, subs: routed.subs });
     }
     this.state.joined = left;
-    const out = [...verdicts.values()].filter((d) => d.subs.length > 0);
     if (out.length > 0) await this.send(out, [], true);
   }
 
