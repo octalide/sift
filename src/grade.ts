@@ -1,9 +1,9 @@
 import type { Forge } from './forge/forge.ts';
 import type { Git } from './forge/git.ts';
-import { ciSubject } from './ci/log.ts';
 import type { Judge } from './judge/types.ts';
 import { indexTree, treeSubject } from './locate/tree.ts';
 import type { StoreLike } from './log.ts';
+import { REMOVED_PACKS } from './packs/builtin.ts';
 import { runPack } from './packs/run.ts';
 import { parseSubject, refusal, type ParsedKind } from './packs/subject.ts';
 import type { Pack, Report, Subject } from './packs/types.ts';
@@ -41,7 +41,11 @@ export type Graded = { report: Report; subject: Subject };
 
 export async function grade(host: GradeHost, scope: GradeScope, packName: string, ref: string, opts: GradeOptions = {}): Promise<Graded> {
   const pack = scope.checkout.packs[packName];
-  if (!pack) throw new Error(`unknown pack ${packName} (have: ${Object.keys(scope.checkout.packs).join(', ')})`);
+  if (!pack) {
+    const removed = REMOVED_PACKS[packName];
+    if (removed) throw new Error(removed(host.forge, opts.repo ?? scope.checkout.repo ?? '<owner/name>'));
+    throw new Error(`unknown pack ${packName} (have: ${Object.keys(scope.checkout.packs).join(', ')})`);
+  }
   const { subject, config } = await subjectFor(host, scope, pack, ref, opts);
   const report = await runPack(pack, subject, host.judge, config, { top: opts.top });
   return { report, subject };
@@ -152,14 +156,6 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<
       const p = parsed('issue');
       const at = p.repo ?? needRepo();
       return { subject: await planSubject(forge, at, p.number, opts.text, pack.name), config: await configOf(at) };
-    }
-    case 'log': {
-      // job:<id> or run:<id> through the forge, a bare number is a run, text is the log itself
-      const config = await configOf(repo);
-      if (opts.text !== undefined) return { subject: await ciSubject(forge, repo, { text: opts.text }), config };
-      const m = /^(job|run):(\d+)$|^#?(\d+)$/.exec(ref);
-      if (!m) throw new Error(`${pack.name} pack: expected run:<id>, job:<id>, a run id, or the log in text, got ${ref}`);
-      return { subject: await ciSubject(forge, repo, m[1] === 'job' ? { job: m[2]! } : { run: m[2] ?? m[3]! }), config };
     }
     default:
       return { subject: textSubject(opts.text ?? ref), config: checkout.config };

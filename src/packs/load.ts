@@ -57,6 +57,7 @@ export function validatePack(raw: unknown, name: string): Pack {
   if (raw === null || typeof raw !== 'object') throw new Error(`pack ${name}: not an object`);
   const p = raw as Partial<Pack>;
   if (typeof p.subject !== 'string') throw new Error(`pack ${name}: missing subject`);
+  if ((p.subject as string) === 'log') throw new Error(`pack ${name}: the log subject is removed with the ci pack, sift judges no ci output`);
   if ('expand' in p) throw new Error(`pack ${name}: expand is gone, write it as a rank step: { "rank": [{ "from": "<list>", "questions": { "<id>": <question> } }] }`);
   return {
     name: p.name ?? name,

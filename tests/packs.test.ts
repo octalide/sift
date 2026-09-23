@@ -498,6 +498,7 @@ describe('pack materialization', () => {
     const report = await runPack(BUILTIN_PACKS['plan']!, { kind: 'plan', ref: 'p', state: {}, facts: {}, options: {} }, off, DEFAULT_CONFIG);
     expect(report.verdict).toBe('unknown');
     expect(() => validatePack({ subject: 'issue', questions: { q: { type: 'nope', instructions: 'x' } } }, 'bad')).toThrow(/unknown type/);
+    expect(() => validatePack({ subject: 'log', questions: { q: { type: 'noul', instructions: 'x' } } }, 'bad')).toThrow('pack bad: the log subject is removed with the ci pack, sift judges no ci output');
     expect(validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x' } } }, 'ok').name).toBe('ok');
     expect(() => validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', criteria: 'prose' } } }, 'bad')).toThrow(/true, false/);
     expect(validatePack({ subject: 'text', questions: { q: { type: 'noul', instructions: 'x', criteria: { true: 'yes', false: 'no' } } } }, 'ok').name).toBe('ok');

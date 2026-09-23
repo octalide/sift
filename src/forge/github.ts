@@ -1,7 +1,6 @@
 import { Gh, GhError, type ApiResponse } from './gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
-import { fillNeeds, workflowJobs } from './workflow.ts';
-import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgePost, ForgeUser, ForgeWrite, Issue, IssueSummary, Job, JobLog, LogStep, PullHead, PullRequest, Rate, Review, ReviewComment, ReviewVerdict, Run, Template, WatchItem } from './forge.ts';
+import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgePost, ForgeUser, ForgeWrite, Issue, IssueSummary, PullHead, PullRequest, Rate, Review, ReviewComment, ReviewVerdict, Run, Template, WatchItem } from './forge.ts';
 
 type GhUser = { login: string; type?: string };
 type GhIssue = {
@@ -29,8 +28,7 @@ type GhPull = GhIssue & {
 };
 type GhComment = { user: GhUser; body: string | null; created_at: string; author_association?: string };
 type GhCommit = { sha: string; parents: { sha: string }[]; commit: { message: string } };
-type GhCheckRun = { id: number; name: string; status: string; conclusion: string | null };
-type GhJob = { id: number; run_id: number; head_sha: string; name: string; status: string; conclusion: string | null; html_url: string };
+type GhCheckRun = { name: string; status: string; conclusion: string | null; details_url?: string | null };
 type GhStatus = { context: string; state: string };
 type GhRun = {
   id: number;
@@ -228,8 +226,13 @@ export function toWatchItem(raw: RawItem): WatchItem {
 }
 
 // a check run's id is its job's id when actions ran it, so the log is reachable from the check
-const checkRun = (c: GhCheckRun): Check => ({ name: c.name, id: String(c.id), done: c.status === 'completed', conclusion: c.conclusion, ok: PASSING.has(c.conclusion ?? '') });
-const job = (j: GhJob): Job => ({ id: String(j.id), name: j.name, run: String(j.run_id), sha: j.head_sha, done: j.status === 'completed', conclusion: j.conclusion, ok: PASSING.has(j.conclusion ?? ''), url: j.html_url });
+// an actions check run links its job as .../actions/runs/<run>/job/<job>; a check from any other app names no run
+const ACTIONS_JOB = /\/actions\/runs\/(\d+)\/job\/\d+/;
+
+const checkRun = (c: GhCheckRun): Check => {
+  const run = ACTIONS_JOB.exec(c.details_url ?? '')?.[1];
+  return { name: c.name, done: c.status === 'completed', conclusion: c.conclusion, ok: PASSING.has(c.conclusion ?? ''), ...(run === undefined ? {} : { run }) };
+};
 const status = (s: GhStatus): Check => ({ name: s.context, done: s.state !== 'pending', conclusion: s.state === 'pending' ? null : s.state, ok: s.state === 'success' });
 
 const run = (r: GhRun, tag: boolean): Run => ({
@@ -248,23 +251,6 @@ const run = (r: GhRun, tag: boolean): Run => ({
 });
 
 const rate = (r: ApiResponse): Rate => ({ remaining: r.remaining, reset: r.reset });
-
-const STEP_START = /^(?:\uFEFF)?(?:\S+Z )?##\[group\]Run (.*)$/;
-const STEP_POST = /^(?:\S+Z )?Post job cleanup\.$/;
-const STEP_ERROR = /^(?:\S+Z )?##\[error\]/;
-
-// the runner opens each step with a "##[group]Run <name>" line, each post step with "Post job cleanup.", and marks
-// a failed step with "##[error]"; the lines before the first step are the job setup, kept as a step of their own
-export function splitJobLog(text: string): LogStep[] {
-  const steps: { name: string; lines: string[] }[] = [{ name: 'Set up job', lines: [] }];
-  for (const line of text.split('\n')) {
-    const start = STEP_START.exec(line);
-    if (start) steps.push({ name: `Run ${start[1]!}`, lines: [] });
-    else if (STEP_POST.test(line)) steps.push({ name: 'Post job cleanup', lines: [] });
-    steps[steps.length - 1]!.lines.push(line);
-  }
-  return steps.filter((s) => s.lines.some((l) => l.trim() !== '')).map((s) => ({ name: s.name, ok: !s.lines.some((l) => STEP_ERROR.test(l)), text: s.lines.join('\n') }));
-}
 
 const missing = (error: unknown): boolean => error instanceof GhError && /http 40[34]/.test(error.message);
 
@@ -512,25 +498,8 @@ export class GitHubForge implements Forge {
     return { changed: true, token: probe.etag, rate: rate(probe), value: raw.map((p) => ({ number: p.number, title: p.title, branch: p.head.ref, sha: p.head.sha, url: p.html_url, user: p.user.login })) };
   }
 
-  // the jobs api carries no dependencies, so needs are read from the workflow file at the run's sha
-  async jobs(repo: string, run: string): Promise<Job[]> {
-    const [record, jobs] = await Promise.all([
-      this.gh.json<GhRun>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}`),
-      this.gh.pages<GhJob>(`repos/${repo}/actions/runs/${encodeURIComponent(run)}/jobs`, '[.jobs[] | {id, run_id, head_sha, name, status, conclusion, html_url}]'),
-    ]);
-    const text = record.path ? await this.file(repo, record.path, record.head_sha) : undefined;
-    const workflow = text === undefined ? undefined : workflowJobs(text);
-    return workflow ? fillNeeds(jobs.map(job), workflow) : jobs.map(job);
-  }
-
-  // the logs endpoint refuses any accept but json and answers a 302 to the log's download url, which gh follows
-  // under its default accept, so the response read here is the download itself
-  async jobLog(repo: string, id: string): Promise<JobLog> {
-    const [j, log] = await Promise.all([
-      this.gh.json<GhJob>(`repos/${repo}/actions/jobs/${encodeURIComponent(id)}`),
-      this.gh.api(`repos/${repo}/actions/jobs/${encodeURIComponent(id)}/logs`, { raw: true }),
-    ]);
-    return { job: j.name, run: String(j.run_id), sha: j.head_sha, url: j.html_url, steps: splitJobLog(log.body) };
+  logCommand(repo: string, run: string): string {
+    return `gh run view ${run} --log-failed -R ${repo}`;
   }
 
   parseUrl(url: string): ForgeLink | undefined {

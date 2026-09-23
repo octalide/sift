@@ -40,8 +40,7 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
       const m = /^https:\/\/fake\/([^/]+\/[^/]+)\/(issue|pr)\/(\d+)$/.exec(url);
       return m ? { repo: m[1]!, kind: m[2] as 'issue' | 'pr', number: Number(m[3]) } : undefined;
     },
-    jobs: async () => [],
-    jobLog: async (_r, id) => ({ job: `job ${id}`, run: '', sha: '', url: '', steps: [] }),
+    logCommand: (repo, run) => `gh run view ${run} --log-failed -R ${repo}`,
     post: async (repo, post) => `https://fake/${repo}/${post.kind}/posted`,
     writeOf: () => undefined,
     ...over,
