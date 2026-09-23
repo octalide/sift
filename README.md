@@ -473,6 +473,10 @@ CI runs the same three commands on every pull request and reports them through a
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
 - The prune module estimates tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT).
 
+## Changes in 0.11.1
+
+Fixed: a low-confidence choice is unclear, not violated. A choice was banded on its confidence alone, so the issue pack's `duplicate_of = none` at 0.32 warned an issue with no duplicate. A choice is now banded on what it picked: a confident pick of an option its `violates` names is violated, a confident other pick satisfied, and any pick below `hi` unclear. `duplicate_of` and `blocked_by` mark every open issue as violating, so `none` is never a finding and a confident duplicate still warns. A repo pack choice without `violates` is never violated, where a low-confidence answer to it used to be.
+
 ## Changes in 0.11.0
 
 This release drops judged review of diffs and is breaking. The judged diff questions caught nothing the repositories' own checks did not, raised false positives, and often could not run from another repository's worktree.
