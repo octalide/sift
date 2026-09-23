@@ -93,7 +93,7 @@ export function rulingsOf(forge: Pick<Forge, 'maintains'>, author: string, threa
 }
 
 // an issue graded for the pack that was asked; a number that names a pull request is refused with the pack and the forms of its kind named
-export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, asked: Asked<'issue' | 'rules'>): Promise<Subject> {
+export async function issueSubject(forge: Forge, repo: string, n: number, config: RepoConfig, asked: Asked<'issue' | 'rules'>, cap = BODY_CAP): Promise<Subject> {
   const issue = await forge.issue(repo, n);
   if (issue.pr) throw refusal(asked, `#${n}`, `subject is ${repo}#${n}, a pull request, not an issue`, forge);
   const [all, open, parent] = await Promise.all([forge.comments(repo, 'issue', n), forge.openIssues(repo), forge.parent(repo, n)]);
@@ -110,7 +110,7 @@ export async function issueSubject(forge: Forge, repo: string, n: number, config
       repo,
       number: n,
       title: issue.title,
-      body: truncate(body, BODY_CAP),
+      body: truncate(body, cap),
       labels,
       milestone: issue.milestone ?? null,
       author: issue.author.login,
@@ -314,43 +314,43 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
   };
 }
 
-// the issue the rules are read against; free text is read by textRulesSubjects
+// the issue the rules are read against
 export type RulesTarget = { number: number; pack: string };
 
 // the checkout or repository the rules are read from, and the discoveries in flight that read them
 export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; discoveries: Discoveries };
 
-export async function rulesSubject(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject> {
+// an issue as the rules read it: its title and whole body through the parts free text takes, the rest of the issue beside the opening
+export async function rulesSubjects(host: RulesHost, target: RulesTarget, config: RepoConfig, cap = BODY_CAP): Promise<Subject[]> {
   const { forge, repo } = host;
   const ref = `#${target.number}`;
-  let subject: Record<string, unknown> = { kind: 'issue', ref };
-  let about: string | undefined;
-  if (forge && repo) {
-    const s = await issueSubject(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' });
-    subject = { kind: 'issue', ...s.state };
-    about = `issue ${ref}`;
-  }
+  if (!forge || !repo) return [rulesOf(await rulesFound(host, config), `issue:${ref}`, { kind: 'issue', ref }, 'The subject', {})];
+  const s = await issueSubject(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' }, Infinity);
+  const { title, body, ...rest } = s.state;
   // the subject is read, and a pull request refused, before discovery spends judge calls
-  const found = await rulesFound(host, config);
-  return rulesOf(found, `issue:${ref}`, subject, about ? `The subject (${about})` : 'The subject', {});
+  return partSubjects(await rulesFound(host, config), `issue:${ref}`, `${title}\n${body}`, cap, `issue ${ref}`, { kind: 'issue', ...s.state }, { kind: 'issue', ...rest });
 }
 
-// text about to be written, as the rules read it: one subject when it fits the judge's state, otherwise one per part, so
-// every character written is judged. the opening part (where a post's title is) is judged against every rule, a rule
-// about the whole text among them; each later part against what a part can break, named by its place and headings
+// text about to be written, as the rules read it
 export async function textRulesSubjects(host: RulesHost, target: { text: string; about?: string }, config: RepoConfig, cap = BODY_CAP): Promise<Subject[]> {
   const { text, about } = target;
+  const context = { kind: 'text', ...(about ? { about } : {}) };
+  return partSubjects(await rulesFound(host, config), `text:${truncate(text, 40)}`, text, cap, about, { ...context, text }, context);
+}
+
+// one subject when the text fits the judge's state, otherwise one per part, so every character is judged. the opening part
+// (where a title is) carries the rest of the subject and is judged against every rule, a rule about the whole text among
+// them; each later part against what a part can break, named by its place and headings
+function partSubjects(found: Found, ref: string, text: string, cap: number, about: string | undefined, whole: Record<string, unknown>, opening: Record<string, unknown>): Subject[] {
   const parts = partsOf(text, cap);
-  const found = await rulesFound(host, config);
-  const ref = `text:${truncate(text, 40)}`;
   const named = about ? ` (${about})` : '';
-  if (parts.length === 1) return [rulesOf(found, ref, { kind: 'text', ...(about ? { about } : {}), text }, `The subject${named}`, {})];
+  if (parts.length === 1) return [rulesOf(found, ref, whole, `The subject${named}`, {})];
   const of = `a ${text.length}-character text in ${parts.length} parts`;
   return parts.map((part, i) => {
     const name = partName(part, i, parts.length);
     if (i === 0) {
       const note = `the opening of ${of}, judged against every rule, the rules about the whole text among them; the parts after it are judged on their own`;
-      return rulesOf(found, ref, { kind: 'text', ...(about ? { about } : {}), note, text: part.text }, `The opening, ${name}, of the subject${named}`, { part: `the opening, ${name}` });
+      return rulesOf(found, ref, { ...opening, note, text: part.text }, `The opening, ${name}, of the subject${named}`, { part: `the opening, ${name}` });
     }
     const note = `${name} of ${of}, judged on its own; the opening is judged against the rules about the whole text`;
     return rulesOf(found, ref, { kind: 'section', ...(about ? { about } : {}), note, text: part.text }, `${name[0]!.toUpperCase()}${name.slice(1)} of the subject${named}`, { part: name, section: true });

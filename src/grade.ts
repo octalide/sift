@@ -9,7 +9,7 @@ import type { Pack, Report, Subject } from './packs/types.ts';
 import type { Checkout, CheckoutFs, Checkouts } from './repo/checkout.ts';
 import { defaultTarget, type RepoConfig } from './repo/config.ts';
 import { localSource, remoteSource } from './repo/source.ts';
-import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubject, textRulesSubjects, textSubject } from './repo/subjects.ts';
+import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubjects, textRulesSubjects, textSubject } from './repo/subjects.ts';
 import { checkoutSource, forgeSource, type Discoveries, type RuleSource } from './rules/discover.ts';
 import { truncate } from './tokens.ts';
 
@@ -125,7 +125,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<
       const rules = { forge, repo, source: ruleSource(host, scope, at), discoveries: host.discoveries };
       // free text is read the way the outbound gate reads it, every part of a long text judged
       if (p.kind === 'text') return { subjects: await textRulesSubjects(rules, { text: opts.text ?? p.text }, config), config };
-      return { subjects: [await rulesSubject({ ...rules, repo: p.repo ?? needRepo() }, { number: p.number, pack: pack.name }, config)], config };
+      return { subjects: await rulesSubjects({ ...rules, repo: p.repo ?? needRepo() }, { number: p.number, pack: pack.name }, config), config };
     }
     case 'tree': {
       // text is the subject when given; otherwise an issue or pull request is its title and body, anything else the text itself

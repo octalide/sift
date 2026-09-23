@@ -159,11 +159,12 @@ describe('grade in a named checkout', () => {
   });
 
   describe('rules on free text', () => {
-    // a judge that finds a rule broken by any text with an em dash, and records every text it judged a rule on
+    // a judge that finds a rule broken by any text (or short issue body) with an em dash, and records every text it judged a rule on
     const dashes = (seen: string[]): Judge => ({
       name: 'fake',
       ask: async (state, q) => {
-        const text = (state as { subject?: { text?: string } }).subject?.text;
+        const subject = (state as { subject?: { text?: string; body?: string } }).subject;
+        const text = subject?.text ?? subject?.body;
         const rule = Object.values(q).some((x) => / this rule: /.test(x.instructions));
         if (rule && text !== undefined) seen.push(text);
         return { ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k) => [k, { type: 'noul' as const, p: rule && text?.includes('—') ? 0.1 : 0.9 }])) };
@@ -193,6 +194,31 @@ describe('grade in a named checkout', () => {
       expect([...seen].sort((x, y) => text.indexOf(x) - text.indexOf(y)).join('')).toBe(text);
       expect(seen.every((s) => s.length <= 20_000)).toBe(true);
       expect((await grade(host, await sessionScope(), 'rules', 'x', { text: long(false) })).report.verdict).toBe('pass');
+    });
+
+    it('reads an issue\'s title and whole body the same way, the rest of the issue beside the opening', async () => {
+      fresh();
+      const seen: string[] = [];
+      const withBody = (body: string) => fakeForge({ issue: async (r, n) => ({ ...(await fakeForge().issue(r, n)), labels: ['fix'], body }) });
+      host = { ...host, forge: withBody(long(true)), judge: dashes(seen), discoveries: discoveries(dashes([])) };
+      const { report, subject } = await grade(host, await sessionScope(), 'rules', '#7');
+      expect(report.verdict).toBe('warn');
+      expect(report.parts).toHaveLength(3);
+      const violated = report.ranked[0]!.items.flatMap((i) => i.asked).filter((j) => j.band === 'violated');
+      expect(violated.map((j) => j.parts)).toEqual([[expect.stringMatching(/^part [23] of 3 \("Section \d+"/)]]);
+      expect(subject.ref).toBe('issue:#7');
+      expect(subject.state['subject']).toMatchObject({ kind: 'issue', number: 7, labels: ['fix'], text: expect.stringMatching(/^Issue 7\n/) });
+      const text = `Issue 7\n${long(true)}`;
+      expect([...seen].sort((x, y) => text.indexOf(x) - text.indexOf(y)).join('')).toBe(text);
+      expect(seen.every((s) => s.length <= 20_000)).toBe(true);
+      host = { ...host, forge: withBody(long(false)) };
+      expect((await grade(host, await sessionScope(), 'rules', '#7')).report.verdict).toBe('pass');
+      // a short issue is one subject, its title and body as before
+      host = { ...host, forge: withBody('One — dash.') };
+      const short = await grade(host, await sessionScope(), 'rules', '#7');
+      expect(short.report.parts).toBeUndefined();
+      expect(short.report.verdict).toBe('warn');
+      expect(short.subject.state['subject']).toMatchObject({ kind: 'issue', number: 7, title: 'Issue 7', body: 'One — dash.' });
     });
 
     it('grades short text as one subject, as before', async () => {
