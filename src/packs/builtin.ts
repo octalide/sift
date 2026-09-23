@@ -56,6 +56,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
       needs_parent: {
         type: 'noul',
         instructions: 'This issue reads as one part of a larger effort that should be tracked by a parent issue.',
+        inverted: true,
         severity: 'info',
       },
       duplicate_of: {
@@ -90,6 +91,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
           'needs triage: understandable but missing scope, acceptance criteria, or a decision',
           'ready: clear enough to start implementing now',
         ],
+        violates: [0, 1],
         severity: 'info',
       },
     },
