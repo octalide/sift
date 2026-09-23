@@ -18,7 +18,7 @@ import { PRUNE_TOOL, PruneLoops } from '../src/prune/loops.ts';
 import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { Discoveries, DISCOVERY_WAIT_MS } from '../src/rules/discover.ts';
 import { Watches } from '../src/watch/registry.ts';
-import { CI_FILTERS, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
+import { CI_FILTERS, commandInputOf, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
 import { SEEN_EVERY_MS, StoreKeys, watchKeys } from '../src/keys.ts';
 
@@ -343,7 +343,7 @@ export const register: Register = (on, rawOptions) => {
         type: 'object',
         properties: {
           action: { type: 'string', enum: [...WATCH_ACTIONS] },
-          repo: { type: 'string', description: 'owner/name. subscribe: the repository, default the one checked out where the calling subagent was spawned, else the session\'s. poll, pause, resume, reset, deferred: only this repository' },
+          repo: { type: 'string', description: 'owner/name. subscribe and start: the repository, default the one checked out where the calling subagent was spawned, else the session\'s. poll, pause, resume, reset, deferred: only this repository' },
           scope: { type: 'string', description: 'subscribe: repo (default), pr <n> (the pull request across its heads), branch <name> (its runs), run <id> (that run, read by id until it completes), tag <glob> (runs on tags matching the glob)' },
           items: { type: 'boolean', description: 'subscribe: deliver issue and pull request events in scope, default true' },
           ci: { type: 'string', enum: [...CI_FILTERS], description: 'subscribe: settled (each pull request head\'s verdict, and each completed run on a branch, tag or run scope), failures (verdicts and failed runs), all (every completed run as well), none. Default the watchCi option' },
@@ -393,7 +393,7 @@ export const register: Register = (on, rawOptions) => {
         required: ['repo', 'kind'],
       },
     });
-    await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred]' });
+    await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|poll|pause|resume|reset|deferred [repo]|start [repo] [for <pr|branch>]|subscribe <repo> [scope]|unsubscribe <id>]' });
 
     if (watches) {
       await mailbox.load();
@@ -680,11 +680,12 @@ export const register: Register = (on, rawOptions) => {
     }
     if (head === 'watch') {
       const [action = 'status', ...args] = rest;
-      const input: WatchInput = action === 'subscribe' ? { action, repo: args[0], scope: args.slice(1).join(' ') || undefined } : action === 'unsubscribe' ? { action, id: args[0] } : { action, repo: args[0] };
       if (!(WATCH_ACTIONS as readonly string[]).includes(action)) return { text: `unknown watch action ${action}` };
+      const input = commandInputOf(action, args);
+      if ('error' in input) return { text: input.error };
       return { text: await watchControl(rt, input) };
     }
-    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift prune off [n]|on, /sift watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred [repo]` };
+    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift prune off [n]|on, /sift watch status|list|poll|pause|resume|reset|deferred [repo], /sift watch start [repo] [for <pr|branch>], /sift watch subscribe <repo> [scope], /sift watch unsubscribe <id>` };
   });
 };
 

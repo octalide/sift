@@ -7,7 +7,7 @@ import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { currentState, diffItems, diffRuns, hashOf, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, type Item, type WatchEvent, type WatchState } from '../src/watch/poll.ts';
 import { Watches, type WatchesHost } from '../src/watch/registry.ts';
 import { StoreKeys } from '../src/keys.ts';
-import { formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, subscriptionOf, type CiFilter, type Scope, type Subscription } from '../src/watch/subscription.ts';
+import { commandInputOf, formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, subscriptionOf, type CiFilter, type Scope, type Subscription } from '../src/watch/subscription.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { Watcher, summarize, type WatchDelivery, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -122,13 +122,30 @@ describe('rules', () => {
     expect(subscriptionOf({ scope: 'pr 4', ci: 'none', until: 'settled' }, how)).toEqual({ error: 'until settled waits on a ci verdict, which ci none never delivers' });
     expect(subscriptionOf({ for: '4' }, { ...how, start: true, filter: { ...how.filter, ci: 'none' } })).toMatchObject({ error: expect.stringMatching(/ci none/) });
     expect(subscriptionOf({}, { ...how, repo: undefined })).toMatchObject({ error: expect.stringMatching(/no repository/) });
-    // start: the caller's repository, scoped by for to a pull request or a branch; a subagent's lasts until settled
-    expect(subscriptionOf({ repo: 'o/x', for: '#12' }, { ...how, start: true })).toMatchObject({ repo: 'o/r', scope: { kind: 'pr', number: 12 }, for: 'issue-9', until: 'settled' });
+    // start: the repository it names, else the caller's, scoped by for to a pull request or a branch; a subagent's lasts until settled
+    expect(subscriptionOf({ repo: 'o/x', for: '#12' }, { ...how, start: true })).toMatchObject({ repo: 'o/x', scope: { kind: 'pr', number: 12 }, for: 'issue-9', until: 'settled' });
     expect(subscriptionOf({ for: 'feat/12' }, { ...how, start: true })).toMatchObject({ scope: { kind: 'branch', name: 'feat/12' }, until: 'settled' });
     expect(subscriptionOf({ for: '12', until: 'merged' }, { ...how, start: true })).toMatchObject({ until: 'merged' });
     expect(subscriptionOf({ for: '12' }, { ...how, start: true, owner: undefined })).not.toHaveProperty('until');
     expect(subscriptionOf({}, { ...how, start: true })).toEqual({ repo: 'o/r', scope: { kind: 'repo' }, filter: how.filter, for: 'issue-9' });
     expect(subscriptionOf({}, { ...how, start: true, owner: undefined })).toEqual({ repo: 'o/r', scope: { kind: 'repo' }, filter: how.filter });
+    expect(subscriptionOf({ repo: 'o/x' }, { ...how, start: true, owner: undefined })).toEqual({ repo: 'o/x', scope: { kind: 'repo' }, filter: how.filter });
+  });
+
+  it('reads /sift watch arguments as the tool takes them, start with a repository and for', () => {
+    const start = (...args: string[]) => {
+      const input = commandInputOf('start', args);
+      return 'error' in input ? input : subscriptionOf(input, { start: true, repo: 'o/r', filter: { items: true, ci: 'failures', stall: true } });
+    };
+    expect(start()).toMatchObject({ repo: 'o/r', scope: { kind: 'repo' } });
+    expect(start('o/x')).toMatchObject({ repo: 'o/x', scope: { kind: 'repo' } });
+    expect(start('o/x', 'for', '#12')).toMatchObject({ repo: 'o/x', scope: { kind: 'pr', number: 12 } });
+    expect(start('o/x', 'for', 'feat/12')).toMatchObject({ repo: 'o/x', scope: { kind: 'branch', name: 'feat/12' } });
+    expect(start('for', '12')).toMatchObject({ repo: 'o/r', scope: { kind: 'pr', number: 12 } });
+    for (const bad of [['o/x', '12'], ['o/x', 'for'], ['for'], ['o/x', 'for', '12', 'more']]) expect(start(...bad)).toEqual({ error: 'usage: /sift watch start [repo] [for <pr|branch>]' });
+    expect(commandInputOf('subscribe', ['o/x', 'pr', '4'])).toEqual({ action: 'subscribe', repo: 'o/x', scope: 'pr 4' });
+    expect(commandInputOf('unsubscribe', ['s3'])).toEqual({ action: 'unsubscribe', id: 's3' });
+    expect(commandInputOf('poll', ['o/x'])).toEqual({ action: 'poll', repo: 'o/x' });
   });
 
   it('parses scopes and untils, and matches tag globs', () => {
