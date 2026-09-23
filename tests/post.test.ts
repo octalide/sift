@@ -7,7 +7,7 @@ import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { DEFAULT_CONFIG, resolveConfig, type RepoConfig } from '../src/repo/config.ts';
 import { simpleCommands } from '../src/shell.ts';
 import { fakeForge } from './fake-forge.ts';
-import { memoryStore } from './fake-source.ts';
+import { discoveries } from './fake-source.ts';
 
 const github = new GitHubForge(async () => ({ exitCode: 1, stdout: '', stderr: '' }));
 
@@ -97,22 +97,20 @@ describe('post', () => {
       return { ok: true, backend: 'fake', latencyMs: 1, answers };
     },
   });
-  const host = (posted: { repo: string; post: ForgePost }[], asked: string[] = [], configs: Record<string, RepoConfig> = {}) => ({
+  const host = (posted: { repo: string; post: ForgePost }[], asked: string[] = [], configs: Record<string, RepoConfig> = {}, j: Judge = judge(asked)) => ({
     forge: fakeForge({
       name: 'GitHub',
       writes: GH_WRITES,
       nouns: github.nouns,
-      contents: async (repo) => Object.keys(docs[repo] ?? {}),
+      contents: async (repo) => Object.keys(docs[repo] ?? {}).map((path) => ({ path, id: path })),
       file: async (repo, path) => docs[repo]?.[path],
       post: async (repo, post) => {
         posted.push({ repo, post });
         return `https://github.com/${repo}/${post.kind}/1`;
       },
     }),
-    judge: judge(asked),
-    store: memoryStore(),
-    now: () => 1,
-    notice: () => undefined,
+    judge: j,
+    discoveries: discoveries(j),
     config: async (repo: string) => configs[repo] ?? DEFAULT_CONFIG,
   });
   const pack = BUILTIN_PACKS['rules']!;
@@ -156,6 +154,15 @@ describe('post', () => {
     expect(posted).toHaveLength(1);
   });
 
+  it('refuses and writes nothing while the named repository\'s rule discovery outlasts its wait', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const never: Judge = { name: 'never', ask: () => new Promise(() => {}) };
+    const h = { ...host(posted, [], {}, never), discoveries: discoveries(never, undefined, { schedule: (_, fn) => (void Promise.resolve().then(fn), { cancel: () => {} }) }) };
+    const r = await postCall(h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' });
+    expect(r).toMatchObject({ refused: 'github-pr-comment to o/target: rule discovery for o/target outlasted its 5 s wait and keeps running; the next call on it reuses what it finds', decision: { allow: false, pending: true } });
+    expect(posted).toEqual([]);
+  });
+
   describe('a text longer than the judge reads at once', () => {
     const rulesDocs: Record<string, Record<string, string>> = {
       'o/long': { 'CONTRIBUTING.md': '## Prose\n\nNo em dashes in anything you write.\n\n## Releases\n\nRelease notes state the SemVer impact.\n' },
@@ -180,19 +187,18 @@ describe('post', () => {
       },
     });
     const longHost = (posted: { repo: string; post: ForgePost }[], seen: Seen[]) => ({
-      ...host(posted),
+      ...host(posted, [], {}, judge(seen)),
       forge: fakeForge({
         name: 'GitHub',
         writes: GH_WRITES,
         nouns: github.nouns,
-        contents: async (repo) => Object.keys(rulesDocs[repo] ?? {}),
+        contents: async (repo) => Object.keys(rulesDocs[repo] ?? {}).map((path) => ({ path, id: path })),
         file: async (repo, path) => rulesDocs[repo]?.[path],
         post: async (repo, post) => {
           posted.push({ repo, post });
           return `https://github.com/${repo}/${post.kind}/1`;
         },
       }),
-      judge: judge(seen),
     });
     // release notes of 50,000 characters in headed sections of numbered paragraphs, the impact stated only at the top,
     // with an em dash placed after character 30,000 when broken
