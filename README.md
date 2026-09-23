@@ -481,7 +481,7 @@ CI runs the same four commands on every pull request and reports them through a 
 - Jev is in early access. Join the waitlist at typesafe.ai. Without a key the model backend works but is slower, costs model tokens, and its probabilities are stated, not calibrated.
 - The prune module estimates tokens without a tokenizer, with a rule calibrated against Jev's reported usage (from fast-jev-compaction, MIT).
 
-## Unreleased
+## Changes in 0.13.0
 
 Added: the `post` tool writes an issue, pull request, comment, review, merge or release to the repository it names in `repo`, after judging its title and body against that repository's rule documents, config and `outbound.channels`, read from the forge whatever directory the caller runs in, and answers the url. With `gateOutbound` on, a Bash command that writes forge text through `gh` (the cli's create, comment, edit, review, merge and release writes, and the `gh api` REST and graphql calls that make them) is refused with the `post` call to make instead, since its destination is whatever `-R`, `GH_REPO`, the working directory or a fork's upstream make it. The forge's shell channels (`github-pr-comment` and the rest, `tool: ^Bash$`) are gone from the default table: the same names now match `post` calls of that kind, with the title and body as their text, and a create's or an edit's `kind` names the title too. `Forge` gains `post` and `writeOf`, `ForgeWrite` is the write alone, and a `fields` text source takes `when`.
 
