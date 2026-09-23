@@ -19,6 +19,7 @@ import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
+import { SEEN_EVERY_MS, Sessions, watchKeys } from '../src/watch/sessions.ts';
 
 type Options = {
   backend: Backend;
@@ -103,6 +104,8 @@ type Runtime = GradeHost & {
   // the channels a delivery reaches its recipient by; with the watches
   mailbox?: Mailbox;
   sessionId: string;
+  // the lifetime of the session's watch keys
+  sessions: Sessions;
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -181,8 +184,14 @@ export const register: Register = (on, rawOptions) => {
   on('session.start', async ($, e, next) => {
     readFile = (p) => $.fs.read(p);
     const fs = { read: (p: string) => $.fs.read(p), exists: (p: string) => $.fs.exists(p), list: (p: string) => $.fs.list(p), stat: (p: string) => $.fs.stat(p) };
-    const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) };
+    const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v), delete: (k: string) => $.store.delete(k), keys: () => $.store.keys() };
     const sessionId = await $.session.id();
+    const keys = watchKeys(sessionId);
+    const sessions = new Sessions({ store, now: () => Date.now(), log: (text) => $.ui.log(text) });
+    await sessions.touch(sessionId);
+    await sessions.sweep(sessionId);
+    // a reload cancels the old interval with the old environment
+    $.clock.every(SEEN_EVERY_MS, () => void sessions.touch(sessionId));
     const log = new DecisionLog(store, sessionId);
     const apiKey = await apiKeyOf($, options);
     const inner = makeJudge(
@@ -209,7 +218,7 @@ export const register: Register = (on, rawOptions) => {
     let watches: Watches | undefined;
     const mailbox = new Mailbox({
       store,
-      key: `watch-mail:${sessionId}`,
+      key: keys.mail,
       agents: () => $.agent.list(),
       now: () => Date.now(),
       submit: async (text) => void (await $.prompt.submit({ text })),
@@ -221,8 +230,8 @@ export const register: Register = (on, rawOptions) => {
     watches = triagePack
       ? new Watches({
           store,
-          key: `watch-subs:${sessionId}`,
-          stateKey: (repo) => `watch:${sessionId}:${repo}`,
+          key: keys.subs,
+          stateKey: keys.state,
           now: () => Date.now(),
           log: (text) => $.ui.log(text),
           status: (text) => $.ui.status(text),
@@ -265,7 +274,7 @@ export const register: Register = (on, rawOptions) => {
           },
         })
       : undefined;
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, watches, mailbox: watches ? mailbox : undefined, sessionId };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, watches, mailbox: watches ? mailbox : undefined, sessionId, sessions };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     if (options.grade) {
@@ -372,6 +381,18 @@ export const register: Register = (on, rawOptions) => {
       }
     } else if (options.watch) {
       $.ui.log('sift watch: triage pack missing');
+    }
+    return next(e);
+  });
+
+  // the session's watch keys go with it. clear and resume leave the process running under the id bound at start, so
+  // its keys stay in use
+  on('classic.SessionEnd', async (_$, e, next) => {
+    if (runtime && e.reason !== 'clear' && e.reason !== 'resume') {
+      const rt = runtime;
+      await rt.watches?.end();
+      await rt.mailbox?.stop();
+      await rt.sessions.end(rt.sessionId);
     }
     return next(e);
   });

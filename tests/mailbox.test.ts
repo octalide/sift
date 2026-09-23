@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { setImmediate } from 'node:timers/promises';
 import { GRACE_MS, Mailbox, ownerNotice, refusalOf, relayBlock, type AgentLike, type MailboxHost } from '../src/watch/mailbox.ts';
 import type { WatchDelivery } from '../src/watch/watcher.ts';
 import { memoryStore } from './fake-source.ts';
 
 // a mailbox over a fake clock: timers fire only when the test advances it
-function harness(agents: AgentLike[] = [], refuse?: string, store = memoryStore(), clock = { now: 1_000_000 }) {
+function harness(agents: AgentLike[] = [], refuse?: string, store = memoryStore(), clock = { now: 1_000_000 }, gate: Promise<void> = Promise.resolve()) {
   const timers: { at: number; fn: () => Promise<void>; cancelled: boolean }[] = [];
   const submitted: string[] = [];
   const sent: { to: string; text: string }[] = [];
@@ -15,7 +16,7 @@ function harness(agents: AgentLike[] = [], refuse?: string, store = memoryStore(
     agents: async () => agents,
     now: () => clock.now,
     submit: async (text) => void submitted.push(text),
-    send: async (to, text) => (sent.push({ to, text }), refuse),
+    send: async (to, text) => (sent.push({ to, text }), await gate, refuse),
     retire: async (agentId, why) => void retired.push(`${agentId}: ${why}`),
     schedule: (ms, fn) => {
       const t = { at: clock.now + ms, fn, cancelled: false };
@@ -115,6 +116,27 @@ describe('mailbox', () => {
     expect(again.mailbox.pending()).toEqual([{ to: 'a1', count: 1 }]);
     await again.advance(GRACE_MS - 20_000);
     expect(again.sent).toEqual([{ to: 'a1', text: 'one' }]);
+  });
+
+  it('stops its timers and waits for a timed send in flight', async () => {
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const h = harness([{ id: 'a1', status: 'running' }, { id: 'a2', status: 'running' }], 'gone', memoryStore(), { now: 1_000_000 }, gate);
+    await h.mailbox.deliver(delivery('a1', 'one'));
+    const firing = h.advance(GRACE_MS);
+    await h.mailbox.deliver(delivery('a2', 'two'));
+    let stopped = false;
+    const stopping = h.mailbox.stop().then(() => void (stopped = true));
+    await setImmediate();
+    // a1's send is still out, so the stop has not resolved
+    expect(stopped).toBe(false);
+    release();
+    await Promise.all([firing, stopping]);
+    expect(h.retired).toEqual(['a1: SendMessage refused: gone']);
+    // a2's grace timer went with the stop
+    await h.advance(GRACE_MS);
+    expect(h.sent).toEqual([{ to: 'a1', text: 'one' }]);
+    expect(h.mailbox.pending()).toEqual([{ to: 'a2', count: 1 }]);
   });
 
   it('tells a subagent that subscribed where its deliveries arrive and not to wait for them', () => {

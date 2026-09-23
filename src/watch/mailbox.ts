@@ -35,6 +35,7 @@ type Letter = { to: string; text: string; at: number };
 export class Mailbox {
   private letters: Letter[] = [];
   private readonly timers = new Map<string, { cancel: () => void }>();
+  private readonly flushing = new Set<Promise<void>>();
 
   constructor(private readonly host: MailboxHost) {}
 
@@ -66,6 +67,13 @@ export class Mailbox {
     return mine.map((l) => l.text);
   }
 
+  // cancels every grace timer and resolves once no timed flush is mid-send; the letters stay where they are
+  async stop(): Promise<void> {
+    for (const t of this.timers.values()) t.cancel();
+    this.timers.clear();
+    await Promise.all(this.flushing);
+  }
+
   pending(): { to: string; count: number }[] {
     const counts = new Map<string, number>();
     for (const l of this.letters) counts.set(l.to, (counts.get(l.to) ?? 0) + 1);
@@ -74,7 +82,14 @@ export class Mailbox {
 
   private arm(to: string, ms: number): void {
     if (this.timers.has(to)) return;
-    this.timers.set(to, this.host.schedule(ms, () => this.flush(to)));
+    this.timers.set(
+      to,
+      this.host.schedule(ms, () => {
+        const f = this.flush(to).finally(() => void this.flushing.delete(f));
+        this.flushing.add(f);
+        return f;
+      }),
+    );
   }
 
   private async flush(to: string): Promise<void> {

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { setImmediate } from 'node:timers/promises';
 import type { Check, Conditional, Run, WatchItem } from '../src/forge/forge.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import type { Judge, Questions } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { currentState, diffItems, diffRuns, hashOf, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, type Item, type WatchEvent, type WatchState } from '../src/watch/poll.ts';
 import { Watches, type WatchesHost } from '../src/watch/registry.ts';
+import { Sessions } from '../src/watch/sessions.ts';
 import { formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, subscriptionOf, type CiFilter, type Scope, type Subscription } from '../src/watch/subscription.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { Watcher, summarize, type WatchDelivery, type WatchHost } from '../src/watch/watcher.ts';
@@ -791,6 +793,7 @@ describe('subscriptions', () => {
   const registry = (forge: ReturnType<typeof fakeForge>, clock = { now: 1_000_000 }, store = memoryStore(), session = 'test') => {
     const delivered: WatchDelivery[] = [];
     const logs: string[] = [];
+    const waits: number[] = [];
     const host: WatchesHost = {
       store,
       key: `watch-subs:${session}`,
@@ -798,10 +801,10 @@ describe('subscriptions', () => {
       now: () => clock.now,
       log: (t) => void logs.push(t),
       status: () => {},
-      watcher: { forge, store, judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => clock.now, deliver: async (d) => void delivered.push(d), log: () => {}, schedule: () => ({ cancel: () => {} }) },
+      watcher: { forge, store, judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => clock.now, deliver: async (d) => void delivered.push(d), log: () => {}, schedule: (ms) => (waits.push(ms), { cancel: () => {} }) },
       options,
     };
-    return { w: new Watches(host), delivered, logs, store };
+    return { w: new Watches(host), delivered, logs, store, waits };
   };
 
   it('starts a poller for each repository subscribed, shares it between subscriptions, and stops it with the last', async () => {
@@ -881,6 +884,47 @@ describe('subscriptions', () => {
     await b.w.poller('o/r')!.tick();
     await again.w.poller('o/r')!.tick();
     for (const d of [[...a.delivered, ...again.delivered], b.delivered]) expect([got(d, 1), got(d, 2), got(d, 3)]).toEqual([0, 1, 1]);
+  });
+
+  it('holds the pause a rate floor sets to the session that read it', async () => {
+    const low = fakeForge({ items: async () => ({ changed: false, rate: { remaining: 3, reset: 1_600 } }) });
+    const fine = fakeForge({ items: async () => ({ changed: false, rate: { remaining: 4000 } }) });
+    const store = memoryStore();
+    const a = registry(low, { now: 1_000_000 }, store, 'a');
+    await a.w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
+    await a.w.subscribe({ repo: 'o/s', scope: { kind: 'repo' }, filter });
+    await a.w.poller('o/r')!.tick();
+    await a.w.poller('o/s')!.tick();
+    // both of a's pollers wait out the window
+    expect(a.waits).toEqual([605_000, 605_000]);
+    // b on the same token and store is not held by a's pause: it reads the count itself on its own polls
+    const b = registry(fine, { now: 1_000_000 }, store, 'b');
+    await b.w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
+    await b.w.poller('o/r')!.tick();
+    expect(b.waits).toEqual([options.minIntervalMs]);
+  });
+
+  it('writes no key once it has ended, even with a poll in flight', async () => {
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const forge = fakeForge({ items: async () => (await gate, { changed: false, rate: {} }) });
+    const store = memoryStore();
+    const { w } = registry(forge, { now: 1_000_000 }, store, 'a');
+    await w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
+    const sessions = new Sessions({ store, now: () => 1_000_000, log: () => {} });
+    await sessions.touch('a');
+    // the subscribe's first poll is waiting on the forge
+    const poller = w.poller('o/r')!;
+    const ended = (async () => {
+      await w.end();
+      await sessions.end('a');
+    })();
+    // the forge answers only once the end has had every chance to run ahead of the poll
+    await setImmediate();
+    release();
+    await ended;
+    await poller.idle();
+    expect([...store.map.keys()]).toEqual([]);
   });
 
   it('delivers a run subscription\'s completion read by id when 30 newer runs have paged it out of the listing', async () => {
@@ -996,7 +1040,7 @@ describe('subscriptions', () => {
     expect(polls).toBe(before);
   });
 
-  it('holds every poller on one token once any of them reads the rate floor', async () => {
+  it('holds every poller sharing a pause once any of them reads the rate floor', async () => {
     const rate = { until: 0 };
     const waits: number[] = [];
     const low = fakeForge({ items: async () => ({ changed: false, rate: { remaining: 3, reset: 1_600 } }) });
