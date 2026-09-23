@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Typed judgement calls for Claude Code: two primitives, judge and rank, under packs that grade issues, pull requests, plans, commits, releases and rules, a repository watch, tool output pruning and an outbound text gate, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
@@ -159,7 +159,7 @@
     "grade": {
       "type": "boolean",
       "title": "Grading tools",
-      "description": "Register the grade (packs: issue, pr, plan, commit, rules, release, locate, and any under .sift/packs), judge (typed questions over one state) and rank (the same questions over many items) tools.",
+      "description": "Register the grade (packs: issue, pr, plan, commit, rules, release, locate, triage, and any under .sift/packs), judge (typed questions over one state) and rank (the same questions over many items) tools.",
       "default": true
     },
     "config": {

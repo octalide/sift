@@ -1,3 +1,4 @@
+import type { Cut } from '../judge/room.ts';
 import type { Answer, Answers, Band, Question } from '../judge/types.ts';
 import type { RankMode } from '../judge/rank.ts';
 
@@ -78,6 +79,8 @@ export type Judged = {
   band: Band;
   severity: Severity;
   instructions: string;
+  // a subject judged in parts: the parts this band was found in
+  parts?: string[];
 };
 
 // one item of a rank step: judged on the step's ordering question, with every answer it got and every question
@@ -104,6 +107,8 @@ export type Report = {
   verdict: Verdict;
   backend: string;
   judgeError?: string;
+  // a subject too long to judge at once: the parts it was judged in, every one read
+  parts?: string[];
   // answers under an id no question asked for, and answers the judge left out of a ranked item, dropped without touching the verdict
   dropped?: number;
 };
@@ -118,6 +123,10 @@ export type Subject = {
   facts: Record<string, unknown>;
   // runtime option sets for choice questions
   options: Record<string, Record<string, string>>;
+  // the texts the judge reads only part of, or none of, because the whole is more than its state holds
+  cuts?: Cut[];
   // a judge failure while the subject was built: the run asks nothing more and the report carries it
   judgeError?: string;
+  // work the subject needs outlasted its wait and keeps running, so the same call made again can answer
+  pending?: string;
 };

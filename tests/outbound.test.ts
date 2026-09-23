@@ -7,10 +7,12 @@ import { channelTable, commandBody, defaultChannels, textAbout, type Channel } f
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
 import { materialize } from '../src/packs/run.ts';
-import { rulesSubject, textRulesSubjects } from '../src/repo/subjects.ts';
+import { textRulesSubjects } from '../src/repo/subjects.ts';
+import { CONTEXT_ROOM } from '../src/judge/room.ts';
+import { estimateTokensOf } from '../src/tokens.ts';
 import type { Subject } from '../src/packs/types.ts';
 import { shellWord } from '../src/shell.ts';
-import { memorySource, memoryStore, yesJudge } from './fake-source.ts';
+import { discoveries, memorySource, yesJudge } from './fake-source.ts';
 
 // the channel table reads the forge's write list alone, so the runner is never reached
 const github = new GitHubForge(async () => ({ exitCode: 1, stdout: '', stderr: '' }));
@@ -114,12 +116,12 @@ describe('outbound extraction', () => {
 
 describe('rules subject for outbound text', () => {
   const docs = { 'CONTRIBUTING.md': '## Pull requests\n\nThe body carries verification evidence.\n\nClose the issue with Closes #N.\n' };
-  const host = () => ({ source: memorySource(docs), judge: yesJudge(), store: memoryStore(), now: () => 1, notice: () => {} });
+  const host = () => ({ source: memorySource(docs), discoveries: discoveries(yesJudge()) });
   const config = { ...DEFAULT_CONFIG, rules: { docs: ['CONTRIBUTING.md'], exclude: [], maxRules: 200 } };
 
   it('names the artifact in the subject and in every rule question', async () => {
     const body = 'The watcher misses body edits. Steps: edit an issue body, wait a poll.';
-    const s = await rulesSubject({ forge: github, ...host() }, { kind: 'text', ref: body, about: 'the body of a new GitHub issue' }, config);
+    const s = (await textRulesSubjects({ forge: github, ...host() }, { text: body, about: 'the body of a new GitHub issue' }, config))[0]!;
     expect(s.state['subject']).toEqual({ kind: 'text', about: 'the body of a new GitHub issue', text: body });
     expect(s.facts['subject']).toBe('The subject (the body of a new GitHub issue)');
     const step = materialize(BUILTIN_PACKS['rules']!, s).steps[0]!;
@@ -129,19 +131,22 @@ describe('rules subject for outbound text', () => {
   });
 
   it('leaves plain text unlabelled', async () => {
-    const s = await rulesSubject(host(), { kind: 'text', ref: 'free text' }, config);
+    const s = (await textRulesSubjects(host(), { text: 'free text' }, config))[0]!;
     expect(s.state['subject']).toEqual({ kind: 'text', text: 'free text' });
     expect(s.facts['subject']).toBe('The subject');
     expect(materialize(BUILTIN_PACKS['rules']!, s).steps[0]?.questions['rules']?.instructions).toMatch(/^The subject complies with this rule: \{text\}$/);
   });
 
   it('reads text that fits as one subject, and longer text as its opening and parts', async () => {
-    const [one, ...none] = await textRulesSubjects(host(), { text: 'short', about: 'a comment on a pull request' }, config, 100);
+    const [one, ...none] = await textRulesSubjects(host(), { text: 'short', about: 'a comment on a pull request' }, config);
     expect(none).toEqual([]);
     expect(one!.state['subject']).toEqual({ kind: 'text', about: 'a comment on a pull request', text: 'short' });
     expect(one!.facts['section']).toBeUndefined();
-    const text = `# A\n\n${'a'.repeat(60)}\n\n# B\n\n${'b'.repeat(60)}\n`;
-    const parts = await textRulesSubjects(host(), { text }, config, 80);
+    // each block about two thirds of the context a rank's state leaves the subject, so the two do not fit as one
+    const text = `# A\n\n${'a'.repeat(60_000)}\n\n# B\n\n${'b'.repeat(60_000)}\n`;
+    const parts = await textRulesSubjects(host(), { text }, config);
+    for (const p of parts) expect(estimateTokensOf(p.state['subject'])).toBeLessThanOrEqual(CONTEXT_ROOM);
+    expect(parts.every((p) => p.cuts === undefined)).toBe(true);
     expect(parts.map((p) => (p.state['subject'] as { text: string }).text).join('')).toBe(text);
     expect(parts.map((p) => [p.facts['subject'], p.facts['part'], p.facts['section'] ?? false])).toEqual([
       ['The opening, part 1 of 2 ("A"), of the subject', 'the opening, part 1 of 2 ("A")', false],
@@ -180,7 +185,7 @@ describe('outbound gate', () => {
   it('passes an issue body when pull request rules do not apply to it', async () => {
     const docs = { 'CONTRIBUTING.md': '## Pull requests\n\nThe body carries verification evidence.\n\n## Prose\n\nNo em dashes.\n' };
     const config = { ...DEFAULT_CONFIG, rules: { docs: ['CONTRIBUTING.md'], exclude: [], maxRules: 200 } };
-    const s = await rulesSubject({ forge: github, source: memorySource(docs), judge: yesJudge(), store: memoryStore(), now: () => 1, notice: () => {} }, { kind: 'text', ref: 'The watcher misses body edits.', about: 'the body of a new GitHub issue' }, config);
+    const s = (await textRulesSubjects({ forge: github, source: memorySource(docs), discoveries: discoveries(yesJudge()) }, { text: 'The watcher misses body edits.', about: 'the body of a new GitHub issue' }, config))[0]!;
     const asked: string[] = [];
     const j: Judge = {
       name: 'fake',
@@ -222,5 +227,11 @@ describe('outbound gate', () => {
     expect(unclear).toMatchObject({ allow: true, reason: 'clear', warnings: ['unclear: Terse by default.'] });
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
     expect((await gateOutbound({ channel: 'github', text: 'ok' }, [subject], pack, off, DEFAULT_CONFIG)).allow).toBe(true);
+  });
+
+  it('denies while rule discovery is still running, where a judge failure would pass, so the same call made again is judged', async () => {
+    const reason = 'rule discovery for o/r outlasted its 5 s wait and keeps running; the next call on it reuses what it finds';
+    const waiting: Subject = { ...subject, judgeError: reason, pending: reason };
+    expect(await gateOutbound({ channel: 'github', text: 'ok' }, [waiting], pack, judge([]), DEFAULT_CONFIG)).toMatchObject({ allow: false, reason, pending: true });
   });
 });

@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { CONTEXT_ROOM, textTokens } from '../src/judge/room.ts';
 import type { ForgePost } from '../src/forge/forge.ts';
 import { GitHubForge, GH_WRITES } from '../src/forge/github.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { postCall, postOf, rawWriteOf, rawWriteRefusal } from '../src/gate/post.ts';
+import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
+import type { Checkout } from '../src/repo/checkout.ts';
 import { DEFAULT_CONFIG, resolveConfig, type RepoConfig } from '../src/repo/config.ts';
 import { simpleCommands } from '../src/shell.ts';
 import { fakeForge } from './fake-forge.ts';
-import { memoryStore } from './fake-source.ts';
+import { discoveries } from './fake-source.ts';
 
 const github = new GitHubForge(async () => ({ exitCode: 1, stdout: '', stderr: '' }));
 
@@ -97,22 +100,20 @@ describe('post', () => {
       return { ok: true, backend: 'fake', latencyMs: 1, answers };
     },
   });
-  const host = (posted: { repo: string; post: ForgePost }[], asked: string[] = [], configs: Record<string, RepoConfig> = {}) => ({
+  const host = (posted: { repo: string; post: ForgePost }[], asked: string[] = [], configs: Record<string, RepoConfig> = {}, j: Judge = judge(asked)) => ({
     forge: fakeForge({
       name: 'GitHub',
       writes: GH_WRITES,
       nouns: github.nouns,
-      contents: async (repo) => Object.keys(docs[repo] ?? {}),
+      contents: async (repo) => Object.keys(docs[repo] ?? {}).map((path) => ({ path, id: path })),
       file: async (repo, path) => docs[repo]?.[path],
       post: async (repo, post) => {
         posted.push({ repo, post });
         return `https://github.com/${repo}/${post.kind}/1`;
       },
     }),
-    judge: judge(asked),
-    store: memoryStore(),
-    now: () => 1,
-    notice: () => undefined,
+    judge: j,
+    discoveries: discoveries(j),
     config: async (repo: string) => configs[repo] ?? DEFAULT_CONFIG,
   });
   const pack = BUILTIN_PACKS['rules']!;
@@ -156,6 +157,50 @@ describe('post', () => {
     expect(posted).toHaveLength(1);
   });
 
+  it('refuses and writes nothing while the named repository\'s rule discovery outlasts its wait', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const never: Judge = { name: 'never', ask: () => new Promise(() => {}) };
+    const h = { ...host(posted, [], {}, never), discoveries: discoveries(never, undefined, { schedule: (_, fn) => (void Promise.resolve().then(fn), { cancel: () => {} }) }) };
+    const r = await postCall(h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' });
+    expect(r).toMatchObject({ refused: 'github-pr-comment to o/target: rule discovery for o/target outlasted its 5 s wait and keeps running; the next call on it reuses what it finds', decision: { allow: false, pending: true } });
+    expect(posted).toEqual([]);
+  });
+
+  describe('a shell write from a loop that cannot call post', () => {
+    const fs = { read: async () => '', exists: async () => false, list: async () => [], stat: async () => ({}) } as never;
+    const at = async (): Promise<Checkout> => ({ root: '/w', repo: 'o/target', config: DEFAULT_CONFIG, packs: { rules: pack } });
+    const noRead = async (p: string): Promise<string> => {
+      throw new Error(`no file ${p}`);
+    };
+    const shell = (asked: string[] = []) => ({ ...host([], asked), fs });
+    const write = { kind: 'pr', action: 'comment' } as const;
+    const bash = (command: string) => ({ command });
+
+    it('is refused toward post when the loop can call it', async () => {
+      const r = await gateShellWrite(shell(), write, true, at, bash('gh pr comment 4 -b "fine"'), noRead);
+      expect(r).toEqual({ write, fallback: false, refused: rawWriteRefusal(shell().forge, write) });
+    });
+
+    it('is judged on its text by the checkout\'s rules, allowed or refused on it', async () => {
+      const asked: string[] = [];
+      const ok = await gateShellWrite(shell(asked), write, false, at, bash('gh pr comment 4 --body "Looks right, merging."'), noRead);
+      expect(ok).toMatchObject({ fallback: true, gated: { outbound: { channel: 'github-shell-pr-comment', text: 'Looks right, merging.' }, decision: { allow: true } } });
+      expect(asked.some((q) => /em dash/.test(q))).toBe(true);
+      const heredoc = `gh pr comment 4 --body-file - <<'EOF'\nIt drops them — every time.\nEOF`;
+      const broken = await gateShellWrite(shell(), write, false, at, bash(heredoc), noRead);
+      expect(broken).toMatchObject({ fallback: true, gated: { outbound: { channel: 'github-shell-pr-comment' }, decision: { allow: false, reason: expect.stringMatching(/No em dashes/) } } });
+      const created = await gateShellWrite(shell(), { kind: 'issue', action: 'create' }, false, at, bash('gh issue new -t "Watcher misses edits" -b "It drops them."'), noRead);
+      expect(created).toMatchObject({ gated: { outbound: { channel: 'github-shell-issue-create' }, decision: { allow: true } } });
+    });
+
+    it('names the fallback when the text cannot be read, and when it judged', async () => {
+      const r = await gateShellWrite(shell(), write, false, at, bash('gh api repos/o/target/issues/4/comments -f body=hi'), noRead);
+      expect(r).toMatchObject({ fallback: true, refused: expect.stringContaining('this loop started before sift registered mcp__sift__post, so it cannot call it') });
+      expect((r as { refused: string }).refused).toContain('--body-file');
+      expect(fallbackNote(shell().forge)).toMatch(/judged on its text by the checkout's rules instead of refused/);
+    });
+  });
+
   describe('a text longer than the judge reads at once', () => {
     const rulesDocs: Record<string, Record<string, string>> = {
       'o/long': { 'CONTRIBUTING.md': '## Prose\n\nNo em dashes in anything you write.\n\n## Releases\n\nRelease notes state the SemVer impact.\n' },
@@ -180,41 +225,40 @@ describe('post', () => {
       },
     });
     const longHost = (posted: { repo: string; post: ForgePost }[], seen: Seen[]) => ({
-      ...host(posted),
+      ...host(posted, [], {}, judge(seen)),
       forge: fakeForge({
         name: 'GitHub',
         writes: GH_WRITES,
         nouns: github.nouns,
-        contents: async (repo) => Object.keys(rulesDocs[repo] ?? {}),
+        contents: async (repo) => Object.keys(rulesDocs[repo] ?? {}).map((path) => ({ path, id: path })),
         file: async (repo, path) => rulesDocs[repo]?.[path],
         post: async (repo, post) => {
           posted.push({ repo, post });
           return `https://github.com/${repo}/${post.kind}/1`;
         },
       }),
-      judge: judge(seen),
     });
-    // release notes of 50,000 characters in headed sections of numbered paragraphs, the impact stated only at the top,
-    // with an em dash placed after character 30,000 when broken
+    // release notes of 150,000 characters in headed sections of numbered paragraphs, the impact stated only at the top,
+    // with an em dash placed after character 100,000 when broken
     const notes = (broken: boolean): string => {
       let body = 'SemVer impact: minor.\n\n';
-      for (let n = 0; body.length < 50_000; n++) {
+      for (let n = 0; body.length < 150_000; n++) {
         if (n % 10 === 0) body += `## Section ${n / 10}\n\n`;
         body += `Paragraph ${n} describes one change in plain words and nothing more than that, at some length. `.repeat(3) + '\n\n';
       }
-      body = body.slice(0, 50_000);
+      body = body.slice(0, 150_000);
       if (!broken) return body;
-      const at = body.indexOf('\n\n', 30_000);
+      const at = body.indexOf('\n\n', 100_000);
       return `${body.slice(0, at)} This line has one — dash.${body.slice(at)}`;
     };
     const post = (body: string) => ({ repo: 'o/long', kind: 'release-create', tag: 'v1.0.0', title: 'v1.0.0', body });
 
-    it('refuses a rule broken after character 30,000, naming the part', async () => {
+    it('refuses a rule broken after character 100,000, naming the part', async () => {
       const posted: { repo: string; post: ForgePost }[] = [];
       const seen: Seen[] = [];
       const body = notes(true);
-      expect(body.length).toBeGreaterThan(50_000);
-      expect(body.indexOf('—')).toBeGreaterThan(30_000);
+      expect(body.length).toBeGreaterThan(150_000);
+      expect(body.indexOf('—')).toBeGreaterThan(100_000);
       const r = await postCall(longHost(posted, seen), pack, post(body));
       expect(r).toMatchObject({ refused: expect.stringMatching(/^github-release-create to o\/long: breaks: Prose: No em dashes in anything you write\. \(in part [2-9] of \d \("Section \d+"( to "Section \d+")?\)\)$/) });
       expect(posted).toEqual([]);
@@ -226,12 +270,12 @@ describe('post', () => {
       const body = notes(false);
       const r = await postCall(longHost(posted, seen), pack, post(body));
       expect(r).toMatchObject({ url: 'https://github.com/o/long/release/1', decision: { allow: true, reason: 'clear' } });
-      expect(r.decision?.parts?.length).toBeGreaterThan(1);
+      expect(r.decision?.report?.parts?.length).toBeGreaterThan(1);
       // the post's text is its title and body joined; the parts the judge read, in order, are exactly that text
       const text = `v1.0.0\n${body}`;
       const read = [...seen].sort((a, b) => text.indexOf(a.text) - text.indexOf(b.text));
       expect(read.map((s) => s.text).join('')).toBe(text);
-      expect(read.every((s) => s.text.length <= 20_000)).toBe(true);
+      expect(read.every((s) => textTokens(s.text) <= CONTEXT_ROOM)).toBe(true);
     });
 
     it('judges a whole-text rule on the opening alone, so later parts need not satisfy it', async () => {

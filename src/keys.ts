@@ -12,12 +12,17 @@ export const STALE_MS = 7 * 24 * 3600 * 1000;
 // how often a running session marks itself seen, far inside STALE_MS so a live session is never swept
 export const SEEN_EVERY_MS = 3600 * 1000;
 
-// every key the watch writes for one session. seen is the session's own, so no two sessions write one key
-export const watchKeys = (session: string) => ({
+// every key one session writes. seen is the session's own, so no two sessions write one key. tenure names the plugin
+// environment that owns the session's background work, agents what each subagent was spawned with, tally the session's
+// decision totals
+export const sessionKeys = (session: string) => ({
   subs: `watch-subs:${session}`,
   mail: `watch-mail:${session}`,
   seen: `watch-seen:${session}`,
   state: (repo: string) => `watch:${session}:${repo}`,
+  tenure: `tenure:${session}`,
+  agents: `agents:${session}`,
+  tally: `tally:${session}`,
 });
 
 // every key rule discovery writes for one scope: the cache every session shares, and when a discovery last read it
@@ -26,13 +31,16 @@ export const rulesKeys = (scope: string) => ({
   seen: `rules-seen:${scope}`,
 });
 
-// what writes a key: a session's watch, or the rules cache of one scope
+// what writes a key: a session, or the rules cache of one scope
 export type Owner = { kind: 'session' | 'rules'; id: string };
 
 const PREFIXES: [string, Owner['kind']][] = [
   ['watch-subs:', 'session'],
   ['watch-mail:', 'session'],
   ['watch-seen:', 'session'],
+  ['tenure:', 'session'],
+  ['agents:', 'session'],
+  ['tally:', 'session'],
   ['rules:', 'rules'],
   ['rules-seen:', 'rules'],
 ];
@@ -48,7 +56,7 @@ export function ownerOf(key: string): Owner | 'legacy' | undefined {
   return colon < 0 ? 'legacy' : { kind: 'session', id: rest.slice(0, colon) };
 }
 
-const seenOf = (owner: Owner): string => (owner.kind === 'session' ? watchKeys(owner.id).seen : rulesKeys(owner.id).seen);
+const seenOf = (owner: Owner): string => (owner.kind === 'session' ? sessionKeys(owner.id).seen : rulesKeys(owner.id).seen);
 
 export type StoreKeysHost = {
   store: KeyStore;
@@ -61,7 +69,7 @@ export class StoreKeys {
   constructor(private readonly host: StoreKeysHost) {}
 
   async touch(session: string): Promise<void> {
-    await this.host.store.set(watchKeys(session).seen, this.host.now());
+    await this.host.store.set(sessionKeys(session).seen, this.host.now());
   }
 
   // removes the pre-session keys and every owner's but the current session's unseen for STALE_MS. an owner with keys

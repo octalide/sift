@@ -2,16 +2,15 @@ import type { Forge } from './forge/forge.ts';
 import type { Git } from './forge/git.ts';
 import type { Judge } from './judge/types.ts';
 import { indexTree, treeSubject } from './locate/tree.ts';
-import type { StoreLike } from './log.ts';
 import { REMOVED_PACKS } from './packs/builtin.ts';
-import { runPack } from './packs/run.ts';
+import { runParts } from './packs/run.ts';
 import { parseSubject, refusal, type ParsedKind } from './packs/subject.ts';
 import type { Pack, Report, Subject } from './packs/types.ts';
 import type { Checkout, CheckoutFs, Checkouts } from './repo/checkout.ts';
 import { defaultTarget, type RepoConfig } from './repo/config.ts';
 import { localSource, remoteSource } from './repo/source.ts';
-import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubject, textSubject } from './repo/subjects.ts';
-import { checkoutSource, forgeSource, type RuleSource } from './rules/discover.ts';
+import { commitSubject, issueSubject, planSubject, prRangeSubject, prSubject, releaseSubject, rulesSubjects, textRulesSubjects, textSubject } from './repo/subjects.ts';
+import { checkoutSource, forgeSource, type Discoveries, type RuleSource } from './rules/discover.ts';
 import { truncate } from './tokens.ts';
 
 export type GradeOptions = {
@@ -26,10 +25,8 @@ export type GradeOptions = {
 export type GradeHost = {
   forge: Forge;
   judge: Judge;
-  store: StoreLike;
-  now: () => number;
-  // a line for the session log
-  notice: (text: string) => void;
+  // the rule discoveries in flight, shared by every grade and post of the session
+  discoveries: Discoveries;
   fs: CheckoutFs;
   checkouts: Checkouts;
 };
@@ -37,6 +34,7 @@ export type GradeHost = {
 // what one grade reads: the checkout it is bound to, and whether the caller named it
 export type GradeScope = { checkout: Checkout; named: boolean };
 
+// subject is the one graded, its opening when it was graded in parts
 export type Graded = { report: Report; subject: Subject };
 
 export async function grade(host: GradeHost, scope: GradeScope, packName: string, ref: string, opts: GradeOptions = {}): Promise<Graded> {
@@ -46,13 +44,14 @@ export async function grade(host: GradeHost, scope: GradeScope, packName: string
     if (removed) throw new Error(removed(host.forge, opts.repo ?? scope.checkout.repo ?? '<owner/name>'));
     throw new Error(`unknown pack ${packName} (have: ${Object.keys(scope.checkout.packs).join(', ')})`);
   }
-  const { subject, config } = await subjectFor(host, scope, pack, ref, opts);
-  const report = await runPack(pack, subject, host.judge, config, { top: opts.top });
-  return { report, subject };
+  const { subjects, config } = await subjectFor(host, scope, pack, ref, opts);
+  const report = await runParts(pack, subjects, host.judge, config, { top: opts.top });
+  return { report, subject: subjects[0]! };
 }
 
-// the subject a pack grades and the conventions of the repository it is in; a refusal names the pack by the name it was asked for
-export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<Pack, 'name' | 'subject'>, ref: string, opts: GradeOptions = {}): Promise<{ subject: Subject; config: RepoConfig }> {
+// the subject a pack grades, one per part when it is too long to judge at once, and the conventions of the repository it is in;
+// a refusal names the pack by the name it was asked for
+export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<Pack, 'name' | 'subject'>, ref: string, opts: GradeOptions = {}): Promise<{ subjects: Subject[]; config: RepoConfig }> {
   const { forge } = host;
   const { checkout } = scope;
   const repo = opts.repo ?? checkout.repo;
@@ -79,23 +78,23 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<
       const p = parsed('issue');
       const at = p.repo ?? needRepo();
       const config = await configOf(at);
-      return { subject: await issueSubject(forge, at, p.number, config, { pack: pack.name, kind: 'issue' }), config };
+      return { subjects: [await issueSubject(forge, at, p.number, config, { pack: pack.name, kind: 'issue' })], config };
     }
     case 'pr': {
       const p = parsed('pr');
       // base..head in the checkout is the pr the range would open, graded before it exists
       if ('range' in p) {
         const { git } = local('a pr range');
-        return { subject: await prRangeSubject(git, p.range, checkout.config, checkout.repo ? { forge, repo: checkout.repo } : undefined), config: checkout.config };
+        return { subjects: [await prRangeSubject(git, p.range, checkout.config, checkout.repo ? { forge, repo: checkout.repo } : undefined)], config: checkout.config };
       }
       const at = p.repo ?? needRepo();
       const config = await configOf(at);
-      return { subject: await prSubject(forge, at, p.number, config), config };
+      return { subjects: [await prSubject(forge, at, p.number, config)], config };
     }
     case 'commit': {
       const p = parsed('commit');
       const { git } = local('a commit');
-      return { subject: await commitSubject(git, p.ref, checkout.config), config: checkout.config };
+      return { subjects: [await commitSubject(git, p.ref, checkout.config)], config: checkout.config };
     }
     case 'release': {
       const p = parsed('release');
@@ -112,7 +111,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<
         subject = await releaseSubject(remoteSource(forge, at, opts.ref ?? defaultTarget(config) ?? (await forge.defaultBranch(at))), config);
       }
       if (p.proposed !== undefined) subject.facts['proposed'] = p.proposed;
-      return { subject, config };
+      return { subjects: [subject], config };
     }
     case 'rules': {
       // an issue by number or url, or free text: text when given, else the subject itself
@@ -123,9 +122,10 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<
         at = checkout.repo;
       } else at = needRepo();
       const config = await configOf(at);
-      const rules = { forge, repo, source: ruleSource(host, scope, at), judge: host.judge, store: host.store, now: host.now, notice: host.notice };
-      if (p.kind === 'text') return { subject: await rulesSubject(rules, { kind: 'text', ref: opts.text ?? p.text }, config), config };
-      return { subject: await rulesSubject({ ...rules, repo: p.repo ?? needRepo() }, { kind: 'issue', number: p.number, pack: pack.name }, config), config };
+      const rules = { forge, repo, source: ruleSource(host, scope, at), discoveries: host.discoveries };
+      // free text is read the way the outbound gate reads it, every part of a long text judged
+      if (p.kind === 'text') return { subjects: await textRulesSubjects(rules, { text: opts.text ?? p.text }, config), config };
+      return { subjects: await rulesSubjects({ ...rules, repo: p.repo ?? needRepo() }, { number: p.number, pack: pack.name }, config), config };
     }
     case 'tree': {
       // text is the subject when given; otherwise an issue or pull request is its title and body, anything else the text itself
@@ -149,16 +149,16 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<
         size: async (f) => (await host.fs.stat(`${root}/${f}`)).size,
         read: (f) => host.fs.read(`${root}/${f}`),
       });
-      return { subject: treeSubject(text, label, index), config: checkout.config };
+      return { subjects: [treeSubject(text, label, index)], config: checkout.config };
     }
     case 'plan': {
       if (opts.text === undefined) throw new Error(`${pack.name} pack: no plan; the pack reads the plan from text: grade(pack: "${pack.name}", subject: "<issue number>", text: "<plan>")`);
       const p = parsed('issue');
       const at = p.repo ?? needRepo();
-      return { subject: await planSubject(forge, at, p.number, opts.text, pack.name), config: await configOf(at) };
+      return { subjects: [await planSubject(forge, at, p.number, opts.text, pack.name)], config: await configOf(at) };
     }
     default:
-      return { subject: textSubject(opts.text ?? ref), config: checkout.config };
+      return { subjects: [textSubject(opts.text ?? ref)], config: checkout.config };
   }
 }
 
@@ -168,20 +168,6 @@ export function ruleSource(host: Pick<GradeHost, 'forge' | 'fs'>, scope: GradeSc
   if (checkout.git && (repo === undefined || repo === checkout.repo)) return checkoutSource(checkout.root, checkout.git, host.fs, host.forge);
   if (!repo) throw new Error(`no repository: pass repo as the ${host.forge.name} path or run inside a checkout with a ${host.forge.name} remote`);
   return forgeSource(host.forge, repo);
-}
-
-// the directory each subagent runs in: its Agent call's cwd, else its parent's when the parent had one
-export class SpawnDirs {
-  private readonly dirs = new Map<string, string>();
-
-  spawned(agentId: string | undefined, cwd: string | undefined, parentId: string | undefined): void {
-    const dir = cwd ?? this.of(parentId);
-    if (agentId !== undefined && dir !== undefined) this.dirs.set(agentId, dir);
-  }
-
-  of(agentId: string | undefined): string | undefined {
-    return agentId === undefined ? undefined : this.dirs.get(agentId);
-  }
 }
 
 // a named cwd, else the calling subagent's spawn directory, else the session's checkout

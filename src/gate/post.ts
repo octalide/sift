@@ -1,10 +1,9 @@
 import type { Forge, ForgePost, ForgeWrite, MergeMethod, ReviewVerdict } from '../forge/forge.ts';
 import type { Judge } from '../judge/types.ts';
-import type { StoreLike } from '../log.ts';
 import type { Pack } from '../packs/types.ts';
 import type { RepoConfig } from '../repo/config.ts';
 import { textRulesSubjects } from '../repo/subjects.ts';
-import { forgeSource } from '../rules/discover.ts';
+import { forgeSource, type Discoveries } from '../rules/discover.ts';
 import { simpleCommands } from '../shell.ts';
 import { channelTable, defaultChannels, POST_TOOL, postKind, textAbout } from './channels.ts';
 import { gateOutbound, outboundOf, type Outbound, type OutboundDecision } from './outbound.ts';
@@ -76,10 +75,8 @@ export function postOf(input: PostInput, forge: Pick<Forge, 'writes'>): { repo: 
 export type PostHost = {
   forge: Forge;
   judge: Judge;
-  store: StoreLike;
-  now: () => number;
-  // the session log a fresh rule discovery names what it kept in
-  notice: (text: string) => void;
+  // the rule discoveries in flight, shared with every grade of the session
+  discoveries: Discoveries;
   // the conventions of a repository on the forge
   config: (repo: string) => Promise<RepoConfig>;
 };
@@ -100,7 +97,7 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
   const outbound = await outboundOf(POST_TOOL, input as Record<string, unknown>, noFile, channelTable(defaultChannels(host.forge), config.outbound.channels));
   let decision: OutboundDecision | undefined;
   if (outbound && pack) {
-    const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), judge: host.judge, store: host.store, now: host.now, notice: host.notice }, { text: outbound.text, about: outbound.kind }, config);
+    const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, config);
     decision = await gateOutbound(outbound, subjects, pack, host.judge, config);
     if (!decision.allow && !shadow) return { outbound, decision, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
   }

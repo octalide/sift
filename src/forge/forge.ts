@@ -102,7 +102,11 @@ export type Rate = { remaining?: number; reset?: number };
 // makes the next read conditional (an etag, a sequence number, whatever the forge keys on)
 export type Conditional<T> = { rate: Rate } & ({ changed: false } | { changed: true; token?: string; value: T });
 
-export type Template = { kind: 'issue' | 'pr'; name: string; body: string };
+// what a template is for: opening an issue, or a pull request
+export type TemplateKind = 'issue' | 'pr';
+
+// a file in a repository's tree: its path, and the forge's id for its content, which changes whenever the content does
+export type TreeFile = { path: string; id: string };
 
 // the artifact a body belongs to and what a write does to it
 export type ForgeArtifact = 'issue' | 'pr' | 'release';
@@ -110,6 +114,10 @@ export type ForgeAction = 'create' | 'comment' | 'edit' | 'review' | 'merge';
 
 // one write of text people read: the artifact and what the write does to it
 export type ForgeWrite = { kind: ForgeArtifact; action: ForgeAction };
+
+// how a shell command makes a write through the forge's cli: a regex matching the command, the flags carrying the
+// text inline and the flags naming a file it is read from
+export type CliText = { command: string; body: string[]; file: string[] };
 
 export type ReviewVerdict = 'approve' | 'request-changes' | 'comment';
 export type MergeMethod = 'merge' | 'squash' | 'rebase';
@@ -166,9 +174,7 @@ export interface Forge {
   checks(repo: string, sha: string): Promise<Check[]>;
 
   // the kind of template a path is, from the locations the forge documents; undefined anywhere else
-  template(path: string): Template['kind'] | undefined;
-  // issue and pull request templates from every location the forge documents
-  templates(repo: string): Promise<Template[]>;
+  template(path: string): TemplateKind | undefined;
   tags(repo: string): Promise<string[]>;
   // commits reachable from head and not from base, newest first
   compare(repo: string, base: string, head: string): Promise<Commit[]>;
@@ -179,8 +185,8 @@ export interface Forge {
   commits(repo: string, ref: string): Promise<Commit[]>;
   // a file at a ref (the default branch when unset), undefined when absent
   file(repo: string, path: string, ref?: string): Promise<string | undefined>;
-  // every file path at a ref (the default branch when unset), as a checkout's git ls-files would list them
-  contents(repo: string, ref?: string): Promise<string[]>;
+  // every file at a ref (the default branch when unset), as a checkout's git ls-files would list them, each with its content id
+  contents(repo: string, ref?: string): Promise<TreeFile[]>;
 
   // issues and pull requests updated since a stamp (iso 8601), unchanged when nothing moved since the token
   items(repo: string, since: string, token?: string): Promise<Conditional<WatchItem[]>>;
@@ -204,4 +210,6 @@ export interface Forge {
   // the write one simple shell command (its words, unquoted) makes through the forge's own cli or api when it
   // sends text people read; undefined for a read, or a write that carries no text
   writeOf(words: string[]): ForgeWrite | undefined;
+  // where the forge's cli carries the text of the write, for a caller that has no post to make it with
+  cliText(write: ForgeWrite): CliText;
 }

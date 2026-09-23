@@ -1,10 +1,12 @@
 import { bandOf } from '../judge/bands.ts';
 import { entryOf, fill, fillQuestion, rank } from '../judge/rank.ts';
-import { DEFAULT_THRESHOLDS, failureText, type Answer, type Judge, type Questions, type Question } from '../judge/types.ts';
+import { DEFAULT_THRESHOLDS, failureText, type Answer, type Band, type Judge, type Questions, type Question } from '../judge/types.ts';
 import type { RepoConfig } from '../repo/config.ts';
 import { CHECKS } from './checks.ts';
+import { pool } from '../pool.ts';
 import type { Finding, Judged, Pack, PackQuestion, RankedItem, RankedStep, RankStep, Report, Subject, Verdict } from './types.ts';
 import { batchQuestions, estimateTokensOf, JEV_LIMITS } from '../tokens.ts';
+import { cutMessage } from '../judge/room.ts';
 
 type Meta = { lo: number; hi: number; severity: Judged['severity']; inverted: boolean; violates: (string | number)[] };
 
@@ -166,7 +168,8 @@ async function runStep(s: Step, items: Record<string, unknown>[], state: Record<
 }
 
 export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge, config: RepoConfig, options: RunOptions = {}): Promise<Report> {
-  const mechanical = runChecks(pack, subject, config);
+  // a cut is never silent: whatever pack reads the subject says what the judge did not read
+  const mechanical = [...runChecks(pack, subject, config), ...(subject.cuts?.length ? [{ check: 'subject.cut', severity: 'warn' as const, message: cutMessage(subject.cuts) }] : [])];
   const { questions, meta, steps } = materialize(pack, subject);
   const judged: Judged[] = [];
   const ranked: RankedStep[] = [];
@@ -222,8 +225,76 @@ export async function runPack(pack: Pack, subject: Subject, judgeBackend: Judge,
   };
 }
 
+// how many parts of a subject judged in parts are judged at once
+const PARTS_IN_FLIGHT = 4;
+
+// a subject too long to judge at once, one subject per part named by its part fact: every part judged, and one report of them
+export async function runParts(pack: Pack, subjects: Subject[], judgeBackend: Judge, config: RepoConfig, options: RunOptions = {}): Promise<Report> {
+  const reports = await pool(subjects, PARTS_IN_FLIGHT, (s) => runPack(pack, s, judgeBackend, config, options));
+  return mergeReports(
+    reports,
+    subjects.map((s, i) => (typeof s.facts['part'] === 'string' ? s.facts['part'] : `part ${i + 1} of ${subjects.length}`)),
+  );
+}
+
+const BANDS: Band[] = ['satisfied', 'unclear', 'violated'];
+
+type InPart<J> = { j: J; part: string };
+
+// one question's answers across the parts: its worst band, named by the parts that band was found in
+function worst<J extends Judged>(all: InPart<J>[]): J {
+  const band = BANDS[Math.max(...all.map((f) => BANDS.indexOf(f.j.band)))]!;
+  const at = all.filter((f) => f.j.band === band);
+  return { ...at[0]!.j, parts: at.map((f) => f.part) };
+}
+
+function grouped<J>(found: InPart<J>[], key: (j: J) => string | number): InPart<J>[][] {
+  const by = new Map<string | number, InPart<J>[]>();
+  for (const f of found) by.set(key(f.j), [...(by.get(key(f.j)) ?? []), f]);
+  return [...by.values()];
+}
+
+// the reports of one pack on the parts of one subject, in order, as one report: a question violated in any part is violated,
+// and every band names the parts it was found in; one report is returned as it is
+export function mergeReports(reports: Report[], parts: string[]): Report {
+  if (reports.length === 1) return reports[0]!;
+  const tagged = <T>(pick: (r: Report) => T[]) => reports.flatMap((r, i) => pick(r).map((j) => ({ j, part: parts[i]! })));
+  const mechanical = [...new Map(reports.flatMap((r) => r.mechanical).map((f) => [JSON.stringify(f), f])).values()];
+  const judged = grouped(tagged((r) => r.judged), (j) => j.id).map(worst);
+  const steps = Math.max(...reports.map((r) => r.ranked.length));
+  const ranked: RankedStep[] = Array.from({ length: steps }, (_, k) => {
+    const of = reports.map((r) => r.ranked[k]).filter((s): s is RankedStep => s !== undefined);
+    // an item is the same item in every part, by its index in the step's list
+    const items = grouped(tagged((r) => r.ranked[k]?.items ?? []), (j) => j.index).map((all) => ({
+      ...worst(all),
+      asked: grouped(all.flatMap((f) => f.j.asked.map((j) => ({ j, part: f.part }))), (j) => j.id).map(worst),
+    }));
+    const total = Math.max(...of.map((s) => s.total));
+    const list = of[0]!.list;
+    // an item any part rules out is ruled out; a violated list shows only those
+    const ruledOut = items.filter((i) => i.asked.some((j) => j.band === 'violated')).length;
+    return { step: of[0]!.step, list, total, kept: list === 'violated' ? total - ruledOut : items.length - ruledOut, items };
+  });
+  const judgeError = reports.find((r) => r.judgeError !== undefined)?.judgeError;
+  const dropped = reports.reduce((n, r) => n + (r.dropped ?? 0), 0);
+  return {
+    pack: reports[0]!.pack,
+    subject: reports[0]!.subject,
+    mechanical,
+    judged,
+    ranked,
+    verdict: verdictOf(mechanical, [...judged, ...ranked.flatMap((r) => r.items.flatMap((i) => i.asked))], judgeError !== undefined),
+    backend: reports[0]!.backend,
+    judgeError,
+    parts,
+    ...(dropped > 0 ? { dropped } : {}),
+  };
+}
+
 export function formatReport(report: Report): string {
   const lines = [`sift ${report.pack} ${report.subject}: ${report.verdict.toUpperCase()} (judge: ${report.backend})`];
+  if (report.parts) lines.push(`  judged in ${report.parts.length} parts: ${report.parts.join(', ')}`);
+  const where = (j: Judged) => (j.parts ? ` (in ${j.parts.join(', ')})` : '');
   for (const f of report.mechanical) lines.push(`  [${f.severity}] ${f.check}: ${f.message}`);
   const value = (j: Judged) =>
     !j.answer
@@ -236,18 +307,18 @@ export function formatReport(report: Report): string {
   // steps first, then the questions, the order they ran in
   for (const r of report.ranked) {
     if (r.list === 'each') {
-      for (const i of r.items) for (const j of i.asked) lines.push(`  [${j.band}] ${j.id} = ${value(j)}: ${j.instructions}`);
+      for (const i of r.items) for (const j of i.asked) lines.push(`  [${j.band}] ${j.id} = ${value(j)}: ${j.instructions}${where(j)}`);
       continue;
     }
     if (r.list === 'violated') {
       lines.push(`  ${r.step}: ${r.total - r.kept} of ${r.total} ruled out`);
-      for (const i of r.items) for (const j of i.asked) if (j.band === 'violated') lines.push(`    [violated] ${i.label}: ${j.id.slice(i.id.length + 1)} = ${value(j)}`);
+      for (const i of r.items) for (const j of i.asked) if (j.band === 'violated') lines.push(`    [violated] ${i.label}: ${j.id.slice(i.id.length + 1)} = ${value(j)}${where(j)}`);
       continue;
     }
     lines.push(`  ${r.step}: top ${r.items.length} of ${r.total}, ${r.kept} not ruled out`);
-    for (const [i, j] of r.items.entries()) lines.push(`    ${i + 1}. [${j.band}] ${j.label} = ${value(j)}`);
+    for (const [i, j] of r.items.entries()) lines.push(`    ${i + 1}. [${j.band}] ${j.label} = ${value(j)}${where(j)}`);
   }
-  for (const j of report.judged) lines.push(`  [${j.band}] ${j.id} = ${value(j)}: ${j.instructions}`);
+  for (const j of report.judged) lines.push(`  [${j.band}] ${j.id} = ${value(j)}: ${j.instructions}${where(j)}`);
   if (report.judgeError) lines.push(`  judge unavailable: ${report.judgeError}`);
   if (report.dropped) lines.push(`  ${report.dropped} answer${report.dropped === 1 ? '' : 's'} dropped: unasked or missing`);
   return lines.join('\n');
