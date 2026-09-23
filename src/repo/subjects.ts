@@ -323,10 +323,6 @@ export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; judg
 
 export async function rulesSubject(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject> {
   const { forge, repo } = host;
-  const found = await discoverRules(host.source, config.rules, host.judge, host.store);
-  const rules = [...found.rules];
-  const total = rules.length;
-  rules.splice(config.rules.maxRules);
   const ref = target.kind === 'text' ? target.ref : `#${target.number}`;
   let subject: Record<string, unknown> = { kind: target.kind, ref };
   let about: string | undefined;
@@ -338,6 +334,11 @@ export async function rulesSubject(host: RulesHost, target: RulesTarget, config:
     about = target.about;
     subject = { kind: 'text', ...(about ? { about } : {}), text: truncate(target.ref, BODY_CAP) };
   }
+  // the subject is read, and a pull request refused, before discovery spends judge calls
+  const found = await discoverRules(host.source, config.rules, host.judge, host.store);
+  const rules = [...found.rules];
+  const total = rules.length;
+  rules.splice(config.rules.maxRules);
   return {
     kind: 'rules',
     ref: `${target.kind}:${truncate(ref, 40)}`,
