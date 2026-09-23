@@ -46,7 +46,7 @@ export type Discovery = {
 };
 
 // what the store holds per scope; bump when the shape, the key, the questions or the keep policy change
-const VERSION = 3;
+const VERSION = 4;
 type Cached = { version: number; key: string; docs: string[]; rules: Rule[]; candidates: number; kept: string[] };
 
 export const PROSE = new Set(['md', 'mdx', 'markdown', 'txt', 'rst', 'org']);
@@ -69,13 +69,14 @@ export const DOC_QUESTION: Questions = {
   },
 };
 
+// a rule directs contributors; a description of what the repository's software does is not one, since a change may alter it
 export const PARAGRAPH_QUESTION: Questions = {
   rule: {
     type: 'noul',
-    instructions: 'This paragraph is a rule a contribution can break, not narrative or instruction: {text}',
+    instructions: 'This paragraph directs contributors, a rule a contribution can break, not a description of what the software does: {text}',
     criteria: {
-      true: 'It requires, forbids or constrains something a change, a commit, a branch, an issue, a pull request or a message could get wrong.',
-      false: 'It explains, introduces, describes how something works, or gives steps to run: nothing a contribution could comply with or violate.',
+      true: 'It tells a contributor what a change, a commit, a branch, an issue, a pull request or a message must or must not do: a convention, a requirement, a prohibition, a review or release process, or the form another project requires of code here (a migration guide\'s old and new forms).',
+      false: 'It describes what this repository\'s software does, offers, accepts or refuses (a feature, a command, an option, a config field, a pack, a check), even in words like may, must or is refused, since a contribution may change that behaviour; or it explains, introduces, records history or gives setup, build or test steps to run: nothing a contribution could comply with or violate.',
     },
   },
 };
