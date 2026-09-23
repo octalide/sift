@@ -225,7 +225,6 @@ export function toWatchItem(raw: RawItem): WatchItem {
   };
 }
 
-// a check run's id is its job's id when actions ran it, so the log is reachable from the check
 // an actions check run links its job as .../actions/runs/<run>/job/<job>; a check from any other app names no run
 const ACTIONS_JOB = /\/actions\/runs\/(\d+)\/job\/\d+/;
 
