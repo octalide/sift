@@ -1,4 +1,5 @@
 import type { Forge, Issue, PullRequest } from '../src/forge/forge.ts';
+import { ghCliText } from '../src/forge/github.ts';
 
 // a forge that answers from what a test hands it and nothing else; every unhandled read answers empty
 export function fakeForge(over: Partial<Forge> = {}): Forge {
@@ -43,6 +44,7 @@ export function fakeForge(over: Partial<Forge> = {}): Forge {
     logCommand: (repo, run) => `gh run view ${run} --log-failed -R ${repo}`,
     post: async (repo, post) => `https://fake/${repo}/${post.kind}/posted`,
     writeOf: () => undefined,
+    cliText: ghCliText,
     ...over,
   };
 }

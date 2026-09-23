@@ -3,7 +3,9 @@ import type { ForgePost } from '../src/forge/forge.ts';
 import { GitHubForge, GH_WRITES } from '../src/forge/github.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { postCall, postOf, rawWriteOf, rawWriteRefusal } from '../src/gate/post.ts';
+import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
+import type { Checkout } from '../src/repo/checkout.ts';
 import { DEFAULT_CONFIG, resolveConfig, type RepoConfig } from '../src/repo/config.ts';
 import { simpleCommands } from '../src/shell.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -154,6 +156,41 @@ describe('post', () => {
     expect(asked).toEqual([]);
     expect(await postCall(host(posted), pack, { repo: 'o/target', kind: 'pr-merge', number: 4 })).toEqual({ refused: 'pr-merge needs method, one of merge, squash, rebase' });
     expect(posted).toHaveLength(1);
+  });
+
+  describe('a shell write from a loop that cannot call post', () => {
+    const fs = { read: async () => '', exists: async () => false, list: async () => [], stat: async () => ({}) } as never;
+    const at = async (): Promise<Checkout> => ({ root: '/w', repo: 'o/target', config: DEFAULT_CONFIG, packs: { rules: pack } });
+    const noRead = async (p: string): Promise<string> => {
+      throw new Error(`no file ${p}`);
+    };
+    const shell = (asked: string[] = []) => ({ ...host([], asked), fs });
+    const write = { kind: 'pr', action: 'comment' } as const;
+    const bash = (command: string) => ({ command });
+
+    it('is refused toward post when the loop can call it', async () => {
+      const r = await gateShellWrite(shell(), write, true, at, bash('gh pr comment 4 -b "fine"'), noRead);
+      expect(r).toEqual({ write, fallback: false, refused: rawWriteRefusal(shell().forge, write) });
+    });
+
+    it('is judged on its text by the checkout\'s rules, allowed or refused on it', async () => {
+      const asked: string[] = [];
+      const ok = await gateShellWrite(shell(asked), write, false, at, bash('gh pr comment 4 --body "Looks right, merging."'), noRead);
+      expect(ok).toMatchObject({ fallback: true, gated: { outbound: { channel: 'github-shell-pr-comment', text: 'Looks right, merging.' }, decision: { allow: true } } });
+      expect(asked.some((q) => /em dash/.test(q))).toBe(true);
+      const heredoc = `gh pr comment 4 --body-file - <<'EOF'\nIt drops them — every time.\nEOF`;
+      const broken = await gateShellWrite(shell(), write, false, at, bash(heredoc), noRead);
+      expect(broken).toMatchObject({ fallback: true, gated: { outbound: { channel: 'github-shell-pr-comment' }, decision: { allow: false, reason: expect.stringMatching(/No em dashes/) } } });
+      const created = await gateShellWrite(shell(), { kind: 'issue', action: 'create' }, false, at, bash('gh issue new -t "Watcher misses edits" -b "It drops them."'), noRead);
+      expect(created).toMatchObject({ gated: { outbound: { channel: 'github-shell-issue-create' }, decision: { allow: true } } });
+    });
+
+    it('names the fallback when the text cannot be read, and when it judged', async () => {
+      const r = await gateShellWrite(shell(), write, false, at, bash('gh api repos/o/target/issues/4/comments -f body=hi'), noRead);
+      expect(r).toMatchObject({ fallback: true, refused: expect.stringContaining('this loop started before sift registered mcp__sift__post, so it cannot call it') });
+      expect((r as { refused: string }).refused).toContain('--body-file');
+      expect(fallbackNote(shell().forge)).toMatch(/judged on its text by the checkout's rules instead of refused/);
+    });
   });
 
   describe('a text longer than the judge reads at once', () => {

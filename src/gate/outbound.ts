@@ -83,14 +83,19 @@ export type Gated = { outbound: Outbound; decision: OutboundDecision };
 // undefined when the call sends no text or the checkout has no rules pack
 export async function gateCall(host: GateHost, checkout: Checkout, tool: string, input: Record<string, unknown>, read: ReadText): Promise<Gated | undefined> {
   const outbound = await outboundOf(tool, input, read, channelTable(defaultChannels(host.forge), checkout.config.outbound.channels));
+  return outbound ? gateText(host, checkout, outbound) : undefined;
+}
+
+// text on its way out under the checkout's rules pack and rule documents; undefined when the checkout has no rules pack
+export async function gateText(host: GateHost, checkout: Checkout, outbound: Outbound): Promise<Gated | undefined> {
   const pack = checkout.packs['rules'];
-  if (!outbound || !pack) return undefined;
+  if (!pack) return undefined;
   const subjects = await textRulesSubjects({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), judge: host.judge, store: host.store, now: host.now, notice: host.notice }, { text: outbound.text, about: outbound.kind }, checkout.config);
   return { outbound, decision: await gateOutbound(outbound, subjects, pack, host.judge, checkout.config) };
 }
 
 // a directory in no repository has no rule documents of its own; entries the config names in another repository still read from the forge
 function rulesOf(host: GateHost, checkout: Checkout): RuleSource {
-  if (checkout.git || checkout.repo) return ruleSource(host, { checkout, named: false }, undefined);
+  if (checkout.git || checkout.repo) return ruleSource(host, { checkout, named: false }, checkout.repo);
   return { scope: checkout.root, list: async () => [], read: async () => undefined, templates: async () => [], remote: (repo, path, ref) => host.forge.file(repo, path, ref) };
 }

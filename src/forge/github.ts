@@ -1,6 +1,6 @@
 import { Gh, GhError, type ApiResponse } from './gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
-import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgePost, ForgeUser, ForgeWrite, Issue, IssueSummary, PullHead, PullRequest, Rate, Review, ReviewComment, ReviewVerdict, Run, Template, WatchItem } from './forge.ts';
+import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, CliText, ForgeLink, ForgePost, ForgeUser, ForgeWrite, Issue, IssueSummary, PullHead, PullRequest, Rate, Review, ReviewComment, ReviewVerdict, Run, Template, WatchItem } from './forge.ts';
 
 type GhUser = { login: string; type?: string };
 type GhIssue = {
@@ -90,6 +90,17 @@ const CLI_TEXT: Record<ForgeArtifact, string[]> = {
   release: ['--notes', '-n', '--notes-file', '-F', '--title', '-t'],
 };
 const CLI_ALIASES: Record<string, ForgeAction> = { new: 'create' };
+
+// the gh command of a write, wherever it stands in the shell command, and the flags its text is given by
+export function ghCliText(write: ForgeWrite): CliText {
+  const names = [write.action, ...Object.entries(CLI_ALIASES).flatMap(([alias, action]) => (action === write.action ? [alias] : []))];
+  const noun = write.kind === 'release' ? 'notes' : 'body';
+  return {
+    command: String.raw`(?:^|[\s;&|()/])gh\s+${write.kind}\s+(?:${names.join('|')})\b`,
+    body: [`--${noun}`, `-${noun[0]}`],
+    file: [`--${noun}-file`, '-F'],
+  };
+}
 
 // a create or a comment always sends text; an edit, a review or a merge only when a text flag is given
 const alwaysText = (action: ForgeAction): boolean => action === 'create' || action === 'comment';
@@ -532,5 +543,9 @@ export class GitHubForge implements Forge {
 
   writeOf(words: string[]): ForgeWrite | undefined {
     return ghWriteOf(words);
+  }
+
+  cliText(write: ForgeWrite): CliText {
+    return ghCliText(write);
   }
 }
