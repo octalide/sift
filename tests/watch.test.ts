@@ -175,7 +175,7 @@ describe('watcher', () => {
       // tick 1 seeds; tick 2: issue 2 got a comment (judged), issue 1 got a label (deferred)
       items: script(changed([slim(1), slim(2)]), changed([slim(1, { labels: ['p1'] }), slim(2, { comments: 1, updatedAt: '2026-01-03T00:00:00Z' })], 'f')),
       runs: script(changed([])),
-      issue: async (_r, n) => ({ ...slim(n), body: 'b', state: 'open' }),
+      issue: async (_r, n) => ({ ...slim(n), body: 'b', state: 'open', pr: false }),
       comments: async () => [{ author: { login: 'bob', bot: false }, body: 'is this still planned?', createdAt: '2026-01-03T00:00:00Z' }],
     });
     const store = new Map<string, unknown>();
@@ -456,7 +456,7 @@ describe('watcher', () => {
       // tick 2: me filed issue 2 with no labels and a task label but no parent
       items: script(changed([slim(1)]), changed([slim(2, { author: { login: 'me', bot: false }, labels: ['task'], createdAt: '2026-06-01T00:00:00Z', updatedAt: '2026-06-01T00:00:00Z' })], 'f')),
       runs: script(changed([])),
-      issue: async (_r, n) => ({ ...slim(n), state: 'open', author: { login: 'me', bot: false }, labels: ['task'], body: '## Summary\nthe summary' }),
+      issue: async (_r, n) => ({ ...slim(n), state: 'open', author: { login: 'me', bot: false }, labels: ['task'], body: '## Summary\nthe summary', pr: false }),
       openIssues: async () => [{ number: 2, title: 'Issue 2' }],
     });
     const delivered: string[] = [];
