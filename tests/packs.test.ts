@@ -570,7 +570,7 @@ describe('pack materialization', () => {
     // the two plans of PR #120: the first lists its implementation choices, the second dropped them to satisfy the grader
     const decided = 'arm stores {agent, ref}, a leading # on the ref is stripped once, a later arm on the same ref replaces the entry, and the arming notice names the ref';
     const literal = 'arm stores {agent, ref}, the ref is compared as given and nothing is parsed from it';
-    const s = await planSubject(forge, 'o/r', 119, decided);
+    const s = await planSubject(forge, 'o/r', 119, decided, 'plan');
     expect(s.kind).toBe('plan');
     expect(s.ref).toBe('o/r#119');
     expect(s.state).toMatchObject({ number: 119, issue: { title: 'watch: name the agent per ref' }, plan: decided });
@@ -587,7 +587,7 @@ describe('pack materialization', () => {
     expect(first.verdict).toBe('warn');
     const second = await runPack(
       BUILTIN_PACKS['plan']!,
-      await planSubject(forge, 'o/r', 119, literal),
+      await planSubject(forge, 'o/r', 119, literal, 'plan'),
       answering({ covers: { type: 'noul', p: 0.85 }, adds_nothing: { type: 'noul', p: 0.1 }, decides_unasked: { type: 'noul', p: 0.6 } }),
       DEFAULT_CONFIG,
     );

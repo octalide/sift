@@ -582,7 +582,7 @@ export class Watcher {
     const pack = this.host.issuePack;
     if (!pack || e.number === undefined) return [];
     try {
-      const subject = await issueSubject(this.host.forge, this.options.repo, e.number, this.host.config);
+      const subject = await issueSubject(this.host.forge, this.options.repo, e.number, this.host.config, { pack: pack.name, kind: 'issue' });
       return runChecks(pack, subject, this.host.config).filter((f) => f.severity !== 'info');
     } catch (error) {
       this.host.log(`sift watch ${this.options.repo}: could not check issue #${e.number} (${error instanceof Error ? error.message : String(error)})`);

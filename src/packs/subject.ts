@@ -23,6 +23,9 @@ export type RulesSubject = { kind: 'issue'; number: number; repo?: string } | { 
 
 export type ParsedKind = ParsedSubject['kind'];
 
+// the pack the caller named and the kind of subject it takes; a refusal names the pack and the forms of the kind
+export type Asked<K extends ParsedKind = ParsedKind> = { pack: string; kind: K };
+
 const NUMBER = /^#?(\d+)$/;
 const COMMIT = /^[0-9a-f]{7,40}$|\.\./;
 const URL = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -49,20 +52,21 @@ export function expectedSubject(kind: ParsedKind, forge: Pick<Forge, 'name'>): s
 
 const shown = (ref: string): string => (ref.length > 60 ? `${ref.slice(0, 57)}...` : ref);
 
-// the refusal of a subject for a pack of the given kind, with the forms it takes named
-export function refusal(kind: ParsedKind, ref: string, why: string, forge: Pick<Forge, 'name'>): Error {
-  return new Error(`${kind} pack: ${why} (${JSON.stringify(shown(ref))}); expected ${expectedSubject(kind, forge)}`);
+// the refusal of a subject for the pack that was asked, with the forms its kind takes named
+export function refusal(asked: Asked, ref: string, why: string, forge: Pick<Forge, 'name'>): Error {
+  return new Error(`${asked.pack} pack: ${why} (${JSON.stringify(shown(ref))}); expected ${expectedSubject(asked.kind, forge)}`);
 }
 
-// parses the subject of a grade call for a pack of the given kind, refusing with the expected forms named.
+// parses the subject of a grade call for the pack that was asked, refusing with the pack and the forms of its kind named.
 // repo is the explicit repo of the call, when given; a url naming a different repo is refused.
 // a bare number names an issue for the mixed and rules kinds
-export function parseSubject<K extends ParsedKind>(kind: K, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string): Extract<ParsedSubject, { kind: K }>;
-export function parseSubject(kind: ParsedKind, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string): ParsedSubject {
+export function parseSubject<K extends ParsedKind>(asked: Asked<K>, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string): Extract<ParsedSubject, { kind: K }>;
+export function parseSubject(asked: Asked, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string): ParsedSubject {
+  const { kind } = asked;
   const raw = (ref ?? '').trim();
-  if (!raw) throw new Error(`${kind} pack: no subject; expected ${expectedSubject(kind, forge)}`);
+  if (!raw) throw new Error(`${asked.pack} pack: no subject; expected ${expectedSubject(kind, forge)}`);
   const refuse = (why: string): never => {
-    throw refusal(kind, raw, why, forge);
+    throw refusal(asked, raw, why, forge);
   };
   const link = forge.parseUrl(raw);
   // an issue or pull request by number or url; the two kinds share the forms, only the kind differs
