@@ -248,6 +248,18 @@ describe('bands', () => {
     expect(bandOf(pick('none', 0.1), t, ['a'])).toBe('unclear');
     expect(bandOf(pick('none', 0.9), t, ['a'])).toBe('satisfied');
   });
+
+  it('bands a score on the level it picked, never violated below hi', () => {
+    const level = (score: number, confidence: number) => ({ type: 'score' as const, score, expected: score, legend: String(score), probabilities: [], confidence });
+    const t = { lo: 0.3, hi: 0.7 };
+    expect(bandOf(level(0, 0.2), t)).toBe('unclear');
+    expect(bandOf(level(0, 0.9), t)).toBe('satisfied');
+    expect(bandOf(level(0, 0.2), t, [0, 1])).toBe('unclear');
+    expect(bandOf(level(2, 0.2), t, [0, 1])).toBe('unclear');
+    expect(bandOf(level(1, 0.5), t, [0, 1])).toBe('unclear');
+    expect(bandOf(level(1, 0.7), t, [0, 1])).toBe('violated');
+    expect(bandOf(level(2, 0.9), t, [0, 1])).toBe('satisfied');
+  });
 });
 
 describe('rank', () => {

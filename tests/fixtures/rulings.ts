@@ -17,6 +17,7 @@ const base = (number: number, title: string, body: string, createdAt: string): I
   url: `https://fake/o/r/issue/${number}`,
   createdAt,
   updatedAt: createdAt,
+  pr: false,
 });
 
 // mach#3778: the body names the fix and leaves one question for the owner

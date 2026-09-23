@@ -55,6 +55,18 @@ describe('github forge', () => {
     expect(calls[2]).toContain('since=2026-01-01T00:00:00Z');
   });
 
+  it('tells a pull request from an issue read by number, since the issues endpoint serves both', async () => {
+    const raw = (n: number, pr: boolean) => ({ number: n, title: 't', body: null, state: 'open', user: { login: 'a' }, labels: [], milestone: null, html_url: 'u', created_at: '1', updated_at: '2', ...(pr ? { pull_request: { url: 'p' } } : {}) });
+    const forge = github({
+      'repos/o/r/issues/1': { body: raw(1, false) },
+      'repos/o/r/issues/2': { body: raw(2, true) },
+      'repos/o/r/pulls/2': { body: { ...raw(2, false), base: { ref: 'dev' }, head: { ref: 'fix/1', sha: 's' }, draft: false, merged: false, additions: 0, deletions: 0, changed_files: 0 } },
+    });
+    expect((await forge.issue('o/r', 1)).pr).toBe(false);
+    expect((await forge.issue('o/r', 2)).pr).toBe(true);
+    expect((await forge.pull('o/r', 2)).pr).toBe(true);
+  });
+
   it('treats a repository without actions as one whose runs never change', async () => {
     const forge = github({ 'repos/o/r/actions/runs': { status: 403, body: { message: 'no' } } });
     expect(await forge.runs('o/r')).toEqual({ changed: false, rate: {} });
