@@ -341,7 +341,7 @@ export const register: Register = (on, rawOptions) => {
         type: 'object',
         properties: {
           action: { type: 'string', enum: [...WATCH_ACTIONS] },
-          repo: { type: 'string', description: 'owner/name. subscribe: the repository, default the one checked out where the calling subagent was spawned, else the session\'s. poll, pause, resume, reset, deferred: only this repository' },
+          repo: { type: 'string', description: 'owner/name. subscribe and start: the repository, default the one checked out where the calling subagent was spawned, else the session\'s. poll, pause, resume, reset, deferred: only this repository' },
           scope: { type: 'string', description: 'subscribe: repo (default), pr <n> (the pull request across its heads), branch <name> (its runs), run <id> (that run, read by id until it completes), tag <glob> (runs on tags matching the glob)' },
           items: { type: 'boolean', description: 'subscribe: deliver issue and pull request events in scope, default true' },
           ci: { type: 'string', enum: [...CI_FILTERS], description: 'subscribe: settled (each pull request head\'s verdict, and each completed run on a branch, tag or run scope), failures (verdicts and failed runs), all (every completed run as well), none. Default the watchCi option' },
