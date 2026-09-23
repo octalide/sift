@@ -23,6 +23,12 @@ function validateQuestions(raw: unknown, name: string, where: string): Record<st
     if (q.type === 'score' && !Array.isArray(q.criteria)) throw new Error(`pack ${name}: score ${id} needs a criteria array`);
     if (q.type === 'noul' && q.criteria !== undefined && !isNoulCriteria(q.criteria)) throw new Error(`pack ${name}: noul ${id} criteria must be { true, false } strings`);
     if (q.type === 'choice' && !q.options && (q.criteria === null || typeof q.criteria !== 'object')) throw new Error(`pack ${name}: choice ${id} needs criteria or options`);
+    if (q.violates !== undefined) {
+      if (q.type !== 'choice') throw new Error(`pack ${name}: violates on ${id} needs a choice`);
+      if (q.violates === 'listed' ? !q.options : !Array.isArray(q.violates) || !q.violates.every((k) => typeof k === 'string')) {
+        throw new Error(`pack ${name}: choice ${id} violates must be a list of option keys, or listed with options`);
+      }
+    }
   }
   return raw as Record<string, PackQuestion>;
 }

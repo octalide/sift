@@ -235,7 +235,18 @@ describe('bands', () => {
     expect(bandOf({ type: 'noul', p: 0.9 })).toBe('satisfied');
     expect(bandOf({ type: 'noul', p: 0.5 })).toBe('unclear');
     expect(bandOf({ type: 'noul', p: 0.1 })).toBe('violated');
-    expect(bandOf({ type: 'choice', choice: 'a', probabilities: {}, confidence: 0.2 }, { lo: 0.3, hi: 0.7 })).toBe('violated');
+  });
+
+  it('bands a choice on what it picked, never violated below hi', () => {
+    const pick = (choice: string, confidence: number) => ({ type: 'choice' as const, choice, probabilities: {}, confidence });
+    const t = { lo: 0.3, hi: 0.7 };
+    expect(bandOf(pick('a', 0.2), t)).toBe('unclear');
+    expect(bandOf(pick('a', 0.9), t)).toBe('satisfied');
+    expect(bandOf(pick('a', 0.2), t, ['a'])).toBe('unclear');
+    expect(bandOf(pick('a', 0.5), t, ['a'])).toBe('unclear');
+    expect(bandOf(pick('a', 0.7), t, ['a'])).toBe('violated');
+    expect(bandOf(pick('none', 0.1), t, ['a'])).toBe('unclear');
+    expect(bandOf(pick('none', 0.9), t, ['a'])).toBe('satisfied');
   });
 });
 
