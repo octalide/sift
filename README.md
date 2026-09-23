@@ -240,7 +240,7 @@ No filename is special. The rules pack and the outbound gate read the repository
 
 `rules.docs`, empty by default, adds documents the judge does not have to recognise: paths in the checkout, or `owner/repo:path[@ref]` read from the forge, so a consumer PR can be graded against another repo's migration guide at a tag. Their paragraphs are filtered like any other document's. `rules.exclude` lists paths or globs (`*` within a segment, `**` across) that are never candidates. Rules past `rules.maxRules` (200 by default) are dropped and `rules.present` says so.
 
-Discovery is cached in the plugin store per checkout (or per repository and ref), keyed by a digest of every file it read and of the config, so the judge is asked again only when a document, a listed doc or the config changes. Every rules report names the documents its rules came from in `rules.present` (`14 rules from CONTRIBUTING.md, docs/style.md (cached)`), and a judge failure during discovery makes the verdict unknown rather than passing an empty rule set.
+Discovery is cached in the plugin store per checkout (or per repository and ref), keyed by a digest of every file it read and of the config, so the judge is asked again only when a document, a listed doc or the config changes. A cache no discovery has read for 7 days is removed at the next start of any session, so the caches of deleted checkouts and old refs do not pile up. Every rules report names the documents its rules came from in `rules.present` (`14 rules from CONTRIBUTING.md, docs/style.md (cached)`), and a judge failure during discovery makes the verdict unknown rather than passing an empty rule set.
 
 ## Forge
 
@@ -479,6 +479,8 @@ CI runs the same four commands on every pull request and reports them through a 
 ## Changes in 0.12.1
 
 Fixed: a bare number given to the `locate` or `plan` pack that names a pull request is refused with the forms the pack takes, as `issue` and `rules` already were, where it was read as an issue. The forms `locate` names no longer offer a pull request number: a bare number there names an issue, and a pull request is given by URL.
+
+Fixed: the rules caches are removed once unused. Each checkout, and each repository and ref, that rule discovery read left its `rules:<scope>` cache in the plugin store for good. Every discovery now marks the cache it reads or writes, and a cache unread for 7 days is removed at the next start of any session, by the same sweep that removes stale watch sessions. A cache written before this release is marked at the first start and goes 7 days later unless read. Discovery takes a clock beside its store (`RulesHost.now`, `GradeHost.now`).
 
 ## Changes in 0.12.0
 

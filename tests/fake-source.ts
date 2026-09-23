@@ -1,6 +1,6 @@
 import type { Judge } from '../src/judge/types.ts';
 import type { RuleSource } from '../src/rules/discover.ts';
-import type { KeyStore } from '../src/watch/sessions.ts';
+import type { KeyStore } from '../src/keys.ts';
 
 // a rule source over a map of path to text, with optional forge templates and remote files keyed repo:path@ref
 export function memorySource(files: Record<string, string>, extra: { templates?: Record<string, string>; remote?: Record<string, string>; scope?: string } = {}): RuleSource {

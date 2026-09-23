@@ -17,7 +17,7 @@ import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
-import { SEEN_EVERY_MS, Sessions, watchKeys } from '../src/watch/sessions.ts';
+import { SEEN_EVERY_MS, StoreKeys, watchKeys } from '../src/keys.ts';
 
 type Options = {
   backend: Backend;
@@ -102,8 +102,8 @@ type Runtime = GradeHost & {
   // the channels a delivery reaches its recipient by; with the watches
   mailbox?: Mailbox;
   sessionId: string;
-  // the lifetime of the session's watch keys
-  sessions: Sessions;
+  // the lifetime of the session's watch keys and every rules cache
+  storeKeys: StoreKeys;
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -185,11 +185,11 @@ export const register: Register = (on, rawOptions) => {
     const store = { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v), delete: (k: string) => $.store.delete(k), keys: () => $.store.keys() };
     const sessionId = await $.session.id();
     const keys = watchKeys(sessionId);
-    const sessions = new Sessions({ store, now: () => Date.now(), log: (text) => $.ui.log(text) });
-    await sessions.touch(sessionId);
-    await sessions.sweep(sessionId);
+    const storeKeys = new StoreKeys({ store, now: () => Date.now(), log: (text) => $.ui.log(text) });
+    await storeKeys.touch(sessionId);
+    await storeKeys.sweep(sessionId);
     // a reload cancels the old interval with the old environment
-    $.clock.every(SEEN_EVERY_MS, () => void sessions.touch(sessionId));
+    $.clock.every(SEEN_EVERY_MS, () => void storeKeys.touch(sessionId));
     const log = new DecisionLog(store, sessionId);
     const apiKey = await apiKeyOf($, options);
     const inner = makeJudge(
@@ -272,7 +272,7 @@ export const register: Register = (on, rawOptions) => {
           },
         })
       : undefined;
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, watches, mailbox: watches ? mailbox : undefined, sessionId, sessions };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, now: () => Date.now(), watches, mailbox: watches ? mailbox : undefined, sessionId, storeKeys };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     if (options.grade) {
@@ -390,7 +390,7 @@ export const register: Register = (on, rawOptions) => {
       const rt = runtime;
       await rt.watches?.end();
       await rt.mailbox?.stop();
-      await rt.sessions.end(rt.sessionId);
+      await rt.storeKeys.end(rt.sessionId);
     }
     return next(e);
   });

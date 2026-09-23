@@ -2,6 +2,7 @@ import type { Forge } from '../forge/forge.ts';
 import type { Git } from '../forge/git.ts';
 import type { RepoConfig } from '../repo/config.ts';
 import { digest } from '../hash.ts';
+import { rulesKeys } from '../keys.ts';
 import { bandOf } from '../judge/bands.ts';
 import { rank } from '../judge/rank.ts';
 import { DEFAULT_THRESHOLDS, failureText, type Judge, type Questions } from '../judge/types.ts';
@@ -101,8 +102,9 @@ export async function ruleDoc(doc: string, source: Pick<RuleSource, 'read' | 're
 type Doc = { path: string; text: string };
 
 // the candidates ranked, the listed documents added as they are, every kept document's paragraphs ranked to rules.
-// the result is cached under the source's scope keyed by every file read and the config, so the judge runs only on a change
-export async function discoverRules(source: RuleSource, config: RepoConfig['rules'], judge: Judge, store: StoreLike): Promise<Discovery> {
+// the result is cached under the source's scope keyed by every file read and the config, so the judge runs only on a change.
+// every discovery that answers from or writes the cache marks it read at now, so a cache no discovery reads goes stale and is swept
+export async function discoverRules(source: RuleSource, config: RepoConfig['rules'], judge: Judge, store: StoreLike, now: () => number): Promise<Discovery> {
   const listed = new Set(config.docs);
   const paths = (await source.list()).filter((p) => candidate(p) && !listed.has(p) && !excluded(p, config.exclude)).sort();
   const read = await pool(paths, 16, async (path) => ({ path, text: await source.read(path) }));
@@ -117,9 +119,10 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
     if (text !== undefined) explicit.push({ path: doc, text });
   }
   const key = digest(JSON.stringify({ v: VERSION, docs: [...explicit, ...candidates].map((d) => [d.path, digest(d.text)]), exclude: config.exclude }));
-  const storeKey = `rules:${source.scope}`;
-  const cached = (await store.get(storeKey)) as Cached | undefined;
+  const keys = rulesKeys(source.scope);
+  const cached = (await store.get(keys.cache)) as Cached | undefined;
   if (cached && cached.version === VERSION && cached.key === key) {
+    await store.set(keys.seen, now());
     return { docs: cached.docs, rules: cached.rules, candidates: cached.candidates, kept: cached.kept, cached: true };
   }
   const kept: Doc[] = [...explicit];
@@ -137,7 +140,8 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
   }
   const docs = kept.map((d) => d.path).filter((p) => rules.some((r) => r.source === p));
   const result: Cached = { version: VERSION, key, docs, rules, candidates: candidates.length, kept: kept.length - explicit.length };
-  await store.set(storeKey, result);
+  await store.set(keys.cache, result);
+  await store.set(keys.seen, now());
   return { docs, rules, candidates: result.candidates, kept: result.kept, cached: false };
 }
 
