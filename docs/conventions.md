@@ -1,0 +1,60 @@
+# Conventions
+
+Nothing about a repository is assumed. Out of the box sift discovers the rule documents by judgement, reads the forge's own issue and pull request templates from their documented locations, treats the default branch as protected, and otherwise relies on the judged questions, which hold for any project. Every mechanical check is opt-in: no commit format, label, template, version or changelog check runs until it is configured, so there is nothing to switch off.
+
+Three layers apply in order, each field by field over the last: the defaults, a global file, then the repository's `.sift/config.json`. The global file is `$XDG_CONFIG_HOME/sift/config.json` (`~/.config/sift/config.json` when `XDG_CONFIG_HOME` is unset) and is read when it exists. The `config` option, set to a path relative to the repo root or inline JSON of the same shape, takes the global file's place: when it is set the file is not read. Nothing below assumes a particular format: the presets are examples, and any commit or version convention is a regex. A strict setup for a conventional-commits, semver-tagged, `dev` into `main` workflow looks like this:
+
+```json
+{
+  "commits": { "convention": "conventional", "scope": "issue", "forbidTrailers": ["Co-Authored-By"] },
+  "branches": { "protected": ["main", "dev"], "pattern": "^(feat|fix|chore|hotfix)/\\d+$" },
+  "issues": { "requiredLabelGroups": [["bug", "feat", "docs", "chore"]], "milestone": true, "templateSections": ["Summary", "Acceptance"], "childLabels": ["task"] },
+  "prs": { "linkIssue": true, "targets": ["dev"], "templateSections": ["Summary", "Testing"] },
+  "rules": { "docs": ["briar-systems/mach-std:MIGRATION.md@v6.0.0"], "exclude": ["docs/adr/**"], "maxRules": 200 },
+  "release": {
+    "scheme": "semver",
+    "changelog": "CHANGELOG.md",
+    "tagPrefix": "v",
+    "zeroVerBreaking": "minor",
+    "manifests": [{ "path": "mach.toml", "keys": ["^project\\.mach$", "^dep\\.[^.]+\\.(git|ref)$"], "bump": "minor" }]
+  }
+}
+```
+
+## Issues and pull requests
+
+`issues.requiredLabelGroups` lists label groups, one label from each required (`[["bug", "enhancement", "documentation"]]` asks for a type label). `issues.templateSections` names the headings (any level from one to four, matched without regard to case) the body must carry. A missing section fails, and one with less than three characters under it once HTML comments are removed warns. `issues.childLabels` marks labels whose issues must be a native sub-issue of a parent (the `issues/N/parent` link, not a body mention). `issues.milestone` requires one. These run in `grade issue` and, when the watch is on, on every new issue as it is filed, the watching session's own included: an issue that fails any of them is delivered with a `filing:` line naming the findings, whoever filed it. A family that files with the default GitHub labels and a two-section template would set:
+
+```json
+"issues": { "requiredLabelGroups": [["bug", "enhancement", "documentation"]], "templateSections": ["Problem", "Fix"], "childLabels": ["task"], "milestone": false }
+```
+
+`prs.linkIssue` requires a pull request to name its issue. The issue is found from the code host's own relation first (the issues a pull request closes), then from a closing keyword in the body (`Closes #N`), then from an issue number in the branch name (`feat/52`), and the first found is the linked issue. `prs.templateSections` works as `issues.templateSections` does, except that a missing section only warns. `branches.pattern` is matched against a work branch name. `prs.targets` is either a list of branch names a PR may target or a regex the base branch must match. `prs.target: "dev"` from older configs reads as `targets: ["dev"]`. `branches.protected` lists the branches whose CI runs the watch delivers on failure, the default branch when unset.
+
+## Conventions as regexes
+
+Every convention is a regex string with named groups. A preset stands for one of them: it expands to its regex when the config resolves, and an explicit pattern beside a preset wins. An invalid regex in any of these fields fails config resolution with the field named.
+
+`commits.format` is matched against the subject line and names the groups `type`, `scope`, `breaking` (any match marks the commit breaking, as a `BREAKING CHANGE:` footer does) and `description`. The preset `commits.convention: "conventional"` is `^(?<type>\w+)(?:\((?<scope>[^)]*)\))?(?<breaking>!)?:\s+(?<description>.+)$`. `none`, the default, runs no format check unless `format` is set. `commits.types` lists the values the `type` group may take (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `style`, `ci`, `perf`, `build` and `revert` by default), and a format without a `type` group skips that check. The same list is the `commit_types` option set a repo pack's choice question can name. `commits.forbidTrailers` lists trailers a commit message may not carry. The type, scope and trailer checks run only when a format is set, so `forbidTrailers` under `none` checks nothing.
+
+`commits.bumps` maps a type to the release bump it calls for, `major`, `minor`, `patch` or `none`: a type not in the map calls for none, and a breaking commit calls for the breaking bump whatever its type. Left unset, the `conventional` preset fills it with `{ "feat": "minor", "fix": "patch", "perf": "patch" }`, as does a config with no `format` at all, since its commits parse with the conventional header. A custom `format` starts from an empty map, so only breaking changes and manifests call for a release until the map names its types.
+
+`commits.scopePattern` is matched against the header's `type(scope)`, or the bare type when the commit has no scope, so a scope rule can except a type. The presets under `commits.scope` are `issue`, `^(chore\(.*\)|[^(]+(\(#\d+\))?)$` (a scope is optional, must be `#<n>` when present, and `chore` may carry any scope, as `chore(release): 1.2.0` does), `none`, `^[^(]*$` (no scope allowed), and `any`, the default, which runs no scope check.
+
+`release.versionPattern` is matched against a version. Its numeric named groups, in order, order versions (which tag is the latest, whether a proposed version is newer), and the groups `major`, `minor` and `patch`, when named, are what a bump moves: the bumped group goes up, the lower ones go to zero, and anything after the last of them (a prerelease) is dropped. The presets under `release.scheme` are `semver`, `^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-(?<prerelease>[0-9A-Za-z.-]+))?(?:\+(?<build>[0-9A-Za-z.-]+))?$`, and `calver`, `^(?<year>\d{4})\.(?<month>\d{1,2})(?:\.(?<micro>\d+))?$`. A calendar version has no `major`, so `release.bump` reports the bump the commits call for and requires a proposed version to be newer than the last tag rather than a particular step. A calendar layout shaped differently (`YY.MM`, `YYYY.MM.DD`) sets `versionPattern` outright.
+
+`release.tagPattern` is matched against a tag and names the `version` group the version pattern then reads (the whole tag when it names none). It defaults to `release.tagPrefix` followed by the version, `^v(?<version>.+)$` out of the box.
+
+## Releases
+
+With no version pattern configured, no version is computed or checked. The tags are still ordered as semver to find the last release the pack reads commits from. `release.changelog` names the changelog file. No format is parsed: the file at the last tag is line-diffed against the file at the ref, `release.changelog` warns when nothing changed, and the judge is asked whether the added text describes the commits since the last tag. Leave either out and the release pack only judges the commits since the last tag.
+
+`release.zeroVerBreaking` is what a breaking change requires while the version is below 1.0.0 (`minor` by default, `major` to cut 1.0.0 on the first one). `release.manifests` lists files whose changes are release-worthy on their own, commit types aside: each entry names a file, the bump a change to it requires, and what counts as a change: `keys`, regexes over the file's dotted paths when it is TOML, JSON or YAML by extension (`project.mach`, `dep.std.ref`, `dependencies.0.name` with arrays indexed numerically), or `pattern`, a regex over the file's text in any format whose matched text must not change (`"^ABI_VERSION\\s*=\\s*\\S+"` in a Makefile). Both can be given on one entry. The manifest at the last tag is compared with the one at `HEAD`, so a version line that the release itself moves is not matched unless a key or pattern names it. The required bump is the higher of the commit bump and the manifest bump, and `release.bump` says which keys moved.
+
+## Rule documents
+
+No filename is special. The rules pack and the outbound gate read the repository's rule documents by discovery: every prose file (`.md`, `.mdx`, `.markdown`, `.txt`, `.rst`, `.org`) at the repository root and under `docs/` or `.github/` at any depth, plus the forge's issue and pull request templates from the locations the forge documents, is a candidate. In a checkout the candidates come from `git ls-files` and the working tree. A grade of another repository, or one from a directory that is no checkout, reads the forge's file tree at its default branch. The contributing guide (`CONTRIBUTING`, any prose extension, at the root, in `docs/` or in `.github/`, where the forge documents it) states rules for contributors by definition and is kept without being judged. One batched `rank` over the other candidates (path, a bounded excerpt and the document's headings) against "this document states rules contributors must follow" keeps every document it does not rule out: the satisfied and the unclear band, so a rules document whose opening reads as narrative is not lost, and the paragraph step below still filters what is not a rule. Every kept document is split into paragraphs, list items and table rows (a row's cells named by the header: `5.x: sort.sort[T](data, len, cmp); 6.0.0: sort.sort[T](data, len)`), and a second batched `rank` against "this paragraph is a rule a contribution can break, not narrative or instruction" keeps the satisfied band as the rules.
+
+`rules.docs`, empty by default, adds documents the judge does not have to recognise: paths in the checkout, or `owner/repo:path[@ref]` read from the forge, so a consumer PR can be graded against another repo's migration guide at a tag. Their paragraphs are filtered like any other document's. `rules.exclude` lists paths or globs (`*` within a segment, `**` across) that are never candidates. Rules past `rules.maxRules` (200 by default) are dropped and `rules.present` says so.
+
+Discovery is cached in the plugin store per checkout (or per repository and ref), keyed by a digest of every document it read and of `rules.exclude`, so the judge is asked again only when a document, a listed doc or the exclude list changes. A discovery with any judge failure in either step, an outage or an answer missing for a document or paragraph, is never cached, so the next grade asks again. Every discovery that asks the judge logs one line to the session log naming the scope, the candidate count, the documents kept and the documents the rules came from (`sift rules /src/app: 5 candidates, kept CONTRIBUTING.md, CODE_OF_CONDUCT.md; 14 rules from CONTRIBUTING.md, CODE_OF_CONDUCT.md`), or the failure and that nothing was cached. A cache no discovery has read for 7 days is removed at the next start of any session, so the caches of deleted checkouts and old refs do not pile up. Every rules report names the documents its rules came from in `rules.present` (`14 rules from CONTRIBUTING.md, docs/style.md (cached)`), or when it found none the documents it kept (`no rules found in 5 candidate documents, kept none`), and a judge failure during discovery makes the verdict unknown rather than passing an empty rule set.
