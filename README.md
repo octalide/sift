@@ -299,6 +299,8 @@ The default table ships Discord (`send_message`, `edit_message`, `send_webhook_m
 }
 ```
 
+The gate reads one checkout, the one a `grade` with no `cwd` reads: the directory the calling subagent was spawned in, else the session's repository. Its `outbound.channels`, its `rules` pack and its rule documents apply, so a subagent spawned in a worktree of another repository is gated by that repository's rules, and the main loop and a subagent spawned without a `cwd` by the session's. A directory in no repository has no config or rule documents of its own, so a subagent spawned there is gated by the defaults and the global config alone. A `cd` inside a Bash command does not move the binding.
+
 The channel's limit is mechanical and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`, each question naming the channel's `kind`, so a pull request rule read against an issue body is answered as not applying rather than broken: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
 
 ### Classify
