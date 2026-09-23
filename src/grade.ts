@@ -170,20 +170,6 @@ export function ruleSource(host: Pick<GradeHost, 'forge' | 'fs'>, scope: GradeSc
   return forgeSource(host.forge, repo);
 }
 
-// the directory each subagent runs in: its Agent call's cwd, else its parent's when the parent had one
-export class SpawnDirs {
-  private readonly dirs = new Map<string, string>();
-
-  spawned(agentId: string | undefined, cwd: string | undefined, parentId: string | undefined): void {
-    const dir = cwd ?? this.of(parentId);
-    if (agentId !== undefined && dir !== undefined) this.dirs.set(agentId, dir);
-  }
-
-  of(agentId: string | undefined): string | undefined {
-    return agentId === undefined ? undefined : this.dirs.get(agentId);
-  }
-}
-
 // a named cwd, else the calling subagent's spawn directory, else the session's checkout
 export async function scopeOf(checkouts: Pick<Checkouts, 'resolve'>, session: () => Promise<Checkout>, cwd: string | undefined, spawnDir: string | undefined): Promise<GradeScope> {
   if (cwd !== undefined) return { checkout: await checkouts.resolve(cwd), named: true };
