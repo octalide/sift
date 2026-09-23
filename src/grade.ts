@@ -28,6 +28,8 @@ export type GradeHost = {
   judge: Judge;
   store: StoreLike;
   now: () => number;
+  // a line for the session log
+  notice: (text: string) => void;
   fs: CheckoutFs;
   checkouts: Checkouts;
 };
@@ -117,7 +119,7 @@ export async function subjectFor(host: GradeHost, scope: GradeScope, pack: Pick<
         at = checkout.repo;
       } else at = needRepo();
       const config = await configOf(at);
-      const rules = { forge, repo, source: ruleSource(host, scope, at), judge: host.judge, store: host.store, now: host.now };
+      const rules = { forge, repo, source: ruleSource(host, scope, at), judge: host.judge, store: host.store, now: host.now, notice: host.notice };
       if (p.kind === 'text') return { subject: await rulesSubject(rules, { kind: 'text', ref: opts.text ?? p.text }, config), config };
       return { subject: await rulesSubject({ ...rules, repo: p.repo ?? needRepo() }, { kind: 'issue', number: p.number, pack: pack.name }, config), config };
     }

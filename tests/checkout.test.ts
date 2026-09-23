@@ -99,7 +99,7 @@ function fresh(remote: Record<string, string> = {}): void {
     defaultBranch: async () => 'main',
     issue: async (repo, n) => (issuesRead.push(`${repo}#${n}`), plain.issue(repo, n)),
   });
-  host = { forge, judge: off, store: memoryStore(), now: () => 1, fs, checkouts };
+  host = { forge, judge: off, store: memoryStore(), now: () => 1, notice: () => {}, fs, checkouts };
 }
 
 const session = () => checkouts.resolve(a);
