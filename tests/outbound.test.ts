@@ -114,7 +114,7 @@ describe('outbound extraction', () => {
 
 describe('rules subject for outbound text', () => {
   const docs = { 'CONTRIBUTING.md': '## Pull requests\n\nThe body carries verification evidence.\n\nClose the issue with Closes #N.\n' };
-  const host = () => ({ source: memorySource(docs), judge: yesJudge(), store: memoryStore(), now: () => 1 });
+  const host = () => ({ source: memorySource(docs), judge: yesJudge(), store: memoryStore(), now: () => 1, notice: () => {} });
   const config = { ...DEFAULT_CONFIG, rules: { docs: ['CONTRIBUTING.md'], exclude: [], maxRules: 200 } };
 
   it('names the artifact in the subject and in every rule question', async () => {
@@ -163,7 +163,7 @@ describe('outbound gate', () => {
   it('passes an issue body when pull request rules do not apply to it', async () => {
     const docs = { 'CONTRIBUTING.md': '## Pull requests\n\nThe body carries verification evidence.\n\n## Prose\n\nNo em dashes.\n' };
     const config = { ...DEFAULT_CONFIG, rules: { docs: ['CONTRIBUTING.md'], exclude: [], maxRules: 200 } };
-    const s = await rulesSubject({ forge: github, source: memorySource(docs), judge: yesJudge(), store: memoryStore(), now: () => 1 }, { kind: 'text', ref: 'The watcher misses body edits.', about: 'the body of a new GitHub issue' }, config);
+    const s = await rulesSubject({ forge: github, source: memorySource(docs), judge: yesJudge(), store: memoryStore(), now: () => 1, notice: () => {} }, { kind: 'text', ref: 'The watcher misses body edits.', about: 'the body of a new GitHub issue' }, config);
     const asked: string[] = [];
     const j: Judge = {
       name: 'fake',

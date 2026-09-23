@@ -163,7 +163,11 @@ export const CHECKS: Record<string, Check> = {
   'rules.present': (s, c) => {
     const docs = (s.facts['docs'] as string[] | undefined) ?? [];
     const candidates = Number(s.facts['candidates'] ?? 0);
-    if (!s.facts['has_rules']) return [info('rules.present', candidates > 0 ? `no rules found in ${candidates} candidate document${candidates === 1 ? '' : 's'}` : 'no rule documents found in the repo')];
+    const kept = (s.facts['kept'] as string[] | undefined) ?? [];
+    if (!s.facts['has_rules']) {
+      if (candidates === 0 && kept.length === 0) return [info('rules.present', 'no rule documents found in the repo')];
+      return [info('rules.present', `no rules found in ${candidates} candidate document${candidates === 1 ? '' : 's'}, kept ${kept.join(', ') || 'none'}${s.facts['cached'] ? ' (cached)' : ''}`)];
+    }
     const total = Number(s.facts['total_rules'] ?? 0);
     const used = Math.min(total, c.rules.maxRules);
     const out = [info('rules.present', `${used} rule${used === 1 ? '' : 's'} from ${docs.join(', ')}${s.facts['cached'] ? ' (cached)' : ''}`)];

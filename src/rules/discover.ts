@@ -9,6 +9,7 @@ import { DEFAULT_THRESHOLDS, failureText, type Judge, type Questions } from '../
 import { excerptOf } from '../locate/tree.ts';
 import type { StoreLike } from '../log.ts';
 import { pool } from '../pool.ts';
+import { truncate } from '../tokens.ts';
 import { ruleParagraphs } from './paragraphs.ts';
 
 export type Rule = { source: string; text: string };
@@ -31,22 +32,26 @@ export type Discovery = {
   // the documents the rules came from, in order
   docs: string[];
   rules: Rule[];
-  // paths ranked as candidates and how many of them the judge kept
+  // how many paths were candidates, and every document whose paragraphs were read: listed, contributing guide, or kept by the judge
   candidates: number;
-  kept: number;
+  kept: string[];
   cached: boolean;
   // the judge failed, nothing was cached
   error?: string;
 };
 
-// what the store holds per scope; bump when the shape or the questions change
-const VERSION = 1;
-type Cached = { version: number; key: string; docs: string[]; rules: Rule[]; candidates: number; kept: number };
+// what the store holds per scope; bump when the shape, the questions or the keep policy change
+const VERSION = 2;
+type Cached = { version: number; key: string; docs: string[]; rules: Rule[]; candidates: number; kept: string[] };
 
 export const PROSE = new Set(['md', 'mdx', 'markdown', 'txt', 'rst', 'org']);
 // directories whose prose is a candidate at any depth; the root is a candidate at depth zero
 const PROSE_DIRS = new Set(['docs', '.github']);
 const EXCERPT = { lines: 12, width: 160 };
+// the headings shown beside the excerpt, so a document whose opening is narrative still shows its sections
+const OUTLINE = { headings: 40, width: 80 };
+// the contributing guide by name, at a candidate location: rules for contributors by definition, kept without a judgement
+const CONTRIBUTING = /^contributing(\.[^/]+)?$/i;
 
 export const DOC_QUESTION: Questions = {
   rules: {
@@ -79,6 +84,25 @@ export function candidate(path: string): boolean {
   return parts.length === 1 || PROSE_DIRS.has(parts[0]!.toLowerCase());
 }
 
+export function contributingGuide(path: string): boolean {
+  return candidate(path) && CONTRIBUTING.test(path.slice(path.lastIndexOf('/') + 1));
+}
+
+// the document's markdown headings in order, outside code blocks
+export function outlineOf(text: string): string[] {
+  const out: string[] = [];
+  let inCode = false;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('```')) inCode = !inCode;
+    const h = inCode ? null : /^#{1,6}\s+(.+)$/.exec(line);
+    if (!h) continue;
+    const t = h[1]!.trim();
+    out.push(truncate(t, OUTLINE.width));
+    if (out.length >= OUTLINE.headings) break;
+  }
+  return out;
+}
+
 // an exclude entry is a path or a glob: * within one segment, ** across segments
 export function excluded(path: string, patterns: string[]): boolean {
   return patterns.some((p) => {
@@ -101,10 +125,12 @@ export async function ruleDoc(doc: string, source: Pick<RuleSource, 'read' | 're
 
 type Doc = { path: string; text: string };
 
-// the candidates ranked, the listed documents added as they are, every kept document's paragraphs ranked to rules.
-// the result is cached under the source's scope keyed by every file read and the config, so the judge runs only on a change.
-// every discovery that answers from or writes the cache marks it read at now, so a cache no discovery reads goes stale and is swept
-export async function discoverRules(source: RuleSource, config: RepoConfig['rules'], judge: Judge, store: StoreLike, now: () => number): Promise<Discovery> {
+// the candidates ranked and every one the judge does not rule out kept, the listed documents and the contributing guide
+// added as they are, every kept document's paragraphs ranked to rules. the result is cached under the source's scope keyed
+// by every file read and the config, so the judge runs only on a change. a discovery with any judge failure is never
+// cached, so the next one asks again. every discovery that answers from or writes the cache marks it read at now, so a
+// cache no discovery reads goes stale and is swept. a fresh discovery or a failure logs one line naming what was kept
+export async function discoverRules(source: RuleSource, config: RepoConfig['rules'], judge: Judge, store: StoreLike, now: () => number, log: (text: string) => void): Promise<Discovery> {
   const listed = new Set(config.docs);
   const paths = (await source.list()).filter((p) => candidate(p) && !listed.has(p) && !excluded(p, config.exclude)).sort();
   const read = await pool(paths, 16, async (path) => ({ path, text: await source.read(path) }));
@@ -125,23 +151,35 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
     await store.set(keys.seen, now());
     return { docs: cached.docs, rules: cached.rules, candidates: cached.candidates, kept: cached.kept, cached: true };
   }
-  const kept: Doc[] = [...explicit];
-  if (candidates.length > 0) {
-    const ranked = await rank(candidates.map((d) => ({ path: d.path, excerpt: excerptOf(d.text, EXCERPT.lines, EXCERPT.width) })), DOC_QUESTION, judge, { mode: 'batched' });
-    if (!ranked.ok) return { docs: [], rules: [], candidates: candidates.length, kept: 0, cached: false, error: failureText(ranked) };
-    for (const r of ranked.items) if (bandOf(r.answers['rules']!, DEFAULT_THRESHOLDS) === 'satisfied') kept.push(candidates[r.index]!);
+  const failed = (kept: Doc[], error: string): Discovery => {
+    log(`sift rules ${source.scope}: discovery failed, nothing cached (${error})`);
+    return { docs: [], rules: [], candidates: candidates.length, kept: kept.map((d) => d.path), cached: false, error };
+  };
+  const guides = candidates.filter((d) => contributingGuide(d.path));
+  const judged = candidates.filter((d) => !contributingGuide(d.path));
+  const kept: Doc[] = [...explicit, ...guides];
+  if (judged.length > 0) {
+    const items = judged.map((d) => ({ path: d.path, excerpt: excerptOf(d.text, EXCERPT.lines, EXCERPT.width), headings: outlineOf(d.text) }));
+    const ranked = await rank(items, DOC_QUESTION, judge, { mode: 'batched' });
+    if (!ranked.ok) return failed(kept, failureText(ranked));
+    const unanswered = ranked.items.filter((r) => r.answers['rules'] === undefined);
+    if (unanswered.length > 0) return failed(kept, `malformed: no answer for ${unanswered.map((r) => judged[r.index]!.path).join(', ')}`);
+    for (const r of ranked.items) if (bandOf(r.answers['rules']!, DEFAULT_THRESHOLDS) !== 'violated') kept.push(judged[r.index]!);
   }
   const paragraphs = kept.flatMap((d) => ruleParagraphs(d.text).map((text) => ({ doc: d.path, text })));
   const rules: Rule[] = [];
   if (paragraphs.length > 0) {
     const ranked = await rank(paragraphs, PARAGRAPH_QUESTION, judge, { mode: 'batched', fields: ['doc'] });
-    if (!ranked.ok) return { docs: [], rules: [], candidates: candidates.length, kept: kept.length - explicit.length, cached: false, error: failureText(ranked) };
+    if (!ranked.ok) return failed(kept, failureText(ranked));
+    const unanswered = ranked.items.filter((r) => r.answers['rule'] === undefined);
+    if (unanswered.length > 0) return failed(kept, `malformed: no answer for ${unanswered.length} of ${paragraphs.length} paragraphs`);
     for (const r of ranked.items) if (bandOf(r.answers['rule']!, DEFAULT_THRESHOLDS) === 'satisfied') rules.push({ source: paragraphs[r.index]!.doc, text: paragraphs[r.index]!.text });
   }
   const docs = kept.map((d) => d.path).filter((p) => rules.some((r) => r.source === p));
-  const result: Cached = { version: VERSION, key, docs, rules, candidates: candidates.length, kept: kept.length - explicit.length };
+  const result: Cached = { version: VERSION, key, docs, rules, candidates: candidates.length, kept: kept.map((d) => d.path) };
   await store.set(keys.cache, result);
   await store.set(keys.seen, now());
+  log(`sift rules ${source.scope}: ${result.candidates} candidate${result.candidates === 1 ? '' : 's'}, kept ${result.kept.join(', ') || 'none'}; ${rules.length} rule${rules.length === 1 ? '' : 's'}${docs.length > 0 ? ` from ${docs.join(', ')}` : ''}`);
   return { docs, rules, candidates: result.candidates, kept: result.kept, cached: false };
 }
 

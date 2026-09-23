@@ -274,7 +274,7 @@ export const register: Register = (on, rawOptions) => {
           },
         })
       : undefined;
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, now: () => Date.now(), watches, mailbox: watches ? mailbox : undefined, sessionId, storeKeys };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, now: () => Date.now(), notice: (text) => $.ui.log(text), watches, mailbox: watches ? mailbox : undefined, sessionId, storeKeys };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     if (options.grade) {
