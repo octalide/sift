@@ -7,7 +7,7 @@ import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
 import { ghWriteOf, GitHubForge } from '../src/forge/github.ts';
 import { grade, scopeOf, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
-import { configLayers, globalConfigPath } from '../src/repo/config.ts';
+import { configLayers, globalConfigPath, readConfig } from '../src/repo/config.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
 import { rank, type RankItem, type RankOptions } from '../src/judge/rank.ts';
 import { failureText, type Answer, type KeyOrigin, type Questions } from '../src/judge/types.ts';
@@ -17,8 +17,9 @@ import type { Report } from '../src/packs/types.ts';
 import { pruneCall } from '../src/prune/call.ts';
 import { PRUNE_TOOL, PruneLoops } from '../src/prune/loops.ts';
 import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
+import { Discoveries, DISCOVERY_WAIT_MS } from '../src/rules/discover.ts';
 import { Watches } from '../src/watch/registry.ts';
-import { CI_FILTERS, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
+import { CI_FILTERS, commandInputOf, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
 import { SEEN_EVERY_MS, sessionKeys, StoreKeys } from '../src/keys.ts';
 import { Spawns } from '../src/spawns.ts';
@@ -117,16 +118,16 @@ type Runtime = GradeHost & {
 async function optionConfig($: EngineInterface, value: string, root: string): Promise<unknown> {
   const v = value.trim();
   if (!v) return undefined;
-  if (v.startsWith('{')) return JSON.parse(v);
+  if (v.startsWith('{')) return readConfig(v, 'option');
   const path = v.startsWith('/') ? v : `${root}/${v}`;
   if (!(await $.fs.exists(path))) throw new Error(`sift config ${path} not found`);
-  return JSON.parse(await $.fs.read(path));
+  return readConfig(await $.fs.read(path), path);
 }
 
-// parsed contents of a json file, undefined when there is no such file
-async function readJson($: EngineInterface, path: string | undefined): Promise<unknown> {
+// the global config file, undefined when there is no such file
+async function globalConfig($: EngineInterface, path: string | undefined): Promise<unknown> {
   if (!path || !(await $.fs.exists(path))) return undefined;
-  return JSON.parse(await $.fs.read(path));
+  return readConfig(await $.fs.read(path), path);
 }
 
 async function apiKeyOf($: EngineInterface, options: Options): Promise<ApiKey | undefined> {
@@ -234,7 +235,7 @@ export const register: Register = (on, rawOptions) => {
     const forge = new GitHubForge(run, spawnCwd);
     const globalPath = globalConfigPath({ XDG_CONFIG_HOME: await $.env.get('XDG_CONFIG_HOME'), HOME: await $.env.get('HOME') });
     // the layer under every repository's own conventions, read once
-    const [base] = configLayers({ option: await optionConfig($, options.config, await spawnCwd()), global: await readJson($, globalPath) });
+    const [base] = configLayers({ option: await optionConfig($, options.config, await spawnCwd()), global: await globalConfig($, globalPath) });
     const checkouts = new Checkouts({ run, fs, forgeAt: (dir) => new GitHubForge(run, async () => dir), base: () => base });
     const session = async () => checkouts.resolve(await spawnCwd());
     const bound = await session();
@@ -300,7 +301,8 @@ export const register: Register = (on, rawOptions) => {
           },
         })
       : undefined;
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, store, now: () => Date.now(), notice: (text) => $.ui.log(text), watches, mailbox: watches ? letters : undefined, sessionId, storeKeys, tenure };
+    const discoveries = new Discoveries({ judge, store, now: () => Date.now(), log: (text) => $.ui.log(text), schedule: (ms, fn) => $.clock.after(ms, fn), waitMs: DISCOVERY_WAIT_MS });
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: watches ? letters : undefined, sessionId, storeKeys, tenure };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     // a subagent keeps the tools it was spawned with, so what it was offered is recorded as each is registered
@@ -374,7 +376,7 @@ export const register: Register = (on, rawOptions) => {
         type: 'object',
         properties: {
           action: { type: 'string', enum: [...WATCH_ACTIONS] },
-          repo: { type: 'string', description: 'owner/name. subscribe: the repository, default the one checked out where the calling subagent was spawned, else the session\'s. poll, pause, resume, reset, deferred: only this repository' },
+          repo: { type: 'string', description: 'owner/name. subscribe and start: the repository, default the one checked out where the calling subagent was spawned, else the session\'s. poll, pause, resume, reset, deferred: only this repository' },
           scope: { type: 'string', description: 'subscribe: repo (default), pr <n> (the pull request across its heads), branch <name> (its runs), run <id> (that run, read by id until it completes), tag <glob> (runs on tags matching the glob)' },
           items: { type: 'boolean', description: 'subscribe: deliver issue and pull request events in scope, default true' },
           ci: { type: 'string', enum: [...CI_FILTERS], description: 'subscribe: settled (each pull request head\'s verdict, and each completed run on a branch, tag or run scope), failures (verdicts and failed runs), all (every completed run as well), none. Default the watchCi option' },
@@ -424,7 +426,7 @@ export const register: Register = (on, rawOptions) => {
         required: ['repo', 'kind'],
       },
     });
-    await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred]' });
+    await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|poll|pause|resume|reset|deferred [repo]|start [repo] [for <pr|branch>]|subscribe <repo> [scope]|unsubscribe <id>]' });
 
     if (watches) {
       await letters.load();
@@ -496,7 +498,7 @@ export const register: Register = (on, rawOptions) => {
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
         if (!decision.allow) {
           if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. Rewrite the text or ask the user.` };
+          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${decision.pending ? 'Make the same call again.' : 'Rewrite the text or ask the user.'}` };
         }
       }
       const r = await next(e);
@@ -536,14 +538,14 @@ export const register: Register = (on, rawOptions) => {
       const rt = ready();
       const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout.packs['rules'];
       const input = e as unknown as PostInput;
-      const posted = await postCall({ forge: rt.forge, judge: rt.judge, store: rt.store, now: rt.now, notice: rt.notice, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
+      const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
       const { outbound, decision } = posted;
       if (outbound && decision) {
         record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}` });
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
         if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
       }
-      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. Rewrite the text or ask the user.` };
+      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. ${decision?.pending ? 'Make the same post again.' : 'Rewrite the text or ask the user.'}` };
       return { result: [{ type: 'text', text: posted.url }] };
     } catch (error) {
       return { deny: `sift post failed: ${messageOf(error)}` };
@@ -739,11 +741,12 @@ export const register: Register = (on, rawOptions) => {
     }
     if (head === 'watch') {
       const [action = 'status', ...args] = rest;
-      const input: WatchInput = action === 'subscribe' ? { action, repo: args[0], scope: args.slice(1).join(' ') || undefined } : action === 'unsubscribe' ? { action, id: args[0] } : { action, repo: args[0] };
       if (!(WATCH_ACTIONS as readonly string[]).includes(action)) return { text: `unknown watch action ${action}` };
+      const input = commandInputOf(action, args);
+      if ('error' in input) return { text: input.error };
       return { text: await watchControl(rt, input) };
     }
-    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift prune off [n]|on, /sift watch status|list|start|subscribe <repo> [scope]|unsubscribe <id>|poll|pause|resume|reset|deferred [repo]` };
+    return { text: `${await statusText(rt)}\ncommands: /sift log [n], /sift clear, /sift prune off [n]|on, /sift watch status|list|poll|pause|resume|reset|deferred [repo], /sift watch start [repo] [for <pr|branch>], /sift watch subscribe <repo> [scope], /sift watch unsubscribe <id>` };
   });
 };
 

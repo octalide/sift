@@ -10,7 +10,7 @@ import { materialize } from '../src/packs/run.ts';
 import { rulesSubject, textRulesSubjects } from '../src/repo/subjects.ts';
 import type { Subject } from '../src/packs/types.ts';
 import { shellWord } from '../src/shell.ts';
-import { memorySource, memoryStore, yesJudge } from './fake-source.ts';
+import { discoveries, memorySource, yesJudge } from './fake-source.ts';
 
 // the channel table reads the forge's write list alone, so the runner is never reached
 const github = new GitHubForge(async () => ({ exitCode: 1, stdout: '', stderr: '' }));
@@ -114,7 +114,7 @@ describe('outbound extraction', () => {
 
 describe('rules subject for outbound text', () => {
   const docs = { 'CONTRIBUTING.md': '## Pull requests\n\nThe body carries verification evidence.\n\nClose the issue with Closes #N.\n' };
-  const host = () => ({ source: memorySource(docs), judge: yesJudge(), store: memoryStore(), now: () => 1, notice: () => {} });
+  const host = () => ({ source: memorySource(docs), discoveries: discoveries(yesJudge()) });
   const config = { ...DEFAULT_CONFIG, rules: { docs: ['CONTRIBUTING.md'], exclude: [], maxRules: 200 } };
 
   it('names the artifact in the subject and in every rule question', async () => {
@@ -180,7 +180,7 @@ describe('outbound gate', () => {
   it('passes an issue body when pull request rules do not apply to it', async () => {
     const docs = { 'CONTRIBUTING.md': '## Pull requests\n\nThe body carries verification evidence.\n\n## Prose\n\nNo em dashes.\n' };
     const config = { ...DEFAULT_CONFIG, rules: { docs: ['CONTRIBUTING.md'], exclude: [], maxRules: 200 } };
-    const s = await rulesSubject({ forge: github, source: memorySource(docs), judge: yesJudge(), store: memoryStore(), now: () => 1, notice: () => {} }, { kind: 'text', ref: 'The watcher misses body edits.', about: 'the body of a new GitHub issue' }, config);
+    const s = await rulesSubject({ forge: github, source: memorySource(docs), discoveries: discoveries(yesJudge()) }, { kind: 'text', ref: 'The watcher misses body edits.', about: 'the body of a new GitHub issue' }, config);
     const asked: string[] = [];
     const j: Judge = {
       name: 'fake',
@@ -222,5 +222,11 @@ describe('outbound gate', () => {
     expect(unclear).toMatchObject({ allow: true, reason: 'clear', warnings: ['unclear: Terse by default.'] });
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
     expect((await gateOutbound({ channel: 'github', text: 'ok' }, [subject], pack, off, DEFAULT_CONFIG)).allow).toBe(true);
+  });
+
+  it('denies while rule discovery is still running, where a judge failure would pass, so the same call made again is judged', async () => {
+    const reason = 'rule discovery for o/r outlasted its 5 s wait and keeps running; the next call on it reuses what it finds';
+    const waiting: Subject = { ...subject, judgeError: reason, pending: reason };
+    expect(await gateOutbound({ channel: 'github', text: 'ok' }, [waiting], pack, judge([]), DEFAULT_CONFIG)).toMatchObject({ allow: false, reason, pending: true });
   });
 });

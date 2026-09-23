@@ -9,10 +9,8 @@ import { manifestChanges, manifestFormat, type ManifestChange } from './manifest
 import { driftOf, lineDiff } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
-import { discoverRules, type Rule, type RuleSource } from '../rules/discover.ts';
+import type { Discoveries, Discovery, Rule, RuleSource } from '../rules/discover.ts';
 import { partName, partsOf } from './parts.ts';
-import type { Judge } from '../judge/types.ts';
-import type { StoreLike } from '../log.ts';
 
 const BODY_CAP = 20_000;
 const COMMENT_CAP = 6_000;
@@ -319,9 +317,8 @@ export async function releaseSubject(source: GitSource, config: RepoConfig): Pro
 // what the rules are read against: an issue, or free text and, when known, what it is about to become in the words the judge reads
 export type RulesTarget = { kind: 'issue'; number: number; pack: string } | { kind: 'text'; ref: string; about?: string };
 
-// the checkout or repository the rules are read from, the judge that discovers them, the store that caches them, the clock that marks the cache read
-// and the session log a fresh discovery names what it kept in
-export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; judge: Judge; store: StoreLike; now: () => number; notice: (text: string) => void };
+// the checkout or repository the rules are read from, and the discoveries in flight that read them
+export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; discoveries: Discoveries };
 
 export async function rulesSubject(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject> {
   const { forge, repo } = host;
@@ -363,10 +360,10 @@ export async function textRulesSubjects(host: RulesHost, target: { text: string;
   });
 }
 
-type Found = { rules: Rule[]; total: number; discovery: Awaited<ReturnType<typeof discoverRules>> };
+type Found = { rules: Rule[]; total: number; discovery: Discovery };
 
 async function rulesFound(host: RulesHost, config: RepoConfig): Promise<Found> {
-  const discovery = await discoverRules(host.source, config.rules, host.judge, host.store, host.now, host.notice);
+  const discovery = await host.discoveries.discover(host.source, config.rules);
   const rules = [...discovery.rules];
   const total = rules.length;
   rules.splice(config.rules.maxRules);
@@ -391,7 +388,7 @@ function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, la
       ...facts,
     },
     options: {},
-    ...(discovery.error === undefined ? {} : { judgeError: `rule discovery: ${discovery.error}` }),
+    ...(discovery.pending !== undefined ? { judgeError: discovery.pending, pending: discovery.pending } : discovery.error !== undefined ? { judgeError: `rule discovery: ${discovery.error}` } : {}),
   };
 }
 
