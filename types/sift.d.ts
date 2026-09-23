@@ -51,8 +51,9 @@ export type SiftRankResult<T> =
   | { ok: true; items: SiftRanked<T>[]; sorted: SiftRanked<T>[]; requests: number; dropped: number; backend: string; usage?: SiftUsage }
   | { ok: false; reason: SiftFailure; message: string; backend: string; requests: number; key?: SiftKeyOrigin };
 
-// answer is absent when the judge left the question unanswered, the band is then unclear
-export type SiftJudged = { id: string; answer?: SiftAnswer; band: 'satisfied' | 'violated' | 'unclear'; severity: 'fail' | 'warn' | 'info'; instructions: string };
+// answer is absent when the judge left the question unanswered, the band is then unclear; parts, on a subject judged in
+// parts, are the parts the band was found in
+export type SiftJudged = { id: string; answer?: SiftAnswer; band: 'satisfied' | 'violated' | 'unclear'; severity: 'fail' | 'warn' | 'info'; instructions: string; parts?: string[] };
 
 export type SiftReport = {
   pack: string;
@@ -65,6 +66,8 @@ export type SiftReport = {
   verdict: 'pass' | 'warn' | 'fail' | 'unknown';
   backend: string;
   judgeError?: string;
+  // a subject too long to judge at once: the parts it was judged in, every one read
+  parts?: string[];
   // answers under an id no question asked for, and answers the judge left out of a ranked item, dropped without touching the verdict
   dropped?: number;
 };
