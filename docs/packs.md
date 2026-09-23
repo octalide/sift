@@ -40,7 +40,7 @@ The `pr` pack is mechanical: it runs its checks and asks the judge nothing. The 
 
 ## issue
 
-The `issue` pack asks whether the body is substantive, which type label fits, whether the change stays in this repository, whether it needs a parent, which open issue it duplicates, whether it is `implementable` (a competent engineer could build it without making a decision the body does not make: two valid designs, an unnamed interface, an unstated edge behaviour all fail it), whether its scope is clear enough to reject an unrelated change, which open issue it is `blocked_by` (`none` unless the title or body says so, or the same code must change there first), and how ready it is. A violated `implementable` fails the report. These questions are about the whole issue, so its body goes to the judge whole, not in parts: the state is sized by the judge's state limit in tokens, with room kept for the longest question, and the thread takes the room the body leaves. A body of prose or code up to GitHub's 65,536 characters fits. A body too dense to fit on its own is cut to the room there is, and `issue.body` warns with how many of its characters the questions read.
+The `issue` pack asks whether the body is substantive, which type label fits, whether the change stays in this repository, whether it needs a parent, which open issue it duplicates, whether it is `implementable` (a competent engineer could build it without making a decision the body does not make: two valid designs, an unnamed interface, an unstated edge behaviour all fail it), whether its scope is clear enough to reject an unrelated change, which open issue it is `blocked_by` (`none` unless the title or body says so, or the same code must change there first), and how ready it is. A violated `implementable` fails the report. These questions are about the whole issue, so its body goes to the judge whole, not in parts, and the thread takes the room the body leaves (see the room below). A body of prose or code up to GitHub's 65,536 characters fits.
 
 The issue is judged as it stands, not as first filed. The subject carries the whole comment thread, oldest first, each comment as `{ by, association, at, text }` with the commenter's standing in the forge's words (`OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE` on GitHub). A long thread is cut to a character budget that keeps the comments of the author and of maintainers (owners, members, collaborators) first and then the newest of the rest, so a ruling followed by any amount of discussion stays in. A later comment by the author or a maintainer that records a decision supersedes the body where they conflict: a decision it makes counts for `implementable`, a hold or dependency it states counts for `blocked_by`, and `substantive`, `scope_clear`, `type` and `readiness` read the body as it amends it. A comment from anyone else is discussion and never overrides the body. When the author or a maintainer has commented, `ruling` names the comment the issue turns on (`octalide at 2026-09-22T20:29:33Z`), or `none`. A pull request's subject carries its thread in the same shape.
 
@@ -94,10 +94,20 @@ Subject kinds and the checks that read them. Any pack may name any check, and a 
 
 | subject | checks |
 |---|---|
-| `issue` | `issue.labels`, `issue.milestone`, `issue.template`, `issue.body`, `issue.parent` |
+| `issue` | `issue.labels`, `issue.milestone`, `issue.template`, `issue.parent` |
 | `pr` | `pr.linked`, `pr.target`, `pr.branch`, `pr.ci`, `pr.template`, `pr.commits`, `pr.drift` |
 | `commit` | `commit.format` |
 | `release` | `release.commits`, `release.bump`, `release.changelog` |
 | `rules` | `rules.present` |
 | `tree` | `tree.indexed` |
 | `plan`, `event`, `text` | none |
+
+Every subject kind also carries `subject.cut`, a warning run by every pack rather than named by it, when the judge was sent part of a text (see the room below).
+
+## The room a subject has
+
+A subject's texts (a body, a plan, a linked issue's body, commit subjects and bodies, a changelog diff, thread comments, free text) go to the judge whole whenever the state they are built into fits. The room is set in tokens by the judge's state limit, not by a character count. A subject judged all at once gets the state limit less 2,000 tokens for the longest question asked beside it (30,000 for jev). A batched rank's context gets half of that (15,000), and the items it is read beside get the other half: the `locate` text, a `rules` part with the rest of its issue, and the context prune reads a tool's output against.
+
+When a subject does not fit, its texts take room by tier. The primary texts come first, and within a tier the room is shared evenly: a text under its share stays whole, and one over its share is cut to it and marked with `…`. Thread comments come after, one tier each: the author's and maintainers' first, newest first, then the newest of the rest. A comment left with no room is dropped. A cut or a dropped text is never silent: the report carries a `subject.cut` warning naming each text and how many of its characters the questions read. Prune has no report, so its decision's digest names the cut instead. `src/judge/room.ts` holds the room and `fitTexts`, the one helper every subject builder budgets through.
+
+The `rules` pack reads its subject as a rank's context, so a text longer than that room (an issue's title and body, or free text) is judged in parts sized in tokens to it, the opening part carrying the rest of the issue and its thread in the room the part leaves. The excerpts and outlines a rank reads as items (locate's files, rule discovery's documents) and option labels (open issue titles, ruling keys) are summaries by design, not cuts of the subject, and keep their own widths.
