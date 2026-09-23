@@ -155,4 +155,103 @@ describe('post', () => {
     expect(await postCall(host(posted), pack, { repo: 'o/target', kind: 'pr-merge', number: 4 })).toEqual({ refused: 'pr-merge needs method, one of merge, squash, rebase' });
     expect(posted).toHaveLength(1);
   });
+
+  describe('a text longer than the judge reads at once', () => {
+    const rulesDocs: Record<string, Record<string, string>> = {
+      'o/long': { 'CONTRIBUTING.md': '## Prose\n\nNo em dashes in anything you write.\n\n## Releases\n\nRelease notes state the SemVer impact.\n' },
+    };
+    // a judge that follows each rule question's criteria: an em dash breaks the prose rule wherever it is, and the
+    // SemVer rule, a rule about the whole text, is broken only by a whole-text question on text that never states it
+    type Seen = { text: string; kind: string; instructions: string[]; criteria: string[] };
+    const judge = (seen: Seen[]): Judge => ({
+      name: 'fake',
+      ask: async (state, q) => {
+        const subject = (state as Record<string, unknown>)['subject'] as { text?: string; kind?: string } | undefined;
+        const text = subject?.text ?? '';
+        if (subject) seen.push({ text, kind: subject.kind ?? '', instructions: Object.values(q).map((x) => x.instructions), criteria: Object.values(q).map((x) => (x.type === 'noul' && x.criteria ? x.criteria.true : '')) });
+        const answers = Object.fromEntries(
+          Object.entries(q).map(([k, x]) => {
+            const whole = / complies with this rule: /.test(x.instructions);
+            const broken = subject !== undefined && ((/em dash/.test(x.instructions) && text.includes('—')) || (whole && /SemVer/.test(x.instructions) && !text.includes('SemVer impact:')));
+            return [k, { type: 'noul' as const, p: broken ? 0.05 : 0.95 }];
+          }),
+        );
+        return { ok: true, backend: 'fake', latencyMs: 1, answers };
+      },
+    });
+    const longHost = (posted: { repo: string; post: ForgePost }[], seen: Seen[]) => ({
+      ...host(posted),
+      forge: fakeForge({
+        name: 'GitHub',
+        writes: GH_WRITES,
+        nouns: github.nouns,
+        contents: async (repo) => Object.keys(rulesDocs[repo] ?? {}),
+        file: async (repo, path) => rulesDocs[repo]?.[path],
+        post: async (repo, post) => {
+          posted.push({ repo, post });
+          return `https://github.com/${repo}/${post.kind}/1`;
+        },
+      }),
+      judge: judge(seen),
+    });
+    // release notes of 50,000 characters in headed sections of numbered paragraphs, the impact stated only at the top,
+    // with an em dash placed after character 30,000 when broken
+    const notes = (broken: boolean): string => {
+      let body = 'SemVer impact: minor.\n\n';
+      for (let n = 0; body.length < 50_000; n++) {
+        if (n % 10 === 0) body += `## Section ${n / 10}\n\n`;
+        body += `Paragraph ${n} describes one change in plain words and nothing more than that, at some length. `.repeat(3) + '\n\n';
+      }
+      body = body.slice(0, 50_000);
+      if (!broken) return body;
+      const at = body.indexOf('\n\n', 30_000);
+      return `${body.slice(0, at)} This line has one — dash.${body.slice(at)}`;
+    };
+    const post = (body: string) => ({ repo: 'o/long', kind: 'release-create', tag: 'v1.0.0', title: 'v1.0.0', body });
+
+    it('refuses a rule broken after character 30,000, naming the part', async () => {
+      const posted: { repo: string; post: ForgePost }[] = [];
+      const seen: Seen[] = [];
+      const body = notes(true);
+      expect(body.length).toBeGreaterThan(50_000);
+      expect(body.indexOf('—')).toBeGreaterThan(30_000);
+      const r = await postCall(longHost(posted, seen), pack, post(body));
+      expect(r).toMatchObject({ refused: expect.stringMatching(/^github-release-create to o\/long: breaks: Prose: No em dashes in anything you write\. \(in part [2-9] of \d \("Section \d+"( to "Section \d+")?\)\)$/) });
+      expect(posted).toEqual([]);
+    });
+
+    it('allows the same text without the violation, the judge having read every character', async () => {
+      const posted: { repo: string; post: ForgePost }[] = [];
+      const seen: Seen[] = [];
+      const body = notes(false);
+      const r = await postCall(longHost(posted, seen), pack, post(body));
+      expect(r).toMatchObject({ url: 'https://github.com/o/long/release/1', decision: { allow: true, reason: 'clear' } });
+      expect(r.decision?.parts?.length).toBeGreaterThan(1);
+      // the post's text is its title and body joined; the parts the judge read, in order, are exactly that text
+      const text = `v1.0.0\n${body}`;
+      const read = [...seen].sort((a, b) => text.indexOf(a.text) - text.indexOf(b.text));
+      expect(read.map((s) => s.text).join('')).toBe(text);
+      expect(read.every((s) => s.text.length <= 20_000)).toBe(true);
+    });
+
+    it('judges a whole-text rule on the opening alone, so later parts need not satisfy it', async () => {
+      const posted: { repo: string; post: ForgePost }[] = [];
+      const seen: Seen[] = [];
+      const r = await postCall(longHost(posted, seen), pack, post(notes(false)));
+      expect(r).toMatchObject({ decision: { allow: true, warnings: [] } });
+      const [opening, ...later] = [...seen].sort((a, b) => Number(b.text.startsWith('v1.0.0')) - Number(a.text.startsWith('v1.0.0')));
+      expect(opening!.kind).toBe('text');
+      expect(opening!.instructions.some((i) => /^The opening, part 1 of \d+ \("Section 0" to "Section \d+"\), of the subject \(the title and notes of a new GitHub release\) complies with this rule: Releases: Release notes state the SemVer impact\.$/.test(i))).toBe(true);
+      expect(later.length).toBeGreaterThan(0);
+      for (const part of later) {
+        expect(part.text.includes('SemVer impact:')).toBe(false);
+        expect(part.kind).toBe('section');
+        expect(part.instructions.every((i) => / of the subject \(the title and notes of a new GitHub release\) does not break this rule: /.test(i))).toBe(true);
+        expect(part.criteria.every((c) => /judged on the opening of the text: a part without it does not break it/.test(c))).toBe(true);
+      }
+      // the same notes with the impact missing are refused at the opening
+      const missing = await postCall(longHost(posted, []), pack, post(notes(false).replace('SemVer impact: minor.', 'Impact: minor.')));
+      expect(missing).toMatchObject({ refused: expect.stringMatching(/breaks: Releases: Release notes state the SemVer impact\. \(in the opening, part 1 of \d+/) });
+    });
+  });
 });
