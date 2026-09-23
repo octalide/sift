@@ -27,6 +27,8 @@ export type WatchOptions = {
 export type WatchHost = {
   forge: Forge;
   store: StoreLike;
+  // the store key this poller's state persists under, its own per session so no other session moves its cursor
+  key: string;
   judge: Judge;
   pack: Pack;
   // the issue pack's mechanical checks run on every new issue, the filer's own included
@@ -76,13 +78,9 @@ export class Watcher {
     private readonly options: WatchOptions,
   ) {}
 
-  private get key(): string {
-    return `watch:${this.options.repo}`;
-  }
-
   async start(): Promise<void> {
     this.stopped = false;
-    const stored = (await this.host.store.get(this.key)) as WatchState | undefined;
+    const stored = (await this.host.store.get(this.host.key)) as WatchState | undefined;
     if (stored && stored.version !== STATE_VERSION) this.host.log(`sift watch ${this.options.repo}: stored state is from an older version, reseeding`);
     this.state = stored && stored.version === STATE_VERSION ? stored : this.fresh();
     if (!this.state.login && this.options.rules.ignoreSelf) this.state.login = await this.host.forge.login();
@@ -148,7 +146,7 @@ export class Watcher {
   }
 
   private async save(): Promise<void> {
-    await this.host.store.set(this.key, this.state);
+    await this.host.store.set(this.host.key, this.state);
   }
 
   private schedule(ms: number): void {
