@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Typed judgement calls for Claude Code: two primitives, judge and rank, under packs that grade issues, pull requests, plans, commits, CI logs, releases and rules, a repository watch, tool output pruning and an outbound text gate, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
