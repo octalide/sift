@@ -7,7 +7,7 @@ import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { currentState, diffItems, diffRuns, hashOf, initialState, newerRun, pendingChecks, recordHeads, runSubject, settleChecks, STATE_VERSION, toItem, type Item, type WatchEvent, type WatchState } from '../src/watch/poll.ts';
 import { Watches, type WatchesHost } from '../src/watch/registry.ts';
 import { StoreKeys } from '../src/keys.ts';
-import { formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, subscriptionOf, type CiFilter, type Scope, type Subscription } from '../src/watch/subscription.ts';
+import { commandInputOf, formatSubscription, globMatch, parseScope, parseUntil, route, routeCi, subscriptionOf, type CiFilter, type Scope, type Subscription } from '../src/watch/subscription.ts';
 import { routeByRules, type WatchRules } from '../src/watch/triage.ts';
 import { Watcher, summarize, type WatchDelivery, type WatchHost } from '../src/watch/watcher.ts';
 import { fakeForge } from './fake-forge.ts';
@@ -93,6 +93,13 @@ describe('rules', () => {
     expect(routeCi(ci({ conclusion: 'failure', head: 'pending', subject: 'pr:3' }), repo('failures'), rules)).toEqual({ action: 'defer', reason: 'ci failure on pr #3, awaiting the other checks' });
     expect(routeCi(ci({ conclusion: 'failure', head: 'settled', subject: 'pr:3' }), repo('failures'), rules).action).toBe('drop');
     expect(routeCi(ci({ stalled: true }), { ...repo('failures'), filter: { items: true, ci: 'failures', stall: false } }, rules).action).toBe('drop');
+    // a pr scope takes the verdicts on its open head, never a run on a head it moved from, unless it asked for all
+    const moved = ci({ conclusion: 'success', ok: true, branch: 'feat/3', subject: 'pr:3' });
+    for (const f of ['settled', 'failures'] as const) expect(routeCi(moved, sub('s', { kind: 'pr', number: 3 }, f), rules)).toEqual({ action: 'drop', reason: 'ci on pr #3, not its open head' });
+    expect(routeCi(moved, sub('s', { kind: 'pr', number: 3 }, 'all'), rules).action).toBe('deliver');
+    // until settled takes the run that settles it, a green one included, whatever the filter holds back
+    expect(routeCi(ci({ conclusion: 'success', ok: true, branch: 'scratch' }), sub('s', { kind: 'branch', name: 'scratch' }, 'failures', { until: 'settled' }), rules).action).toBe('deliver');
+    expect(routeCi(ci({ conclusion: 'success', ok: true, branch: 'scratch' }), sub('s', { kind: 'branch', name: 'scratch' }, 'failures'), rules).action).toBe('defer');
   });
 
   it('routes an event once, naming every subscription that takes it, and drops what none covers', () => {
@@ -112,14 +119,33 @@ describe('rules', () => {
     expect(subscriptionOf({ scope: 'pr 4', until: 'merged' }, { ...how, owner: undefined })).toEqual({ repo: 'o/r', scope: { kind: 'pr', number: 4 }, filter: how.filter, until: 'merged' });
     expect(subscriptionOf({ ci: 'some' }, how)).toEqual({ error: 'ci must be one of settled, failures, all, none' });
     expect(subscriptionOf({ scope: 'branch dev', until: 'closed' }, how)).toEqual({ error: 'until closed needs a pr scope' });
+    expect(subscriptionOf({ scope: 'pr 4', ci: 'none', until: 'settled' }, how)).toEqual({ error: 'until settled waits on a ci verdict, which ci none never delivers' });
+    expect(subscriptionOf({ for: '4' }, { ...how, start: true, filter: { ...how.filter, ci: 'none' } })).toMatchObject({ error: expect.stringMatching(/ci none/) });
     expect(subscriptionOf({}, { ...how, repo: undefined })).toMatchObject({ error: expect.stringMatching(/no repository/) });
-    // start: the caller's repository, scoped by for to a pull request or a branch; a subagent's lasts until settled
-    expect(subscriptionOf({ repo: 'o/x', for: '#12' }, { ...how, start: true })).toMatchObject({ repo: 'o/r', scope: { kind: 'pr', number: 12 }, for: 'issue-9', until: 'settled' });
+    // start: the repository it names, else the caller's, scoped by for to a pull request or a branch; a subagent's lasts until settled
+    expect(subscriptionOf({ repo: 'o/x', for: '#12' }, { ...how, start: true })).toMatchObject({ repo: 'o/x', scope: { kind: 'pr', number: 12 }, for: 'issue-9', until: 'settled' });
     expect(subscriptionOf({ for: 'feat/12' }, { ...how, start: true })).toMatchObject({ scope: { kind: 'branch', name: 'feat/12' }, until: 'settled' });
     expect(subscriptionOf({ for: '12', until: 'merged' }, { ...how, start: true })).toMatchObject({ until: 'merged' });
     expect(subscriptionOf({ for: '12' }, { ...how, start: true, owner: undefined })).not.toHaveProperty('until');
     expect(subscriptionOf({}, { ...how, start: true })).toEqual({ repo: 'o/r', scope: { kind: 'repo' }, filter: how.filter, for: 'issue-9' });
     expect(subscriptionOf({}, { ...how, start: true, owner: undefined })).toEqual({ repo: 'o/r', scope: { kind: 'repo' }, filter: how.filter });
+    expect(subscriptionOf({ repo: 'o/x' }, { ...how, start: true, owner: undefined })).toEqual({ repo: 'o/x', scope: { kind: 'repo' }, filter: how.filter });
+  });
+
+  it('reads /sift watch arguments as the tool takes them, start with a repository and for', () => {
+    const start = (...args: string[]) => {
+      const input = commandInputOf('start', args);
+      return 'error' in input ? input : subscriptionOf(input, { start: true, repo: 'o/r', filter: { items: true, ci: 'failures', stall: true } });
+    };
+    expect(start()).toMatchObject({ repo: 'o/r', scope: { kind: 'repo' } });
+    expect(start('o/x')).toMatchObject({ repo: 'o/x', scope: { kind: 'repo' } });
+    expect(start('o/x', 'for', '#12')).toMatchObject({ repo: 'o/x', scope: { kind: 'pr', number: 12 } });
+    expect(start('o/x', 'for', 'feat/12')).toMatchObject({ repo: 'o/x', scope: { kind: 'branch', name: 'feat/12' } });
+    expect(start('for', '12')).toMatchObject({ repo: 'o/r', scope: { kind: 'pr', number: 12 } });
+    for (const bad of [['o/x', '12'], ['o/x', 'for'], ['for'], ['o/x', 'for', '12', 'more']]) expect(start(...bad)).toEqual({ error: 'usage: /sift watch start [repo] [for <pr|branch>]' });
+    expect(commandInputOf('subscribe', ['o/x', 'pr', '4'])).toEqual({ action: 'subscribe', repo: 'o/x', scope: 'pr 4' });
+    expect(commandInputOf('unsubscribe', ['s3'])).toEqual({ action: 'unsubscribe', id: 's3' });
+    expect(commandInputOf('poll', ['o/x'])).toEqual({ action: 'poll', repo: 'o/x' });
   });
 
   it('parses scopes and untils, and matches tag globs', () => {
@@ -952,12 +978,13 @@ describe('subscriptions', () => {
     let done = false;
     const forge = fakeForge({
       login: async () => 'me',
-      items: script(changed([slim(3, { kind: 'pr' })]), same(), changed([slim(3, { kind: 'pr', state: 'closed', merged: true, updatedAt: '2026-01-09T00:00:00Z' })], 'f')),
-      runs: script(changed([]), () => {
+      // the seed poll, then the poll the second pr subscription starts, then two ticks
+      items: script(changed([slim(3, { kind: 'pr' })]), same(), same(), changed([slim(3, { kind: 'pr', state: 'closed', merged: true, updatedAt: '2026-01-09T00:00:00Z' })], 'f')),
+      runs: script(changed([]), same(), () => {
         done = true;
         return changed([run(10, 'build', true, 'success')], 'r2');
       }),
-      pulls: script(changed([pull()]), same(), changed([], 'p3')),
+      pulls: script(changed([pull()]), same(), same(), changed([], 'p3')),
       checks: async () => [check('build', done)],
     });
     const clock = { now: 1_000_000 };
@@ -979,6 +1006,90 @@ describe('subscriptions', () => {
     expect(w.list()).toEqual([]);
     expect(w.poller('o/r')).toBeUndefined();
     expect(logs).toEqual(['sift watch: s1 on o/r pr 3 removed, until settled reached', 'sift watch: s3 on o/r repo removed, until reached', 'sift watch: s2 on o/r pr 3 removed, until reached']);
+  });
+
+  // the green path under the default filter: a subagent's pr subscription until settled is resumed by the success
+  // verdict and retires, whether the head settles after it subscribed, before it subscribed on a poller already running,
+  // or before the poller's seed
+  it('delivers a green verdict to an until: settled pr subscription under the default filter and retires it', async () => {
+    const green = (settledAlready: boolean) => {
+      let done = settledAlready;
+      return {
+        finish: () => void (done = true),
+        forge: fakeForge({
+          login: async () => 'me',
+          items: script(changed([slim(3, { kind: 'pr' })])),
+          runs: async () => (done ? changed([run(10, 'build', true, 'success')], 'r2') : changed([run(10, 'build', false, null)])),
+          pulls: script(changed([pull()])),
+          checks: async () => [check('build', done)],
+        }),
+      };
+    };
+    const verdict = 'ci settled success: pr #3 feat/3 @abc1234: Feat 3 (1 checks) · now: open, head unchanged';
+    // after it subscribed
+    {
+      const { forge, finish } = green(false);
+      const { w, delivered, logs } = registry(forge);
+      await w.subscribe({ repo: 'o/r', scope: { kind: 'pr', number: 3 }, filter, for: 'a1', until: 'settled' });
+      const poller = w.poller('o/r')!;
+      await poller.idle();
+      expect(delivered).toHaveLength(0);
+      finish();
+      await poller.tick();
+      expect(delivered.map((d) => [d.to, d.text.split('\n')[1]])).toEqual([['a1', verdict]]);
+      expect(w.list()).toEqual([]);
+      expect(logs).toEqual(['sift watch: s1 on o/r pr 3 removed, until settled reached']);
+    }
+    // before it subscribed, on a poller a repo subscription already runs: the verdict went out before it existed
+    {
+      const { forge, finish } = green(false);
+      const { w, delivered } = registry(forge);
+      await w.subscribe({ repo: 'o/r', scope: { kind: 'repo' }, filter });
+      const poller = w.poller('o/r')!;
+      await poller.idle();
+      finish();
+      await poller.tick();
+      expect(delivered.map((d) => d.to)).toEqual([undefined]);
+      await w.subscribe({ repo: 'o/r', scope: { kind: 'pr', number: 3 }, filter, for: 'a1', until: 'settled' });
+      await poller.idle();
+      expect(delivered.map((d) => d.to)).toEqual([undefined, 'a1']);
+      expect(delivered[1]!.text.split('\n').slice(1)).toEqual([verdict, '  by alice · https://x/pull/3 · ci settled on pr, before it subscribed · s2']);
+      expect(w.list().map((s) => s.id)).toEqual(['s1']);
+      await poller.tick();
+      expect(delivered).toHaveLength(2);
+    }
+    // before the seed of the poller its subscribe starts
+    {
+      const { forge } = green(true);
+      const { w, delivered } = registry(forge);
+      await w.subscribe({ repo: 'o/r', scope: { kind: 'pr', number: 3 }, filter, for: 'a1', until: 'settled' });
+      await w.poller('o/r')!.idle();
+      expect(delivered.map((d) => [d.to, d.text.split('\n')[1]])).toEqual([['a1', verdict]]);
+      expect(w.list()).toEqual([]);
+    }
+  });
+
+  it('drops a run on a head its pr moved from, and retires an until: settled pr subscription whose pr closes first', async () => {
+    const forge = fakeForge({
+      login: async () => 'me',
+      items: script(changed([slim(3, { kind: 'pr' })]), same(), changed([slim(3, { kind: 'pr', state: 'closed', updatedAt: '2026-01-09T00:00:00Z' })], 'f')),
+      // the run on the old head aaa1234 completes after the pr moved to bbb1234
+      runs: script(changed([run(10, 'build', false, null, 'aaa1234')]), changed([run(10, 'build', true, 'success', 'aaa1234')], 'r2')),
+      pulls: script(changed([pull('aaa1234')]), changed([pull('bbb1234')], 'p2'), changed([], 'p3')),
+      checks: async () => [check('build', false)],
+    });
+    const decisions: string[] = [];
+    const { w, delivered, logs } = registry(forge);
+    await w.subscribe({ repo: 'o/r', scope: { kind: 'pr', number: 3 }, filter: { ...filter, ci: 'settled' }, for: 'a1', until: 'settled' });
+    const poller = w.poller('o/r')!;
+    (poller as unknown as { host: WatchHost }).host.onDecision = (e, action, label) => void decisions.push(`${action} ${e.id} ${label}`);
+    await poller.idle();
+    await poller.tick();
+    expect(delivered).toHaveLength(0);
+    expect(decisions).toContain('drop ci#10 ci on pr #3, not its open head');
+    await poller.tick();
+    expect(w.list()).toEqual([]);
+    expect(logs).toEqual(['sift watch: s1 on o/r pr 3 removed, its pull request closed before a verdict']);
   });
 
   it('keeps an agent\'s subscriptions past its turn, and retires them all once nothing can reach it', async () => {
@@ -1021,9 +1132,9 @@ describe('subscriptions', () => {
     expect(waits).toEqual([605_000, 605_000]);
   });
 
-  it('reseeds a store written before subscriptions', async () => {
-    expect(STATE_VERSION).toBe(9);
-    const store = memoryStore(new Map([['watch:test:o/r', { ...initialState(), version: 8, seeded: true, armedBy: 'issue-1' }]]));
+  it('reseeds a store written before joined pr subscriptions', async () => {
+    expect(STATE_VERSION).toBe(10);
+    const store = memoryStore(new Map([['watch:test:o/r', { ...initialState(), version: 9, seeded: true, armedBy: 'issue-1' }]]));
     const logs: string[] = [];
     const watcher = new Watcher({ forge: fakeForge(), store, key: 'watch:test:o/r', judge: offJudge, pack: BUILTIN_PACKS['triage']!, config: DEFAULT_CONFIG, now: () => 1_000_000, deliver: async () => {}, log: (t) => void logs.push(t), status: () => {}, schedule: () => ({ cancel: () => {} }), subscriptions: () => repoSub() }, { repo: 'o/r', ...options });
     await watcher.start();

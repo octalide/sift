@@ -63,10 +63,9 @@ export class Watches {
     await this.save();
     const existing = this.pollers.get(sub.repo);
     const poller = await this.ensure(sub.repo);
-    if (sub.scope.kind === 'run') {
-      await poller.await(sub.scope.id);
-      if (existing) void poller.tick();
-    }
+    if (sub.scope.kind === 'run') await poller.await(sub.scope.id);
+    if (sub.scope.kind === 'pr') await poller.join(sub.id);
+    if (existing && (sub.scope.kind === 'run' || sub.scope.kind === 'pr')) void poller.tick();
     return { sub, added: true };
   }
 
