@@ -11,7 +11,7 @@
     "backend": {
       "type": "string",
       "title": "Judge backend",
-      "description": "auto uses Jev when a key is present and the session's small model otherwise. off disables every judged feature and leaves only mechanical checks.",
+      "description": "auto uses Jev when a key is present and the fallback model otherwise. jev with no key judges nothing, as off does. off disables every judged feature and leaves only mechanical checks.",
       "options": [
         "auto",
         "jev",
