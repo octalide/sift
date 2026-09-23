@@ -1,10 +1,10 @@
-import type { Forge, ForgeAction, ForgeArtifact } from '../forge/forge.ts';
+import type { Forge, ForgeArtifact, ForgeWrite } from '../forge/forge.ts';
 import { shellWord } from '../shell.ts';
 
-// where the text is in a call: fields of the tool input, joined in order; or for a shell command, the
-// command pattern, the flags carrying the text inline (a quoted word, or a $(cat <<'EOF' ... EOF) heredoc)
-// and the flags naming a file it is read from
-export type TextSource = { fields: string[] } | { command: string; body: string[]; file?: string[] };
+// where the text is in a call: fields of the tool input, joined in order, on a call whose input holds every value
+// when names; or for a shell command, the command pattern, the flags carrying the text inline (a quoted word, or a
+// $(cat <<'EOF' ... EOF) heredoc) and the flags naming a file it is read from
+export type TextSource = { fields: string[]; when?: Record<string, string> } | { command: string; body: string[]; file?: string[] };
 
 // one place text leaves the session: a name config replaces it by, a regex over the tool name, where the
 // text is, the channel's hard length limit, and what the text is in the words a rules question names it by
@@ -25,24 +25,30 @@ export const DISCORD_CHANNELS: Channel[] = [
 // how an artifact is named when no forge is bound to name it
 const PLAIN_NOUNS: Record<ForgeArtifact, string> = { issue: 'issue', pr: 'pull request', release: 'release' };
 
-// what the text is, in the words the judge reads: "the body of a new GitHub issue"
-export function textAbout(artifact: { kind: ForgeArtifact; action: ForgeAction }, nouns: Record<ForgeArtifact, string> = PLAIN_NOUNS): string {
+// what the text is, in the words the judge reads: "the title and body of a new GitHub issue"
+export function textAbout(artifact: ForgeWrite, nouns: Record<ForgeArtifact, string> = PLAIN_NOUNS): string {
   const noun = nouns[artifact.kind];
+  const body = artifact.kind === 'release' ? 'notes' : 'body';
   if (artifact.action === 'comment') return `a comment on a ${noun}`;
   if (artifact.action === 'review') return `a review on a ${noun}`;
   if (artifact.action === 'merge') return 'a merge commit message';
-  if (artifact.action === 'edit') return `the edited ${artifact.kind === 'release' ? 'notes' : 'body'} of a ${noun}`;
-  return `the ${artifact.kind === 'release' ? 'notes' : 'body'} of a new ${noun}`;
+  if (artifact.action === 'edit') return `the edited title and ${body} of a ${noun}`;
+  return `the title and ${body} of a new ${noun}`;
 }
 
-// one channel per write the forge's cli makes, named forge-artifact-action
-export function forgeChannels(forge: Forge): Channel[] {
+export const POST_TOOL = 'mcp__sift__post';
+
+// the post tool's kind for a write: pr-comment
+export const postKind = (w: ForgeWrite): string => `${w.kind}-${w.action}`;
+
+// one channel per write the post tool makes, named forge-artifact-action
+export function postChannels(forge: Forge): Channel[] {
   const prefix = forge.name.toLowerCase();
-  return forge.writes.map((w) => ({ name: `${prefix}-${w.kind}-${w.action}`, tool: '^Bash$', text: { command: w.command, body: w.body, file: w.file }, kind: textAbout(w, forge.nouns) }));
+  return forge.writes.map((w) => ({ name: `${prefix}-${postKind(w)}`, tool: `^${POST_TOOL}$`, text: { fields: ['title', 'body'], when: { kind: postKind(w) } }, kind: textAbout(w, forge.nouns) }));
 }
 
 export function defaultChannels(forge?: Forge): Channel[] {
-  return forge ? [...DISCORD_CHANNELS, ...forgeChannels(forge)] : [...DISCORD_CHANNELS];
+  return forge ? [...DISCORD_CHANNELS, ...postChannels(forge)] : [...DISCORD_CHANNELS];
 }
 
 // an entry with a known name takes that entry's place in the order, any other is appended
@@ -86,6 +92,7 @@ export function commandBody(command: string, source: Extract<TextSource, { comma
 export function textOf(channel: Channel, tool: string, input: Record<string, unknown>): Body | undefined {
   if (!new RegExp(channel.tool).test(tool)) return undefined;
   if ('fields' in channel.text) {
+    if (Object.entries(channel.text.when ?? {}).some(([k, v]) => input[k] !== v)) return undefined;
     const parts = channel.text.fields.map((f) => input[f]).filter((v): v is string => typeof v === 'string' && v.length > 0);
     return parts.length > 0 ? { text: parts.join('\n') } : undefined;
   }

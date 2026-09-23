@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const plugin = 'sift@inline';
 // what the module registers under default options, only reachable if it loaded and its session.start ran
-const tools = ['grade', 'judge', 'rank', 'status', 'watch', 'prune'].map((t) => `mcp__sift__${t}`);
+const tools = ['grade', 'judge', 'rank', 'status', 'watch', 'prune', 'post'].map((t) => `mcp__sift__${t}`);
 
 function environment(home) {
   const env = {};

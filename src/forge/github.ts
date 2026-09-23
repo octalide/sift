@@ -1,7 +1,7 @@
 import { Gh, GhError, type ApiResponse } from './gh.ts';
 import type { CwdLike, RunLike } from '../process.ts';
 import { fillNeeds, workflowJobs } from './workflow.ts';
-import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgeUser, ForgeWrite, Issue, IssueSummary, Job, JobLog, LogStep, PullHead, PullRequest, Rate, Review, ReviewComment, Run, Template, WatchItem } from './forge.ts';
+import type { Check, Comment, Commit, Conditional, Forge, ForgeAction, ForgeArtifact, ForgeLink, ForgePost, ForgeUser, ForgeWrite, Issue, IssueSummary, Job, JobLog, LogStep, PullHead, PullRequest, Rate, Review, ReviewComment, ReviewVerdict, Run, Template, WatchItem } from './forge.ts';
 
 type GhUser = { login: string; type?: string };
 type GhIssue = {
@@ -79,19 +79,115 @@ export type RawItem = {
 const GH_URL = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+\/[^/\s#?]+)\/(issues|pull)\/(\d+)(?:[/?#].*)?$/;
 const GH_API_URL = /^https?:\/\/api\.github\.com\/repos\/([^/\s]+\/[^/\s#?]+)\/(issues|pulls)\/(\d+)(?:[/?#].*)?$/;
 
-// gh pr and gh issue take --body and --body-file (pr review and pr merge too); gh release takes --notes and --notes-file, and has no comment
-const ghWrite = (kind: ForgeArtifact, action: ForgeAction, noun: string): ForgeWrite => ({
-  kind,
-  action,
-  command: String.raw`^\s*gh\s+${kind}\s+${action}\b`,
-  body: [`--${noun}`, `-${noun[0]}`],
-  file: [`--${noun}-file`, '-F'],
-});
 export const GH_WRITES: ForgeWrite[] = [
-  ...(['create', 'comment', 'edit', 'review', 'merge'] as const).map((action) => ghWrite('pr', action, 'body')),
-  ...(['create', 'comment', 'edit'] as const).map((action) => ghWrite('issue', action, 'body')),
-  ...(['create', 'edit'] as const).map((action) => ghWrite('release', action, 'notes')),
+  ...(['create', 'comment', 'edit', 'review', 'merge'] as const).map((action) => ({ kind: 'pr' as const, action })),
+  ...(['create', 'comment', 'edit'] as const).map((action) => ({ kind: 'issue' as const, action })),
+  ...(['create', 'edit'] as const).map((action) => ({ kind: 'release' as const, action })),
 ];
+
+// the flags of each gh write that carry text, and the other names gh takes for a subcommand
+const CLI_TEXT: Record<ForgeArtifact, string[]> = {
+  pr: ['--body', '-b', '--body-file', '-F', '--title', '-t', '--subject'],
+  issue: ['--body', '-b', '--body-file', '-F', '--title', '-t'],
+  release: ['--notes', '-n', '--notes-file', '-F', '--title', '-t'],
+};
+const CLI_ALIASES: Record<string, ForgeAction> = { new: 'create' };
+
+// a create or a comment always sends text; an edit, a review or a merge only when a text flag is given
+const alwaysText = (action: ForgeAction): boolean => action === 'create' || action === 'comment';
+
+// the rest endpoints that write text, by method and path; a path is matched without its leading slash or query
+const API_WRITES: { method: string; path: RegExp; write: ForgeWrite }[] = [
+  { method: 'POST', path: /^repos\/[^/]+\/[^/]+\/issues$/, write: { kind: 'issue', action: 'create' } },
+  { method: 'POST', path: /^repos\/[^/]+\/[^/]+\/issues\/[^/]+\/comments$/, write: { kind: 'issue', action: 'comment' } },
+  { method: 'PATCH', path: /^repos\/[^/]+\/[^/]+\/issues\/comments\/[^/]+$/, write: { kind: 'issue', action: 'comment' } },
+  { method: 'PATCH', path: /^repos\/[^/]+\/[^/]+\/issues\/[^/]+$/, write: { kind: 'issue', action: 'edit' } },
+  { method: 'POST', path: /^repos\/[^/]+\/[^/]+\/pulls$/, write: { kind: 'pr', action: 'create' } },
+  { method: 'PATCH', path: /^repos\/[^/]+\/[^/]+\/pulls\/comments\/[^/]+$/, write: { kind: 'pr', action: 'comment' } },
+  { method: 'PATCH', path: /^repos\/[^/]+\/[^/]+\/pulls\/[^/]+$/, write: { kind: 'pr', action: 'edit' } },
+  { method: 'POST', path: /^repos\/[^/]+\/[^/]+\/pulls\/[^/]+\/comments(?:\/[^/]+\/replies)?$/, write: { kind: 'pr', action: 'comment' } },
+  { method: 'POST', path: /^repos\/[^/]+\/[^/]+\/pulls\/[^/]+\/reviews(?:\/[^/]+\/events)?$/, write: { kind: 'pr', action: 'review' } },
+  { method: 'PUT', path: /^repos\/[^/]+\/[^/]+\/pulls\/[^/]+\/reviews\/[^/]+$/, write: { kind: 'pr', action: 'review' } },
+  { method: 'PUT', path: /^repos\/[^/]+\/[^/]+\/pulls\/[^/]+\/merge$/, write: { kind: 'pr', action: 'merge' } },
+  { method: 'POST', path: /^repos\/[^/]+\/[^/]+\/releases$/, write: { kind: 'release', action: 'create' } },
+  { method: 'PATCH', path: /^repos\/[^/]+\/[^/]+\/releases\/[^/]+$/, write: { kind: 'release', action: 'edit' } },
+];
+// the request fields that carry text on those endpoints
+const API_TEXT_FIELDS = new Set(['body', 'title', 'name', 'commit_title', 'commit_message']);
+// the graphql mutations that write text, by name
+const GRAPHQL_WRITES: Record<string, ForgeWrite> = {
+  createIssue: { kind: 'issue', action: 'create' },
+  updateIssue: { kind: 'issue', action: 'edit' },
+  addComment: { kind: 'issue', action: 'comment' },
+  updateIssueComment: { kind: 'issue', action: 'comment' },
+  createPullRequest: { kind: 'pr', action: 'create' },
+  updatePullRequest: { kind: 'pr', action: 'edit' },
+  addPullRequestReview: { kind: 'pr', action: 'review' },
+  submitPullRequestReview: { kind: 'pr', action: 'review' },
+  updatePullRequestReview: { kind: 'pr', action: 'review' },
+  addPullRequestReviewComment: { kind: 'pr', action: 'comment' },
+  addPullRequestReviewThread: { kind: 'pr', action: 'comment' },
+  addPullRequestReviewThreadReply: { kind: 'pr', action: 'comment' },
+  updatePullRequestReviewComment: { kind: 'pr', action: 'comment' },
+  mergePullRequest: { kind: 'pr', action: 'merge' },
+  enablePullRequestAutoMerge: { kind: 'pr', action: 'merge' },
+};
+// gh api flags that take a value, so the path is the first word that is neither a flag nor a flag's value
+const API_VALUE_FLAGS = new Set(['-X', '--method', '-H', '--header', '-f', '--raw-field', '-F', '--field', '--input', '-q', '--jq', '-t', '--template', '--hostname', '--cache', '-p', '--preview']);
+
+// a flag given as its own word, as flag=value, or as a shorthand with its value glued on
+const hasFlag = (words: string[], flags: string[]): boolean =>
+  words.some((w) => flags.some((f) => w === f || w.startsWith(`${f}=`) || (/^-[A-Za-z]$/.test(f) && w.startsWith(f) && w.length > 2)));
+
+// the write a gh command makes, when it sends text
+export function ghWriteOf(words: string[]): ForgeWrite | undefined {
+  if (words.length < 2 || !/(?:^|\/)gh$/.test(words[0]!)) return undefined;
+  const [, group, sub] = words;
+  if (group === 'api') return ghApiWriteOf(words.slice(2));
+  if (group !== 'pr' && group !== 'issue' && group !== 'release') return undefined;
+  const action = CLI_ALIASES[sub ?? ''] ?? (sub as ForgeAction);
+  if (!GH_WRITES.some((w) => w.kind === group && w.action === action)) return undefined;
+  if (alwaysText(action) || hasFlag(words.slice(3), CLI_TEXT[group])) return { kind: group, action };
+  return undefined;
+}
+
+function ghApiWriteOf(args: string[]): ForgeWrite | undefined {
+  let method: string | undefined;
+  let path: string | undefined;
+  let input = false;
+  const fields: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i]!;
+    const eq = /^(--?[A-Za-z-]+)=(.*)$/s.exec(w);
+    const [flag, glued] = eq ? [eq[1]!, eq[2]!] : /^-[A-Za-z]./.test(w) && !w.startsWith('--') ? [w.slice(0, 2), w.slice(2)] : [w, undefined];
+    if (!API_VALUE_FLAGS.has(flag)) {
+      if (!w.startsWith('-') && path === undefined) path = w;
+      continue;
+    }
+    const value = glued ?? args[++i] ?? '';
+    if (flag === '-X' || flag === '--method') method = value.toUpperCase();
+    else if (flag === '--input') input = true;
+    else if (flag === '-f' || flag === '--raw-field' || flag === '-F' || flag === '--field') fields.push(value);
+  }
+  if (path === undefined) return undefined;
+  const at = path.replace(/^\//, '').replace(/\?.*$/s, '');
+  if (at === 'graphql') {
+    const mutation = fields.find((f) => /\bmutation\b/.test(f));
+    if (mutation === undefined) return undefined;
+    const named = Object.keys(GRAPHQL_WRITES).find((name) => new RegExp(`\\b${name}\\s*\\(`).test(mutation));
+    return named === undefined ? undefined : GRAPHQL_WRITES[named];
+  }
+  const verb = method ?? (fields.length > 0 || input ? 'POST' : 'GET');
+  const hit = API_WRITES.find((e) => e.method === verb && e.path.test(at));
+  if (!hit) return undefined;
+  const text = input || fields.some((f) => API_TEXT_FIELDS.has(f.split(/[=\[]/, 1)[0]!));
+  return alwaysText(hit.write.action) || text ? hit.write : undefined;
+}
+
+const VERDICTS: Record<ReviewVerdict, string> = { approve: 'APPROVE', 'request-changes': 'REQUEST_CHANGES', comment: 'COMMENT' };
+
+// a request field set only when given, so an edit leaves what it does not name
+const given = <T extends Record<string, unknown>>(fields: T): Partial<T> => Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)) as Partial<T>;
 
 const user = (u: GhUser): ForgeUser => ({ login: u.login, bot: u.type === 'Bot' || u.login.endsWith('[bot]') });
 
@@ -441,5 +537,32 @@ export class GitHubForge implements Forge {
     const m = GH_URL.exec(url.trim()) ?? GH_API_URL.exec(url.trim());
     if (!m) return undefined;
     return { repo: m[1]!, kind: m[2] === 'issues' ? 'issue' : 'pr', number: Number(m[3]) };
+  }
+
+  // every write names its repository in the api path, so neither the working directory nor a fork's upstream decides it
+  async post(repo: string, post: ForgePost): Promise<string> {
+    const url = async (path: string, method: string, input: Record<string, unknown>) => (await this.gh.json<{ html_url: string }>(`repos/${repo}/${path}`, { method, input })).html_url;
+    switch (post.action) {
+      case 'create':
+        if (post.kind === 'issue') return url('issues', 'POST', { title: post.title, body: post.body });
+        if (post.kind === 'pr') return url('pulls', 'POST', { title: post.title, body: post.body, base: post.base, head: post.head, draft: post.draft ?? false });
+        return url('releases', 'POST', { tag_name: post.tag, body: post.body, draft: post.draft ?? false, prerelease: post.prerelease ?? false, ...given({ target_commitish: post.target, name: post.title }) });
+      case 'comment':
+        return url(`issues/${post.number}/comments`, 'POST', { body: post.body });
+      case 'edit': {
+        if (post.kind !== 'release') return url(`${post.kind === 'issue' ? 'issues' : 'pulls'}/${post.number}`, 'PATCH', given({ title: post.title, body: post.body }));
+        const release = await this.gh.json<{ id: number }>(`repos/${repo}/releases/tags/${encodeURIComponent(post.tag)}`);
+        return url(`releases/${release.id}`, 'PATCH', given({ name: post.title, body: post.body }));
+      }
+      case 'review':
+        return url(`pulls/${post.number}/reviews`, 'POST', { event: VERDICTS[post.verdict], ...given({ body: post.body }) });
+      case 'merge':
+        await this.gh.json(`repos/${repo}/pulls/${post.number}/merge`, { method: 'PUT', input: { merge_method: post.method, ...given({ commit_title: post.title, commit_message: post.body }) } });
+        return (await this.pull(repo, post.number)).url;
+    }
+  }
+
+  writeOf(words: string[]): ForgeWrite | undefined {
+    return ghWriteOf(words);
   }
 }

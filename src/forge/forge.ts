@@ -120,8 +120,23 @@ export type Template = { kind: 'issue' | 'pr'; name: string; body: string };
 export type ForgeArtifact = 'issue' | 'pr' | 'release';
 export type ForgeAction = 'create' | 'comment' | 'edit' | 'review' | 'merge';
 
-// a write the forge's cli makes: a regex over the command, the flags carrying the body inline, the flags naming a file it is read from
-export type ForgeWrite = { kind: ForgeArtifact; action: ForgeAction; command: string; body: string[]; file: string[] };
+// one write of text people read: the artifact and what the write does to it
+export type ForgeWrite = { kind: ForgeArtifact; action: ForgeAction };
+
+export type ReviewVerdict = 'approve' | 'request-changes' | 'comment';
+export type MergeMethod = 'merge' | 'squash' | 'rebase';
+
+// one write sift makes on a caller's behalf, with its text and what the forge needs to place it
+export type ForgePost =
+  | { kind: 'issue'; action: 'create'; title: string; body: string }
+  | { kind: 'pr'; action: 'create'; title: string; body: string; base: string; head: string; draft?: boolean }
+  | { kind: 'issue' | 'pr'; action: 'comment'; number: number; body: string }
+  | { kind: 'issue' | 'pr'; action: 'edit'; number: number; title?: string; body?: string }
+  | { kind: 'pr'; action: 'review'; number: number; verdict: ReviewVerdict; body?: string }
+  // title and body are the merge commit's subject and message
+  | { kind: 'pr'; action: 'merge'; number: number; method: MergeMethod; title?: string; body?: string }
+  | { kind: 'release'; action: 'create'; tag: string; target?: string; title?: string; body: string; draft?: boolean; prerelease?: boolean }
+  | { kind: 'release'; action: 'edit'; tag: string; title?: string; body?: string };
 
 // an issue or pull request a url on the forge names, with the repo as the forge paths it
 export type ForgeLink = { repo: string; kind: 'issue' | 'pr'; number: number };
@@ -131,7 +146,7 @@ export interface Forge {
   readonly name: string;
   // how the forge names each artifact in prose, for the judge: "GitHub issue", "merge request"
   readonly nouns: Record<ForgeArtifact, string>;
-  // every artifact write the forge's cli makes from a shell command
+  // every write post makes
   readonly writes: ForgeWrite[];
 
   // the repository the working directory is a checkout of, when it has a remote on this forge
@@ -196,4 +211,11 @@ export interface Forge {
 
   // the issue or pull request a url in the forge's own shape names, undefined for any other text
   parseUrl(url: string): ForgeLink | undefined;
+
+  // makes one write on the named repository, never the one a working directory implies, and answers the url of
+  // what it made or changed
+  post(repo: string, post: ForgePost): Promise<string>;
+  // the write one simple shell command (its words, unquoted) makes through the forge's own cli or api when it
+  // sends text people read; undefined for a read, or a write that carries no text
+  writeOf(words: string[]): ForgeWrite | undefined;
 }
