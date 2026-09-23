@@ -26,6 +26,8 @@ Fixed: rule discovery kept descriptions of the software as rules. The paragraph 
 
 Fixed: `grade` with the `rules` pack and free text judged only the first 20,000 characters and did not say the rest went unread. Free text is now read the way the outbound gate reads it, in parts when it is longer than one judge state holds, and the parts' reports merge into one: a rule takes its worst band across the parts, each band names the parts it was found in, and the report lists the parts. Short text grades as before. `runParts` and `mergeReports` in `src/packs/run.ts` are that merge, and the gate uses them too, so an `OutboundDecision` carries one merged `report` in place of `report` and `parts`. `rulesSubject` reads an issue only, its `RulesTarget` is `{ number, pack }`, and `subjectFor` answers `subjects`. A `Judged` and a `Report` take an optional `parts`.
 
+Fixed: `grade` with the `rules` pack on an issue judged only the first 20,000 characters of its body. The issue's title and whole body are now read in parts the way free text is, with the rest of the issue beside the opening part, and an issue that fits one judge state grades as before. `rulesSubject` is `rulesSubjects` and answers every part, and `issueSubject` takes the cap its body is cut to.
+
 ## [0.14.0] - 2026-09-23
 
 This release removes the `ci` pack and is a minor bump on 0.x. Judging CI output cost more than it told: the pack scored every line of a failed job's log, env dumps and YAML keys included, and its headline `own_fault` answered unclear on a failure whose error text was the literal bug the PR fixed.
