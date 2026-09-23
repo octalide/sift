@@ -2,8 +2,8 @@ import type { Forge, Issue, PullRequest } from '../src/forge/forge.ts';
 
 // a forge that answers from what a test hands it and nothing else; every unhandled read answers empty
 export function fakeForge(over: Partial<Forge> = {}): Forge {
-  const issue = (number: number): Issue => ({ number, title: `Issue ${number}`, body: '', state: 'open', author: { login: 'alice', bot: false }, labels: [], url: `https://x/${number}`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' });
-  const pull = (number: number): PullRequest => ({ ...issue(number), base: 'dev', head: { branch: `feat/${number}`, sha: 'abc1234def' }, draft: false, merged: false, stats: { additions: 1, deletions: 0, files: 1 } });
+  const issue = (number: number): Issue => ({ number, title: `Issue ${number}`, body: '', state: 'open', author: { login: 'alice', bot: false }, labels: [], url: `https://x/${number}`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', pr: false });
+  const pull = (number: number): PullRequest => ({ ...issue(number), pr: true, base: 'dev', head: { branch: `feat/${number}`, sha: 'abc1234def' }, draft: false, merged: false, stats: { additions: 1, deletions: 0, files: 1 } });
   return {
     name: 'Fake',
     nouns: { issue: 'Fake issue', pr: 'pull request', release: 'Fake release' },

@@ -49,16 +49,20 @@ export function expectedSubject(kind: ParsedKind, forge: Pick<Forge, 'name'>): s
 
 const shown = (ref: string): string => (ref.length > 60 ? `${ref.slice(0, 57)}...` : ref);
 
+// the refusal of a subject for a pack of the given kind, with the forms it takes named
+export function refusal(kind: ParsedKind, ref: string, why: string, forge: Pick<Forge, 'name'>): Error {
+  return new Error(`${kind} pack: ${why} (${JSON.stringify(shown(ref))}); expected ${expectedSubject(kind, forge)}`);
+}
+
 // parses the subject of a grade call for a pack of the given kind, refusing with the expected forms named.
 // repo is the explicit repo of the call, when given; a url naming a different repo is refused.
 // a bare number names an issue for the mixed and rules kinds
 export function parseSubject<K extends ParsedKind>(kind: K, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string): Extract<ParsedSubject, { kind: K }>;
 export function parseSubject(kind: ParsedKind, ref: string | undefined, forge: Pick<Forge, 'name' | 'parseUrl'>, repo?: string): ParsedSubject {
   const raw = (ref ?? '').trim();
-  const expected = expectedSubject(kind, forge);
-  if (!raw) throw new Error(`${kind} pack: no subject; expected ${expected}`);
+  if (!raw) throw new Error(`${kind} pack: no subject; expected ${expectedSubject(kind, forge)}`);
   const refuse = (why: string): never => {
-    throw new Error(`${kind} pack: ${why} (${JSON.stringify(shown(raw))}); expected ${expected}`);
+    throw refusal(kind, raw, why, forge);
   };
   const link = forge.parseUrl(raw);
   // an issue or pull request by number or url; the two kinds share the forms, only the kind differs

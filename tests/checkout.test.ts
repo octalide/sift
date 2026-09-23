@@ -215,6 +215,17 @@ describe('forge-only grades', () => {
     expect(issuesRead).toEqual(['o/b#5']);
     expect(there.config.prs.targets).toEqual(['trunk']);
   });
+
+  it('refuse a pull request number given to the issue or rules pack, naming the forms each takes', async () => {
+    fresh();
+    const plain = fakeForge();
+    host = { ...host, forge: fakeForge({ issue: async (repo, n) => ({ ...(await plain.issue(repo, n)), pr: n === 7 }) }) };
+    await expect(subjectFor(host, await sessionScope(), 'issue', '7')).rejects.toThrow('issue pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N) or a Fake issue URL');
+    await expect(subjectFor(host, await sessionScope(), 'rules', '#7')).rejects.toThrow('rules pack: subject is o/a#7, a pull request, not an issue ("#7"); expected an issue number (N or #N), a Fake issue URL, or free text (in text)');
+    // an issue number grades as before
+    expect((await subjectFor(host, await sessionScope(), 'issue', '5')).subject.kind).toBe('issue');
+    expect((await subjectFor(host, await sessionScope(), 'rules', '5')).subject.state).toMatchObject({ subject: { kind: 'issue', number: 5 } });
+  });
 });
 
 describe('the subagent default', () => {
