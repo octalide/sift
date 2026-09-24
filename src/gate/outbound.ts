@@ -69,6 +69,26 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   return { ...verdict, report, warnings };
 }
 
+// how outbound text is held to the rules: off judges nothing, advise judges and lets everything through with the
+// verdict attached, enforce refuses a broken rule
+export const OUTBOUND_MODES = ['off', 'advise', 'enforce'] as const;
+export type OutboundMode = (typeof OUTBOUND_MODES)[number];
+
+// what a mode makes of a decision: the action the decision log records, and whether the call is refused. an override
+// lets an enforced refusal through; shadow refuses nothing and attaches nothing
+export function enact(mode: OutboundMode, decision: OutboundDecision, shadow: boolean, override?: string): { action: string; refuse: boolean; advise: boolean } {
+  if (mode === 'advise') return { action: decision.allow ? 'allow' : shadow ? 'would-advise' : 'advise', refuse: false, advise: !shadow };
+  if (decision.allow) return { action: 'allow', refuse: false, advise: false };
+  if (override !== undefined) return { action: 'override', refuse: false, advise: false };
+  return { action: shadow ? 'would-deny' : 'deny', refuse: !shadow, advise: false };
+}
+
+// the verdict an advised call carries back to its caller
+export function verdictOf(out: Outbound, decision: OutboundDecision): string {
+  const head = decision.allow ? `sift outbound (${out.channel}): ${decision.reason}` : `sift outbound (${out.channel}), note: ${decision.reason.replace(/^breaks: /, 'this may break ')}`;
+  return [head, ...decision.warnings].join('; ');
+}
+
 // the rule a rules question quotes, after the subject it names and what it asks of it
 function ruleOf(instructions: string): string {
   return instructions.replace(/^.*? (?:complies with|does not break) this rule: /s, '');
