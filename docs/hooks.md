@@ -65,6 +65,8 @@ For every tool but `post`, the gate reads one checkout, the one a `grade` with n
 
 The channel's limit is mechanical and denies without a judge call. The rules pack then runs over the text with the same rule documents as `grade rules`, each question naming the channel's `kind`, so a pull request rule read against an issue body is answered as not applying rather than broken: a violated rule denies with the rule quoted, an unclear one logs a warning, and the judge being unavailable allows. `shadow` logs what would have been denied.
 
+The gate keeps every verdict it judged in full, for `post` and every other channel alike, in the plugin store every session shares (the last 500). It is keyed by everything the verdict read: the text, the channel and its kind, every part the text was judged in with the rules it was judged against, the rules pack's questions and the judge. A judge's answer near a band's edge varies between asks, so the same text sent again to the same repository under the same rules meets the verdict it met before without a judge call, and a changed text, rule document or pack is judged afresh. A verdict the judge could not give (an outage, or rule discovery still running) is never kept.
+
 ## Classify
 
 With `classify: true` the engine's own `model.classify` calls (a text and a list of labels) are answered by one choice question to the judge. A judge failure, or an answer that is not a choice, falls through to the engine's own model.

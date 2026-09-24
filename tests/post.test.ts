@@ -10,7 +10,7 @@ import type { Checkout } from '../src/repo/checkout.ts';
 import { DEFAULT_CONFIG, resolveConfig, type RepoConfig } from '../src/repo/config.ts';
 import { simpleCommands } from '../src/shell.ts';
 import { fakeForge } from './fake-forge.ts';
-import { discoveries } from './fake-source.ts';
+import { discoveries, verdicts } from './fake-source.ts';
 
 const github = new GitHubForge(async () => ({ exitCode: 1, stdout: '', stderr: '' }));
 
@@ -114,6 +114,7 @@ describe('post', () => {
     }),
     judge: j,
     discoveries: discoveries(j),
+    verdicts: verdicts(),
     config: async (repo: string) => configs[repo] ?? DEFAULT_CONFIG,
   });
   const pack = BUILTIN_PACKS['rules']!;

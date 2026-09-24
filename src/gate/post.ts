@@ -7,6 +7,7 @@ import { forgeSource, type Discoveries } from '../rules/discover.ts';
 import { simpleCommands } from '../shell.ts';
 import { channelTable, defaultChannels, POST_TOOL, postKind, textAbout } from './channels.ts';
 import { gateOutbound, outboundOf, type Outbound, type OutboundDecision } from './outbound.ts';
+import type { Verdicts } from './verdicts.ts';
 
 export const VERDICTS: ReviewVerdict[] = ['approve', 'request-changes', 'comment'];
 export const METHODS: MergeMethod[] = ['merge', 'squash', 'rebase'];
@@ -77,6 +78,8 @@ export type PostHost = {
   judge: Judge;
   // the rule discoveries in flight, shared with every grade of the session
   discoveries: Discoveries;
+  // the gate's kept verdicts, shared with every gate of the session
+  verdicts: Verdicts;
   // the conventions of a repository on the forge
   config: (repo: string) => Promise<RepoConfig>;
 };
@@ -98,7 +101,7 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
   let decision: OutboundDecision | undefined;
   if (outbound && pack) {
     const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, config);
-    decision = await gateOutbound(outbound, subjects, pack, host.judge, config);
+    decision = await gateOutbound(outbound, subjects, pack, host.judge, config, host.verdicts);
     if (!decision.allow && !shadow) return { outbound, decision, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
   }
   return { outbound, decision, url: await host.forge.post(repo, post) };

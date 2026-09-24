@@ -10,7 +10,7 @@ import { candidate, checkoutSource, contributingGuide, discoverRules, excluded, 
 import { ruleParagraphs } from '../src/rules/paragraphs.ts';
 import { rulesKeys, STALE_MS, StoreKeys } from '../src/keys.ts';
 import { fakeForge } from './fake-forge.ts';
-import { discoveries, memorySource, memoryStore, yesJudge } from './fake-source.ts';
+import { discoveries, memorySource, memoryStore, verdicts, yesJudge } from './fake-source.ts';
 
 // a fixed clock: the cache's read mark is not what these tests check
 const now = () => 1;
@@ -326,7 +326,7 @@ describe('rule discovery', () => {
         name: 'fake',
         ask: async (_s, q) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.entries(q).map(([k, x]) => [k, { type: 'noul' as const, p: (/subject: log/.test(x.instructions) && /removes/.test(text)) || (/conventional format/.test(x.instructions) && !/^\w+(\(#\d+\))?!?: /.test(text)) ? 0.1 : 0.9 }])) }),
       };
-      return gateOutbound({ channel: 'github-pr-create', text, kind: 'the title and body of a new pull request' }, subjects, BUILTIN_PACKS['rules']!, gateJudge, config);
+      return gateOutbound({ channel: 'github-pr-create', text, kind: 'the title and body of a new pull request' }, subjects, BUILTIN_PACKS['rules']!, gateJudge, config, verdicts());
     };
     expect(await gate('feat(#188)!: remove the ci pack\n\nThis removes the `log` subject kind: a repo pack may no longer declare `subject: log`.')).toMatchObject({ allow: true, reason: 'clear' });
     expect(await gate('removed the ci pack')).toMatchObject({ allow: false, reason: 'breaks: Contributing: Commits use conventional format.' });
