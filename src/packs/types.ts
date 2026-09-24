@@ -127,6 +127,8 @@ export type Subject = {
   cuts?: Cut[];
   // a judge failure while the subject was built: the run asks nothing more and the report carries it
   judgeError?: string;
-  // work the subject needs outlasted its wait and keeps running, so the same call made again can answer
+  // work the subject needs outlasted its wait and keeps running, so a later call can answer
   pending?: string;
+  // with pending: settles once that work has finished, to why it failed or undefined when it did not
+  settled?: Promise<string | undefined>;
 };

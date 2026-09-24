@@ -56,6 +56,8 @@ export type Discovery = {
   error?: string;
   // the discovery outlasted the wait and keeps running, for the next call on the scope to join or read from the cache
   pending?: string;
+  // with pending: the running discovery, for a caller that goes on once it lands
+  settled?: Promise<Discovery>;
 };
 
 // what the store holds per scope; bump when the shape, the key, the questions or the keep policy change
@@ -244,15 +246,32 @@ export type DiscoveriesHost = {
 };
 
 // the discoveries in flight, one per scope and rules config. a call waits for its own up to the wait; one that outlasts
-// it answers pending while the discovery runs on, so the next call joins it or reads what it cached, and no single call
-// carries a whole cold discovery
+// it answers pending with the running discovery, which runs on and caches what it finds, so no single call carries a
+// whole cold discovery and a caller that must have the rules goes on once it lands
 export class Discoveries {
   private readonly running = new Map<string, Promise<Discovery>>();
 
   constructor(private readonly host: DiscoveriesHost) {}
 
   async discover(source: RuleSource, config: RepoConfig['rules']): Promise<Discovery> {
-    const { judge, store, now, log, schedule, waitMs } = this.host;
+    const { schedule, waitMs } = this.host;
+    const task = this.settle(source, config);
+    let timer: { cancel: () => void } | undefined;
+    const late = new Promise<Discovery>((resolve) => {
+      timer = schedule(waitMs, () =>
+        resolve({ docs: [], rules: [], candidates: 0, kept: [], cached: false, pending: `rule discovery for ${source.scope} outlasted its ${waitMs / 1000} s wait and keeps running; the next call on it reuses what it finds`, settled: task }),
+      );
+    });
+    try {
+      return await Promise.race([task, late]);
+    } finally {
+      timer?.cancel();
+    }
+  }
+
+  // the scope's discovery with no wait: the one in flight joined, else one started
+  settle(source: RuleSource, config: RepoConfig['rules']): Promise<Discovery> {
+    const { judge, store, now, log } = this.host;
     const key = JSON.stringify([source.scope, config.docs, config.exclude]);
     let task = this.running.get(key);
     if (!task) {
@@ -261,17 +280,7 @@ export class Discoveries {
       // a throw still reaches every call waiting on it; one no call waits for any more is not an unhandled rejection
       task.catch(() => {});
     }
-    let timer: { cancel: () => void } | undefined;
-    const late = new Promise<Discovery>((resolve) => {
-      timer = schedule(waitMs, () =>
-        resolve({ docs: [], rules: [], candidates: 0, kept: [], cached: false, pending: `rule discovery for ${source.scope} outlasted its ${waitMs / 1000} s wait and keeps running; the next call on it reuses what it finds` }),
-      );
-    });
-    try {
-      return await Promise.race([task, late]);
-    } finally {
-      timer?.cancel();
-    }
+    return task;
   }
 }
 

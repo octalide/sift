@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG } from '../src/repo/config.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { GitHubForge, GH_WRITES } from '../src/forge/github.ts';
-import { enact, gateOutbound, outboundOf, verdictOf } from '../src/gate/outbound.ts';
+import { enact, gateOutbound, outboundOf, settleDecision, verdictLater, verdictOf } from '../src/gate/outbound.ts';
 import { channelTable, commandBody, defaultChannels, textAbout, type Channel } from '../src/gate/channels.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
@@ -256,10 +256,27 @@ describe('outbound gate', () => {
     expect(await gateOutbound({ channel: 'github', text: 'a — b' }, [subject], pack, back, DEFAULT_CONFIG, kept)).toMatchObject({ allow: false, reason: 'breaks: No em dashes.' });
   });
 
-  it('denies while rule discovery is still running, where a judge failure would pass, so the same call made again is judged', async () => {
+  it('denies while rule discovery is still running, where a judge failure would pass, and settles once it lands', async () => {
     const reason = 'rule discovery for o/r outlasted its 5 s wait and keeps running; the next call on it reuses what it finds';
-    const waiting: Subject = { ...subject, judgeError: reason, pending: reason };
-    expect(await gateOutbound({ channel: 'github', text: 'ok' }, [waiting], pack, judge([]), DEFAULT_CONFIG, verdicts())).toMatchObject({ allow: false, reason, pending: true });
+    const waiting: Subject = { ...subject, judgeError: reason, pending: reason, settled: Promise.resolve(undefined) };
+    const d = await gateOutbound({ channel: 'github', text: 'ok' }, [waiting], pack, judge([]), DEFAULT_CONFIG, verdicts());
+    expect(d).toMatchObject({ allow: false, reason });
+    expect(await d.pending).toBeUndefined();
+    const clear = { allow: true, reason: 'clear', warnings: [] };
+    let asked = 0;
+    // a discovery that lands again pending, its documents changed meanwhile, is waited out too
+    const again = async () => (++asked === 1 ? { ...d } : clear);
+    expect(await settleDecision(d, again)).toEqual(clear);
+    expect(asked).toBe(2);
+    const failed = { ...d, pending: Promise.resolve('rule discovery: unavailable: down') };
+    expect(await settleDecision(failed, again)).toEqual({ allow: false, reason: 'the text was not judged: rule discovery: unavailable: down', warnings: [] });
+    expect(await settleDecision(clear, again)).toBe(clear);
+    // the verdict a refused call would meet follows under its mode's action, and a failure says the text was not judged
+    const out = { channel: 'discord-message', text: 'a — b' };
+    expect(await verdictLater('enforce', out, d, async () => ({ allow: false, reason: 'breaks: No em dashes.', warnings: [] }), 'head')).toEqual({ decision: { allow: false, reason: 'breaks: No em dashes.', warnings: [] }, action: 'deny', text: 'head: sift outbound (discord-message), note: this may break No em dashes.' });
+    expect(await verdictLater('advise', out, failed, again, 'head')).toMatchObject({ action: 'advise', text: 'head: sift outbound (discord-message), note: the text was not judged: rule discovery: unavailable: down' });
+    // one that never stops being pending is refused unjudged rather than waited on for ever
+    expect(await settleDecision(d, async () => ({ ...d }))).toEqual({ allow: false, reason: `the text was not judged: ${reason}`, warnings: [] });
   });
 });
 
@@ -270,7 +287,9 @@ describe('outbound mode', () => {
   it('advises on a broken rule and never refuses, enforces unless overridden', () => {
     expect(enact('advise', broken, false)).toEqual({ action: 'advise', refuse: false, advise: true });
     expect(enact('advise', clear, false)).toEqual({ action: 'allow', refuse: false, advise: true });
-    expect(enact('advise', { ...broken, pending: true }, false)).toMatchObject({ refuse: false });
+    expect(enact('advise', { ...broken, pending: Promise.resolve(undefined) }, false)).toEqual({ action: 'pending', refuse: false, advise: true });
+    expect(enact('enforce', { ...broken, pending: Promise.resolve(undefined) }, false)).toEqual({ action: 'pending', refuse: true, advise: false });
+    expect(enact('enforce', { ...broken, pending: Promise.resolve(undefined) }, true)).toEqual({ action: 'would-deny', refuse: false, advise: false });
     expect(enact('enforce', broken, false)).toEqual({ action: 'deny', refuse: true, advise: false });
     expect(enact('enforce', broken, false, 'the release PR CONTRIBUTING requires')).toEqual({ action: 'override', refuse: false, advise: false });
     expect(enact('enforce', clear, false, 'unneeded')).toEqual({ action: 'allow', refuse: false, advise: false });
