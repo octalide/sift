@@ -10,21 +10,24 @@ import { excerptOf } from '../locate/tree.ts';
 import type { StoreLike } from '../log.ts';
 import { pool } from '../pool.ts';
 import { truncate } from '../tokens.ts';
+import { TEXT_KIND_NAMES, TEXT_KINDS, type TextKind } from './kinds.ts';
 import { ruleParagraphs } from './paragraphs.ts';
 
 // what a rule governs, asked once at discovery. text: whether anything a contribution's text says can follow or break
-// it, false for a rule about labels, milestones, assignees or other metadata set beside the text
-export type RuleScope = { text: boolean };
+// it, false for a rule about labels, milestones, assignees or other metadata set beside the text. kinds: the kinds of
+// text it is written for, every kind for a rule on all of them (a style or language rule)
+export type RuleScope = { text: boolean; kinds: TextKind[] };
 
 export type Rule = { source: string; text: string; scope: RuleScope };
 
 // what a subject the rules read carries: metadata when it is an artifact read with its labels and milestone, not when
-// it is text about to be written, which sets none
-export type RuleTarget = { metadata: boolean };
+// it is text about to be written, which sets none. kind is what the text is, unset for free text of no known kind
+export type RuleTarget = { metadata: boolean; kind?: TextKind };
 
-// whether a rule governs a subject: the one place a rule's scope is matched to what the subject carries
+// whether a rule governs a subject: the one place a rule's scope is matched to what the subject carries and what it is
 export function governs(rule: Rule, target: RuleTarget): boolean {
-  return rule.scope.text || target.metadata;
+  if (!rule.scope.text && !target.metadata) return false;
+  return target.kind === undefined || rule.scope.kinds.includes(target.kind);
 }
 
 // a file a source lists: its path, and when the source has one, an id that changes whenever the content does
@@ -59,7 +62,7 @@ export type Discovery = {
 };
 
 // what the store holds per scope; bump when the shape, the key, the questions or the keep policy change
-const VERSION = 6;
+const VERSION = 7;
 type Cached = { version: number; key: string; docs: string[]; rules: Rule[]; candidates: number; kept: string[] };
 
 export const PROSE = new Set(['md', 'mdx', 'markdown', 'txt', 'rst', 'org']);
@@ -102,7 +105,25 @@ export const PARAGRAPH_QUESTION: Questions = {
       false: 'The paragraph asks only for metadata set beside the text: labels, milestones, assignees, reviewers, projects or other sidebar fields. Nothing the text says can follow or break it.',
     },
   },
+  // the kinds of text it governs: a versioning or branching convention does not judge a chat announcement
+  ...Object.fromEntries(
+    TEXT_KIND_NAMES.map((kind) => [
+      kindQuestion(kind),
+      {
+        type: 'noul' as const,
+        instructions: `Read as part of the document in the state, this paragraph governs ${TEXT_KINDS[kind]}: {text}`,
+        criteria: {
+          true: 'The paragraph is written for this kind of text, or for every text a contributor writes (a style, tone or language rule), so one of this kind can follow or break it.',
+          false: 'The paragraph is written for other kinds of text or work only, such as how a release is numbered, which branch a pull request targets or how a commit is formed, so nothing a text of this kind says can follow or break it.',
+        },
+      },
+    ]),
+  ),
 };
+
+function kindQuestion(kind: TextKind): string {
+  return `kind_${kind}`;
+}
 
 // a candidate is prose at the root, or prose under docs/ or .github/ at any depth
 export function candidate(path: string): boolean {
@@ -174,7 +195,8 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
     if (text !== undefined) explicit.push({ path: doc, text });
   }
   const versions = present.map((f) => [f.path, f.id !== undefined ? `id:${f.id}` : digest(texts.get(f.path)!)]);
-  const key = digest(JSON.stringify({ v: VERSION, explicit: explicit.map((d) => [d.path, digest(d.text)]), files: versions, exclude: config.exclude }));
+  // the questions are in the key, so a new kind of text, or a reworded question, asks again
+  const key = digest(JSON.stringify({ v: VERSION, questions: [DOC_QUESTION, PARAGRAPH_QUESTION], explicit: explicit.map((d) => [d.path, digest(d.text)]), files: versions, exclude: config.exclude }));
   const keys = rulesKeys(source.scope);
   const cached = (await store.get(keys.cache)) as Cached | undefined;
   if (cached && cached.version === VERSION && cached.key === key) {
@@ -212,13 +234,13 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
   for (const { doc, paragraphs, ranked } of ranks) {
     if (!ranked) continue;
     if (!ranked.ok) return failed(kept, failureText(ranked));
-    const unanswered = ranked.items.filter((r) => r.answers['rule'] === undefined || r.answers['text'] === undefined);
+    const unanswered = ranked.items.filter((r) => Object.keys(PARAGRAPH_QUESTION).some((q) => r.answers[q] === undefined));
     if (unanswered.length > 0) return failed(kept, `malformed: no answer for ${unanswered.length} of ${paragraphs.length} paragraphs in ${doc.path}`);
-    // a rule governs text unless the judge rules text out: an unclear one is still judged against it
+    // a rule governs text, and a kind of text, unless the judge rules it out: an unclear one is still judged against it
     for (const r of ranked.items) {
       if (bandOf(r.answers['rule']!, DEFAULT_THRESHOLDS) !== 'satisfied') continue;
-      const text = bandOf(r.answers['text']!, DEFAULT_THRESHOLDS) !== 'violated';
-      rules.push({ source: doc.path, text: paragraphs[r.index]!, scope: { text } });
+      const holds = (q: string) => bandOf(r.answers[q]!, DEFAULT_THRESHOLDS) !== 'violated';
+      rules.push({ source: doc.path, text: paragraphs[r.index]!, scope: { text: holds('text'), kinds: TEXT_KIND_NAMES.filter((k) => holds(kindQuestion(k))) } });
     }
   }
   const docs = kept.map((d) => d.path).filter((p) => rules.some((r) => r.source === p));

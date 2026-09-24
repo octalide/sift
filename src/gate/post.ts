@@ -6,7 +6,7 @@ import { textRulesSubjects } from '../repo/subjects.ts';
 import { forgeSource, type Discoveries } from '../rules/discover.ts';
 import { simpleCommands } from '../shell.ts';
 import { channelTable, defaultChannels, POST_TOOL, postKind, textAbout } from './channels.ts';
-import { enact, gateOutbound, outboundOf, verdictOf, type Outbound, type OutboundDecision, type OutboundMode } from './outbound.ts';
+import { enact, gateOutbound, outboundOf, outboundTarget, verdictOf, type Outbound, type OutboundDecision, type OutboundMode } from './outbound.ts';
 import type { Verdicts } from './verdicts.ts';
 
 export const VERDICTS: ReviewVerdict[] = ['approve', 'request-changes', 'comment'];
@@ -105,7 +105,7 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
   const config = await host.config(repo);
   const outbound = await outboundOf(POST_TOOL, input as Record<string, unknown>, noFile, channelTable(defaultChannels(host.forge), config.outbound.channels));
   if (!outbound || !pack) return { outbound, url: await host.forge.post(repo, post) };
-  const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, config);
+  const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), discoveries: host.discoveries }, outboundTarget(outbound), config);
   const decision = await gateOutbound(outbound, subjects, pack, host.judge, config, host.verdicts);
   const { action, refuse, advise } = enact(mode, decision, shadow, override);
   if (refuse) return { outbound, decision, action, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };

@@ -36,6 +36,9 @@ describe('outbound channels in config', () => {
     const read = (layer: unknown) => () => readConfig(JSON.stringify(layer), 'c.json');
     expect(read({ outbound: { channels: [{ ...slack, tool: '(' }] } })).toThrow(/^sift config c\.json: outbound\.channels\[slack\]\.tool is not a valid regex/);
     expect(read({ outbound: { channels: [{ name: 'glab', tool: '^Bash$', text: { command: '[', body: ['-m'] } }] } })).toThrow(/^sift config c\.json: outbound\.channels\[glab\]\.text\.command is not a valid regex/);
+    // the kind of text a channel carries decides the rules that govern it, so an unknown one is refused at load
+    expect(read({ outbound: { channels: [{ ...slack, textKind: 'message' }] } })()).toMatchObject({ outbound: { channels: [{ textKind: 'message' }] } });
+    expect(read({ outbound: { channels: [{ ...slack, textKind: 'chat' }] } })).toThrow('sift config c.json: outbound.channels[slack].textKind is "chat", not one of issue, pr, comment, commit, release, message');
   });
 });
 

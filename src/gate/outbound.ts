@@ -4,14 +4,17 @@ import { runParts } from '../packs/run.ts';
 import type { Pack, Report, Subject } from '../packs/types.ts';
 import type { Checkout } from '../repo/checkout.ts';
 import type { RepoConfig } from '../repo/config.ts';
-import { textRulesSubjects } from '../repo/subjects.ts';
-import type { RuleSource } from '../rules/discover.ts';
-import { channelTable, defaultChannels, textOf, type Channel } from './channels.ts';
+import { textRulesSubjects, type TextTarget } from '../repo/subjects.ts';
+import type { Rule, RuleSource } from '../rules/discover.ts';
+import type { TextKind } from '../rules/kinds.ts';
+import { breachText, confirmBreaches } from './breaches.ts';
+import { channelTable, defaultChannels, settingsOf, textOf, type Channel } from './channels.ts';
 import { verdictKey, type Verdicts } from './verdicts.ts';
 
-// text a tool call is about to send somewhere people read, the hard limit of that channel, and what the text is;
+// text a tool call is about to send somewhere people read, the hard limit of that channel, what the text is in prose
+// and as the kind of text rules govern, and what the write sets beside it (a pull request's base, head and draft);
 // denied names the reason the text could not be obtained at all, which the gate refuses without a judge call
-export type Outbound = { channel: string; text: string; limit?: number; kind?: string; denied?: string };
+export type Outbound = { channel: string; text: string; limit?: number; kind?: string; textKind?: TextKind; sets?: Record<string, string | boolean>; denied?: string };
 
 export type ReadText = (path: string) => Promise<string>;
 
@@ -20,7 +23,8 @@ export async function outboundOf(tool: string, input: Record<string, unknown>, r
   for (const c of through) {
     const got = textOf(c, tool, input);
     if (got === undefined) continue;
-    const base = { channel: c.name, limit: c.limit, kind: c.kind };
+    const sets = settingsOf(c, input);
+    const base = { channel: c.name, limit: c.limit, kind: c.kind, ...(c.textKind ? { textKind: c.textKind } : {}), ...(sets ? { sets } : {}) };
     if ('text' in got) return { ...base, text: got.text };
     if (got.file === '-') return { ...base, text: '', denied: 'the body is read from stdin (--body-file -) with no heredoc in the command, so it cannot be judged; pass --body, a file path or a heredoc' };
     try {
@@ -36,9 +40,10 @@ export async function outboundOf(tool: string, input: Record<string, unknown>, r
 // pending: the text could not be judged yet and the same call made again can be
 export type OutboundDecision = { allow: boolean; reason: string; report?: Report; warnings: string[]; pending?: boolean };
 
-// the channel's length limit is mechanical; the rules are judged on every part of the text, a violated rule in any part
-// denies, an unclear one warns, each named by the parts it was found in when the text was judged in parts. a verdict
-// judged in full is kept, and the same text under the same rules meets it again without a judge call
+// the channel's length limit is mechanical; the rules are judged on every part of the text, an unclear rule warns, and
+// a rule violated in any part is asked again beside the rest of its document before it denies, the refusal quoting the
+// lines that break it. each is named by the parts it was found in when the text was judged in parts. a verdict judged
+// in full is kept, and the same text under the same rules meets it again without a judge call
 export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pack, judge: Judge, config: RepoConfig, verdicts: Verdicts): Promise<OutboundDecision> {
   if (out.denied !== undefined) return { allow: false, reason: out.denied, warnings: [] };
   if (out.limit !== undefined && out.text.length > out.limit) {
@@ -52,19 +57,21 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   if (kept) return kept;
   const report = await runParts(pack, subjects, judge, config);
   if (report.judgeError) return { allow: true, reason: `judge unavailable (${report.judgeError})`, report, warnings: [] };
-  // a rule is asked in the opening and again in each later part, under another question; it is named once, with every part it was found in
-  const found = (band: 'violated' | 'unclear') => {
-    const byRule = new Map<string, string[]>();
-    for (const j of [...report.judged, ...report.ranked.flatMap((s) => s.items.flatMap((item) => item.asked))]) {
-      if (j.band !== band || j.severity === 'info') continue;
-      const rule = ruleOf(j.instructions);
-      byRule.set(rule, [...(byRule.get(rule) ?? []), ...(j.parts ?? [])]);
-    }
-    return [...byRule].map(([rule, at]) => (at.length > 0 ? `${rule} (in ${at.join(', ')})` : rule));
-  };
-  const violated = found('violated');
-  const warnings = found('unclear').map((w) => `unclear: ${w}`);
-  const verdict = violated.length > 0 ? { allow: false, reason: `breaks: ${violated.join(' | ')}` } : { allow: true, reason: 'clear' };
+  const confirmed = await confirmBreaches(report, subjects, judge);
+  if (!confirmed.ok) return { allow: true, reason: `judge unavailable (${confirmed.error})`, report, warnings: [] };
+  // a rule is asked in the opening and again in each later part, under another question; it is named once, with every
+  // part it was found in, and a rule that breaks the text is not also a warning
+  const rules = (subjects[0]?.facts['rules'] as Rule[] | undefined) ?? [];
+  const byRule = new Map<string, string[]>();
+  for (const item of report.ranked[0]?.items ?? []) {
+    const rule = rules[item.index]?.text;
+    if (rule === undefined) continue;
+    for (const j of item.asked) if (j.band === 'unclear' && j.severity !== 'info') byRule.set(rule, [...(byRule.get(rule) ?? []), ...(j.parts ?? [])]);
+  }
+  for (const u of confirmed.unclear) byRule.set(u.rule.text, [...(byRule.get(u.rule.text) ?? []), ...u.parts]);
+  for (const b of confirmed.breaches) byRule.delete(b.rule.text);
+  const warnings = [...byRule].map(([rule, at]) => `unclear: ${at.length > 0 ? `${rule} (in ${[...new Set(at)].join(', ')})` : rule}`);
+  const verdict = confirmed.breaches.length > 0 ? { allow: false, reason: `breaks: ${confirmed.breaches.map(breachText).join(' | ')}` } : { allow: true, reason: 'clear' };
   await verdicts.set(key, { ...verdict, warnings });
   return { ...verdict, report, warnings };
 }
@@ -89,11 +96,6 @@ export function verdictOf(out: Outbound, decision: OutboundDecision): string {
   return [head, ...decision.warnings].join('; ');
 }
 
-// the rule a rules question quotes, after the subject it names and what it asks of it
-function ruleOf(instructions: string): string {
-  return instructions.replace(/^.*? (?:complies with|does not break) this rule: /s, '');
-}
-
 export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'discoveries'> & { verdicts: Verdicts };
 
 export type Gated = { outbound: Outbound; decision: OutboundDecision };
@@ -109,8 +111,13 @@ export async function gateCall(host: GateHost, checkout: Checkout, tool: string,
 export async function gateText(host: GateHost, checkout: Checkout, outbound: Outbound): Promise<Gated | undefined> {
   const pack = checkout.packs['rules'];
   if (!pack) return undefined;
-  const subjects = await textRulesSubjects({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, checkout.config);
+  const subjects = await textRulesSubjects({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), discoveries: host.discoveries }, outboundTarget(outbound), checkout.config);
   return { outbound, decision: await gateOutbound(outbound, subjects, pack, host.judge, checkout.config, host.verdicts) };
+}
+
+// what the rules read of outbound text: the text, what it is and what the write sets beside it
+export function outboundTarget(out: Outbound): TextTarget {
+  return { text: out.text, ...(out.kind ? { about: out.kind } : {}), ...(out.textKind ? { kind: out.textKind } : {}), ...(out.sets ? { sets: out.sets } : {}) };
 }
 
 // a directory in no repository has no rule documents of its own; entries the config names in another repository still read from the forge

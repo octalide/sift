@@ -11,6 +11,7 @@ import { driftOf, lineDiff } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
 import { governs, type Discoveries, type Discovery, type Rule, type RuleSource, type RuleTarget } from '../rules/discover.ts';
+import type { TextKind } from '../rules/kinds.ts';
 import { partName, partsOf } from './parts.ts';
 
 
@@ -376,7 +377,7 @@ export async function rulesSubjects(host: RulesHost, target: RulesTarget, config
   const { forge, repo } = host;
   const ref = `#${target.number}`;
   // an issue carries its labels and milestone, so a rule about them is judged against it
-  const carries: RuleTarget = { metadata: true };
+  const carries: RuleTarget = { metadata: true, kind: 'issue' };
   if (!forge || !repo) return [rulesOf(await rulesFound(host, config, carries), `issue:${ref}`, { kind: 'issue', ref }, 'The subject', {})];
   const { issue, thread, state } = await readIssue(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' });
   const frame: Frame = {
@@ -394,16 +395,21 @@ export async function rulesSubjects(host: RulesHost, target: RulesTarget, config
   return partSubjects(await rulesFound(host, config, carries), `issue:${ref}`, frame, `issue ${ref}`);
 }
 
-// text about to be written, as the rules read it: it sets no labels or milestone, so a rule about them is not judged
-export async function textRulesSubjects(host: RulesHost, target: { text: string; about?: string }, config: RepoConfig): Promise<Subject[]> {
-  const { text, about } = target;
-  const context = { kind: 'text', ...(about ? { about } : {}) };
+// text about to be written: the text, what it is in prose, the kind of text the rules that govern it are written for
+// (every rule when unset), and what the write sets beside the text, such as a pull request's base, head and draft
+export type TextTarget = { text: string; about?: string; kind?: TextKind; sets?: Record<string, string | boolean> };
+
+// text about to be written, as the rules read it: it sets no labels or milestone, so a rule about them is not judged,
+// and only the rules written for its kind of text are. what the write sets is read beside the text and its opening
+export async function textRulesSubjects(host: RulesHost, target: TextTarget, config: RepoConfig): Promise<Subject[]> {
+  const { text, about, kind, sets } = target;
+  const context = { kind: 'text', ...(about ? { about } : {}), ...(sets && Object.keys(sets).length > 0 ? { sets } : {}) };
   const frame: Frame = {
     text,
     whole: { texts: [{ name: 'the text', text, tier: 0 }], build: ([whole]) => ({ ...context, text: whole! }) },
     opening: { texts: [], build: (part, note) => ({ ...context, note, text: part }) },
   };
-  return partSubjects(await rulesFound(host, config, { metadata: false }), `text:${truncate(text, 40)}`, frame, about);
+  return partSubjects(await rulesFound(host, config, { metadata: false, ...(kind ? { kind } : {}) }), `text:${truncate(text, 40)}`, frame, about);
 }
 
 // a subject the rules read: the texts of its whole state, and the text split into parts when that state does not fit,
