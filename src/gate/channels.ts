@@ -1,14 +1,19 @@
 import type { Forge, ForgeArtifact, ForgeWrite } from '../forge/forge.ts';
+import type { TextKind } from '../rules/kinds.ts';
 import { shellWord } from '../shell.ts';
 
+// what a write sets beside its text, by the input field: a value, or a flag that is false when absent
+export type Settings = Record<string, 'value' | 'flag'>;
+
 // where the text is in a call: fields of the tool input, joined in order, on a call whose input holds every value
-// when names; or for a shell command, the command pattern, the flags carrying the text inline (a quoted word, or a
-// $(cat <<'EOF' ... EOF) heredoc) and the flags naming a file it is read from
-export type TextSource = { fields: string[]; when?: Record<string, string> } | { command: string; body: string[]; file?: string[] };
+// when names, and the fields it sets beside the text; or for a shell command, the command pattern, the flags carrying
+// the text inline (a quoted word, or a $(cat <<'EOF' ... EOF) heredoc) and the flags naming a file it is read from
+export type TextSource = { fields: string[]; when?: Record<string, string>; sets?: Settings } | { command: string; body: string[]; file?: string[] };
 
 // one place text leaves the session: a name config replaces it by, a regex over the tool name, where the
-// text is, the channel's hard length limit, and what the text is in the words a rules question names it by
-export type Channel = { name: string; tool: string; text: TextSource; limit?: number; kind?: string };
+// text is, the channel's hard length limit, what the text is in the words a rules question names it by, and the kind
+// of text it is, which decides the rules that govern it (every rule when unset)
+export type Channel = { name: string; tool: string; text: TextSource; limit?: number; kind?: string; textKind?: TextKind };
 
 // what a call carries: the text itself, or the file it will be read from
 export type Body = { text: string } | { file: string };
@@ -16,10 +21,10 @@ export type Body = { text: string } | { file: string };
 const DISCORD_LIMIT = 2000;
 
 export const DISCORD_CHANNELS: Channel[] = [
-  { name: 'discord-message', tool: '^mcp__discord__(send_message|edit_message|send_webhook_message)$', text: { fields: ['content'] }, limit: DISCORD_LIMIT, kind: 'a Discord message' },
-  { name: 'discord-dm', tool: '^mcp__discord__send_dm$', text: { fields: ['content', 'message'] }, limit: DISCORD_LIMIT, kind: 'a Discord direct message' },
-  { name: 'discord-forum-post', tool: '^mcp__discord__create_forum_post$', text: { fields: ['content', 'message'] }, limit: DISCORD_LIMIT, kind: 'a Discord forum post' },
-  { name: 'discord-embed', tool: '^mcp__discord__(send_embed|send_dm_embed)$', text: { fields: ['description', 'title'] }, limit: DISCORD_LIMIT, kind: 'a Discord embed' },
+  { name: 'discord-message', tool: '^mcp__discord__(send_message|edit_message|send_webhook_message)$', text: { fields: ['content'] }, limit: DISCORD_LIMIT, kind: 'a Discord message', textKind: 'message' },
+  { name: 'discord-dm', tool: '^mcp__discord__send_dm$', text: { fields: ['content', 'message'] }, limit: DISCORD_LIMIT, kind: 'a Discord direct message', textKind: 'message' },
+  { name: 'discord-forum-post', tool: '^mcp__discord__create_forum_post$', text: { fields: ['content', 'message'] }, limit: DISCORD_LIMIT, kind: 'a Discord forum post', textKind: 'message' },
+  { name: 'discord-embed', tool: '^mcp__discord__(send_embed|send_dm_embed)$', text: { fields: ['description', 'title'] }, limit: DISCORD_LIMIT, kind: 'a Discord embed', textKind: 'message' },
 ];
 
 // how an artifact is named when no forge is bound to name it
@@ -36,6 +41,22 @@ export function textAbout(artifact: ForgeWrite, nouns: Record<ForgeArtifact, str
   return `the title and ${body} of a new ${noun}`;
 }
 
+// the kind of text a write makes: a comment or review is a comment, a merge makes a commit
+export function textKindOf(write: ForgeWrite): TextKind {
+  if (write.action === 'comment' || write.action === 'review') return 'comment';
+  if (write.action === 'merge') return 'commit';
+  return write.kind;
+}
+
+// what each post sets beside its text, by its kind, as the post tool names the fields
+const POST_SETTINGS: Record<string, Settings> = {
+  'pr-create': { base: 'value', head: 'value', draft: 'flag' },
+  'pr-review': { verdict: 'value' },
+  'pr-merge': { method: 'value' },
+  'release-create': { tag: 'value', target: 'value', draft: 'flag', prerelease: 'flag' },
+  'release-edit': { tag: 'value' },
+};
+
 export const POST_TOOL = 'mcp__sift__post';
 
 // the post tool's kind for a write: pr-comment
@@ -44,14 +65,17 @@ export const postKind = (w: ForgeWrite): string => `${w.kind}-${w.action}`;
 // one channel per write the post tool makes, named forge-artifact-action
 export function postChannels(forge: Forge): Channel[] {
   const prefix = forge.name.toLowerCase();
-  return forge.writes.map((w) => ({ name: `${prefix}-${postKind(w)}`, tool: `^${POST_TOOL}$`, text: { fields: ['title', 'body'], when: { kind: postKind(w) } }, kind: textAbout(w, forge.nouns) }));
+  return forge.writes.map((w) => {
+    const sets = POST_SETTINGS[postKind(w)];
+    return { name: `${prefix}-${postKind(w)}`, tool: `^${POST_TOOL}$`, text: { fields: ['title', 'body'], when: { kind: postKind(w) }, ...(sets ? { sets } : {}) }, kind: textAbout(w, forge.nouns), textKind: textKindOf(w) };
+  });
 }
 
 // one channel per write the forge's cli makes from the shell, named forge-shell-artifact-action. not in the default
 // table: a shell write is refused toward post, and judged on these only for a loop that has no post to make it with
 export function shellChannels(forge: Forge): Channel[] {
   const prefix = forge.name.toLowerCase();
-  return forge.writes.map((w) => ({ name: `${prefix}-shell-${postKind(w)}`, tool: '^Bash$', text: forge.cliText(w), kind: textAbout(w, forge.nouns) }));
+  return forge.writes.map((w) => ({ name: `${prefix}-shell-${postKind(w)}`, tool: '^Bash$', text: forge.cliText(w), kind: textAbout(w, forge.nouns), textKind: textKindOf(w) }));
 }
 
 export function defaultChannels(forge?: Forge): Channel[] {
@@ -93,6 +117,18 @@ export function commandBody(command: string, source: Extract<TextSource, { comma
   if (file !== '-') return { file };
   const stdin = STDIN_HEREDOC.exec(command);
   return stdin ? { text: stdin[2]! } : { file };
+}
+
+// what a call on the channel sets beside its text, undefined when the channel names nothing it sets
+export function settingsOf(channel: Channel, input: Record<string, unknown>): Record<string, string | boolean> | undefined {
+  if (!('fields' in channel.text) || !channel.text.sets) return undefined;
+  const out: Record<string, string | boolean> = {};
+  for (const [field, how] of Object.entries(channel.text.sets)) {
+    const v = input[field];
+    if (how === 'flag') out[field] = v === true;
+    else if (typeof v === 'string' && v.length > 0) out[field] = v;
+  }
+  return out;
 }
 
 // the text a call sends through the channel, undefined when the call is not on it or carries none

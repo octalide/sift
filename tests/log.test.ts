@@ -40,4 +40,11 @@ describe('decision log', () => {
     await log.clear();
     expect((await log.stats()).session).toEqual({ calls: 0, failures: 0, cost: { requestTokens: 0, responseTokens: 0, tokensRemoved: 0 } });
   });
+
+  it('counts each module\'s decisions by action', async () => {
+    const store = new Map<string, unknown>();
+    const log = new DecisionLog({ get: async (k) => store.get(k), set: async (k, v) => void store.set(k, v) }, 'now');
+    for (const action of ['allow', 'advise', 'advise', 'deny', 'override']) log.push(decision({ module: 'outbound', action }));
+    expect((await log.stats()).byModule['outbound']?.actions).toEqual({ allow: 1, advise: 2, deny: 1, override: 1 });
+  });
 });

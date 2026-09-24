@@ -1,11 +1,13 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
 import { POST_TOOL, postKind } from '../src/gate/channels.ts';
-import { gateCall } from '../src/gate/outbound.ts';
-import { METHODS, postCall, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
+import { enact, gateCall, gateText, OUTBOUND_MODES, verdictLater, verdictOf, type Gated, type Later, type OutboundMode } from '../src/gate/outbound.ts';
+import { HeldPosts } from '../src/gate/held.ts';
+import { METHODS, pendingNote, postCall, postLabel, postOf, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
 import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
+import { Verdicts } from '../src/gate/verdicts.ts';
 import { ghWriteOf, GitHubForge } from '../src/forge/github.ts';
-import { grade, scopeOf, type GradeHost, type GradeOptions } from '../src/grade.ts';
+import { grade, ruleSource, scopeOf, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
 import { configLayers, globalConfigPath, readConfig } from '../src/repo/config.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
@@ -17,10 +19,10 @@ import type { Report } from '../src/packs/types.ts';
 import { pruneCall } from '../src/prune/call.ts';
 import { PRUNE_TOOL, PruneLoops } from '../src/prune/loops.ts';
 import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
-import { Discoveries, DISCOVERY_WAIT_MS } from '../src/rules/discover.ts';
+import { Discoveries, DISCOVERY_WAIT_MS, forgeSource } from '../src/rules/discover.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, commandInputOf, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
-import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
+import { GRACE_MS, Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
 import { SEEN_EVERY_MS, sessionKeys, StoreKeys } from '../src/keys.ts';
 import { Spawns } from '../src/spawns.ts';
 import { Tenure, tenureToken } from '../src/tenure.ts';
@@ -50,7 +52,7 @@ type Options = {
   watchDeferMaxAgeHours: number;
   watchStallHours: number;
   grade: boolean;
-  gateOutbound: boolean;
+  outbound: OutboundMode;
   classify: boolean;
   // conventions under every repo's .sift/config.json: a path or inline json, replacing the global file
   config: string;
@@ -79,7 +81,7 @@ const DEFAULTS: Options = {
   watchDeferMaxAgeHours: 24,
   watchStallHours: 1,
   grade: true,
-  gateOutbound: false,
+  outbound: 'advise',
   classify: false,
   config: '',
 };
@@ -94,6 +96,7 @@ export function resolveOptions(raw: PluginOptions): Options {
     else if (typeof fallback === 'string' && typeof v === 'string') out[key] = v;
   }
   if (typeof raw['apiKey'] === 'string' && raw['apiKey'].length > 0) out['apiKey'] = raw['apiKey'];
+  if (!(OUTBOUND_MODES as readonly unknown[]).includes(out['outbound'])) out['outbound'] = DEFAULTS.outbound;
   return out as Options;
 }
 
@@ -106,13 +109,17 @@ type Runtime = GradeHost & {
   session: () => Promise<Checkout>;
   // the session's watch subscriptions and their pollers; absent without the triage pack
   watches?: Watches;
-  // the channels a delivery reaches its recipient by; with the watches
-  mailbox?: Mailbox;
+  // the channels a delivery reaches its recipient by: the watch's, and what follows an outbound call once its rules are known
+  mailbox: Mailbox;
+  // the posts held while their rules are found, kept so a reload hands them on
+  held: HeldPosts;
   sessionId: string;
   // the lifetime of the session's watch keys and every rules cache
   storeKeys: StoreKeys;
   // whether this environment still owns the session's background work, or a reload replaced it
   tenure: Tenure;
+  // the outbound gate's kept verdicts, every session's
+  verdicts: Verdicts;
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -132,7 +139,12 @@ async function globalConfig($: EngineInterface, path: string | undefined): Promi
 }
 
 async function apiKeyOf($: EngineInterface, options: Options): Promise<ApiKey | undefined> {
-  return resolveApiKey({ option: options.apiKey, env: () => $.env.get('TYPESAFE_API_KEY'), settings: () => $.settings.read() });
+  return resolveApiKey({
+    option: options.apiKey,
+    env: () => $.env.get('TYPESAFE_API_KEY'),
+    settings: () => $.settings.read(),
+    configDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
+  });
 }
 
 const WATCH_ACTIONS = ['status', 'list', 'start', 'subscribe', 'unsubscribe', 'poll', 'pause', 'resume', 'reset', 'deferred'] as const;
@@ -156,6 +168,23 @@ export const register: Register = (on, rawOptions) => {
       ...extra,
     });
   };
+
+  // what an outbound call whose rules were still being found came to once they are known: recorded, and told to the
+  // caller that made it through the mailbox. an instance a reload replaced only logs it, since its deliveries stand down,
+  // and a held post it handed over is told by the environment that took it
+  const follow = (log: (text: string) => void, agentId: string | undefined, later: Promise<Later>, digest: string) =>
+    void later.then(async (l) => {
+      record('outbound', l.action, { digest: `${digest}: ${l.decision?.reason ?? l.text}` });
+      const rt = runtime;
+      if (!l.handedOver && rt && (await rt.tenure.holds())) await rt.mailbox.deliver({ to: agentId, text: l.text });
+      else log(l.text);
+    });
+
+  // where what follows a call reaches the caller that made it
+  const arrival = (agentId: string | undefined) =>
+    agentId
+      ? `It arrives with the result of your next tool call, or as a message that resumes you if you make none within ${GRACE_MS / 1000} s or have ended your turn.`
+      : 'It arrives as a prompt in this session.';
 
   const ready = (): Runtime => {
     if (!runtime) throw new Error(UNBOUND);
@@ -316,7 +345,7 @@ export const register: Register = (on, rawOptions) => {
         })
       : undefined;
     const discoveries = new Discoveries({ judge, store, now: () => Date.now(), log: (text) => $.ui.log(text), schedule: (ms, fn) => $.clock.after(ms, fn), waitMs: DISCOVERY_WAIT_MS });
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: watches ? letters : undefined, sessionId, storeKeys, tenure };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: letters, held: new HeldPosts({ store: owned, key: keys.held, holds: () => tenure.holds(), now: () => Date.now(), id: () => tenureToken(Date.now()) }), sessionId, storeKeys, tenure, verdicts: new Verdicts(store) };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     // a subagent keeps the tools it was spawned with, so what it was offered is recorded as each is registered
@@ -419,7 +448,7 @@ export const register: Register = (on, rawOptions) => {
     await tool({
       name: 'post',
       description:
-        `Write an issue, pull request, comment, review, merge or release on ${forge.name} to the repository named in repo, never the one the working directory implies. The text is judged against that repository's rule documents and its outbound channels first: a broken rule or a channel's length limit refuses the write with the rule quoted, and nothing is written. Otherwise the write is made and its url returned. Every kind takes repo and kind. issue-create: title, body. pr-create: title, body, base, head (a branch, or owner:branch from a fork), draft. issue-comment, pr-comment: number, body. issue-edit, pr-edit: number, title or body or both. pr-review: number, verdict, body (required unless approving). pr-merge: number, method, title and body for the merge commit. release-create: tag, body (the notes), title, target, draft, prerelease. release-edit: tag, title or body. Writing these through gh in Bash is refused while the outbound gate is on; labels, assignees, closing and the like stay with gh.`,
+        `Write an issue, pull request, comment, review, merge or release on ${forge.name} to the repository named in repo, never the one the working directory implies. What happens to its text follows the outbound mode. Under advise, the default, the text is judged against that repository's rule documents and its outbound channels, the write is made whatever the verdict, and the url is returned with the verdict. Under enforce a broken rule or a channel's length limit refuses the write, naming the rule and quoting the lines that break it, and nothing is written, unless override gives the reason it goes through as written. Under off the write is made unjudged. While the rules of the repository are still being found, or the rules the text may break are checked, advise writes at once and the advice follows, and enforce answers held and writes or refuses the post once that is done, the url or the refusal following; what follows arrives with a later tool call or as a message, so never make the same post again. Every kind takes repo and kind. issue-create: title, body. pr-create: title, body, base, head (a branch, or owner:branch from a fork), draft. issue-comment, pr-comment: number, body. issue-edit, pr-edit: number, title or body or both. pr-review: number, verdict, body (required unless approving). pr-merge: number, method, title and body for the merge commit. release-create: tag, body (the notes), title, target, draft, prerelease. release-edit: tag, title or body. Writing these through gh in Bash is refused under enforce; labels, assignees, closing and the like stay with gh.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -436,17 +465,28 @@ export const register: Register = (on, rawOptions) => {
           method: { type: 'string', enum: [...METHODS], description: 'pr-merge: how the pull request is merged' },
           target: { type: 'string', description: 'release-create: the branch or sha the tag is created from when it does not exist' },
           prerelease: { type: 'boolean', description: 'release-create: mark the release a prerelease' },
+          override: { type: 'string', description: 'under enforce: the reason this write goes through although the judge refuses it. The decision log records it with the ruling and the text' },
         },
         required: ['repo', 'kind'],
       },
     });
     await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|poll|pause|resume|reset|deferred [repo]|start [repo] [for <pr|branch>]|subscribe <repo> [scope]|unsubscribe <id>]' });
 
+    await letters.load();
+    const watchRepos = options.watchRepos.split(',').map((r) => r.trim()).filter(Boolean);
+    // the rules a post and the gate read are found in the background before the first write needs them: the bound
+    // repository's and each watched one's on the forge, and the bound checkout's own
+    if (options.outbound !== 'off' && options.backend !== 'off' && bound.packs['rules']) {
+      const warm = (scope: string, found: Promise<unknown>) => void found.catch((error: unknown) => $.ui.log(`sift rules ${scope}: discovery at start failed (${messageOf(error)})`));
+      for (const repo of new Set([...(bound.repo ? [bound.repo] : []), ...watchRepos])) warm(repo, checkouts.remoteConfig(forge, repo).then((c) => discoveries.settle(forgeSource(forge, repo), c.rules)));
+      if (bound.git) warm(bound.root, discoveries.settle(ruleSource({ forge, fs }, { checkout: bound, named: false }, bound.repo), bound.config.rules));
+    }
+    // after the discoveries, so a post taken over finds its rules on the way
+    void takeOver(ready(), (text) => $.ui.log(text)).catch((error: unknown) => $.ui.log(`sift post: taking over held posts failed (${messageOf(error)})`));
     if (watches) {
-      await letters.load();
       await watches.load();
       if (options.watch) {
-        const repos = options.watchRepos.split(',').map((r) => r.trim()).filter(Boolean);
+        const repos = [...watchRepos];
         if (repos.length === 0 && bound.repo) repos.push(bound.repo);
         if (repos.length === 0) $.ui.log(`sift watch: no repository to watch (set watchRepos or run in a checkout with a ${forge.name} remote)`);
         for (const repo of repos) await watches.subscribe({ repo, scope: { kind: 'repo' }, filter: defaultFilter() });
@@ -476,55 +516,96 @@ export const register: Register = (on, rawOptions) => {
       if (e.tool.startsWith('mcp__sift__')) return next(e);
       const rt = runtime;
       const command = (e as unknown as { command?: unknown }).command;
-      const shell = options.gateOutbound && e.tool === 'Bash' && typeof command === 'string' ? command : undefined;
-      // a reload's new environment answers before its session start has bound it: a forge write waits for the gate,
-      // read by the cli of the forge session start binds
+      const mode = options.outbound;
+      const shell = mode !== 'off' && e.tool === 'Bash' && typeof command === 'string' ? command : undefined;
+      // a reload's new environment answers before its session start has bound it: an enforced forge write waits for
+      // the gate, read by the cli of the forge session start binds
       if (!rt) {
-        const early = shell !== undefined ? rawWriteOf({ writeOf: ghWriteOf }, shell) : undefined;
+        const early = mode === 'enforce' && shell !== undefined ? rawWriteOf({ writeOf: ghWriteOf }, shell) : undefined;
         return early ? { deny: `sift outbound: ${UNBOUND}, so this ${postKind(early)} write from the shell cannot be judged yet. Run the command again in a moment.` } : next(e);
       }
       // the checkout a grade with no cwd reads: where this loop was spawned, else the session's
       const checkoutOf = async () => (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout;
-      // a forge write from the shell goes through post, which names its destination; a loop without post has its text judged
+      // verdicts an advised call carries back beside its result
+      const notes: string[] = [];
+      // a pending decision's verdict, told to this caller under head once the rules are known. sift does not make
+      // this call itself, so it is never held: under advise it runs now, under enforce it is refused now
+      const later = ({ checkout, outbound, decision }: Gated, head: string) => {
+        const again = async () => {
+          const gated = await gateText(rt, checkout, outbound);
+          if (!gated) throw new Error(`the checkout ${checkout.root} has no rules pack`);
+          return gated.decision;
+        };
+        if (mode !== 'off') follow((text) => $.ui.log(text), e.agentId, verdictLater(mode, outbound, decision, again, head), outbound.channel);
+      };
+      // a verdict at once, or when the rules are still being found, a note that it follows once they are known
+      const advised = (gated: Gated) => {
+        const { checkout, outbound, decision } = gated;
+        if (!decision.pending) return void notes.push(verdictOf(outbound, decision));
+        later(gated, `sift outbound advice on the ${outbound.channel} text of this ${e.tool} call, now that ${decision.confirming ? 'it is checked' : 'its rules are known'}`);
+        notes.push(`${pendingNote(outbound, decision, checkout.repo ?? checkout.root)}. ${arrival(e.agentId)}`);
+      };
+      // an enforced refusal; while the rules are still being found the call is refused unjudged, and the verdict it
+      // would meet follows once they are known, for the caller to run it again then. one the first round found may
+      // break a rule is refused now, and the checked verdict, quoting what breaks each rule, follows
+      const refusal = (gated: Gated, then: string) => {
+        const { checkout, outbound, decision } = gated;
+        if (!decision.pending) return `sift outbound (${outbound.channel}): ${decision.reason}. ${then}`;
+        if (decision.confirming) {
+          later(gated, `sift outbound: the checked verdict on the ${outbound.channel} text of the ${e.tool} call refused as it may break a rule. Run that call again, rewritten if it breaks one`);
+          return `sift outbound (${outbound.channel}): this call is refused, as its text ${decision.reason.replace(/^may break: /, 'may break ')}. The checked verdict, quoting the lines that break each rule, follows. ${arrival(e.agentId)} ${then}`;
+        }
+        const scope = checkout.repo ?? checkout.root;
+        later(gated, `sift outbound: the rules of ${scope} are known, and this is the verdict the ${outbound.channel} text of the ${e.tool} call refused while they were found would meet. Run that call again, rewritten if it breaks a rule`);
+        return `sift outbound (${outbound.channel}): the rules of ${scope} are still being found, so this call is refused unjudged. The verdict on its text follows once they are known. ${arrival(e.agentId)} Run the call again then.`;
+      };
+      // a forge write from the shell goes through post under enforce, which names its destination; a loop without
+      // post, and every loop under advise, has its text judged
       const raw = shell !== undefined ? rawWriteOf(rt.forge, shell) : undefined;
-      if (raw) {
-        const gate = await gateShellWrite(rt, raw, spawns.has(e.agentId, POST_TOOL), checkoutOf, e as unknown as Record<string, unknown>, readFile);
+      if (raw && mode !== 'off') {
+        const gate = await gateShellWrite(rt, raw, spawns.has(e.agentId, POST_TOOL), mode, checkoutOf, e as unknown as Record<string, unknown>, readFile);
         const without = gate.fallback ? ' without post' : '';
         if ('refused' in gate) {
           record('outbound', options.shadow ? 'would-refuse' : 'refuse', { digest: `shell ${postKind(raw)}${without}` });
           if (options.shadow) $.ui.log(`sift outbound (shadow): would refuse: ${gate.refused}`);
           else return { deny: `sift outbound: ${gate.refused}.` };
+        } else if (gate.unread !== undefined) {
+          record('outbound', options.shadow ? 'would-advise' : 'advise', { digest: `shell ${postKind(raw)}${without}: text not read` });
+          if (!options.shadow) notes.push(gate.unread);
         } else if (gate.gated) {
           const { outbound, decision } = gate.gated;
-          record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel}${without} ${outbound.text.length} chars: ${decision.reason}` });
+          const done = enact(mode, decision, options.shadow);
+          record('outbound', done.action, { digest: `${outbound.channel}${without} ${outbound.text.length} chars: ${decision.reason}` });
           for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-          if (!decision.allow) {
-            if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-            else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${fallbackNote(rt.forge)}. Rewrite the text or ask the user.` };
-          }
+          if (done.refuse) return { deny: refusal(gate.gated, `${fallbackNote(rt.forge)}. Rewrite the text or ask the user.`) };
+          if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${mode === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
+          if (done.advise) advised(gate.gated);
         }
       }
-      const checkout = options.gateOutbound && !raw ? await checkoutOf() : undefined;
+      const checkout = mode !== 'off' && !raw ? await checkoutOf() : undefined;
       const gated = checkout ? await gateCall(rt, checkout, e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
       if (gated) {
         const { outbound, decision } = gated;
-        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
+        const done = enact(mode, decision, options.shadow);
+        record('outbound', done.action, { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-        if (!decision.allow) {
-          if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${decision.pending ? 'Make the same call again.' : 'Rewrite the text or ask the user.'}` };
-        }
+        if (done.refuse) return { deny: refusal(gated, 'Rewrite the text or ask the user.') };
+        if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${mode === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
+        if (done.advise) advised(gated);
       }
       const r = await next(e);
-      if (!options.prune) return r;
-      return pruneCall(
-        { tool: e.tool, input: e as unknown as Record<string, unknown>, agentId: e.agentId },
-        r,
-        pruneLoops,
-        rt.judge,
-        { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold, tools: pruneTools(options), shadow: options.shadow },
-        { record: (action, extra) => record('prune', action, extra), toast: (text) => $.ui.toast(text) },
-      );
+      const pruned: Awaited<ReturnType<typeof next>> = !options.prune
+        ? r
+        : await pruneCall(
+            { tool: e.tool, input: e as unknown as Record<string, unknown>, agentId: e.agentId },
+            r,
+            pruneLoops,
+            rt.judge,
+            { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold, tools: pruneTools(options), shadow: options.shadow },
+            { record: (action, extra) => record('prune', action, extra), toast: (text) => $.ui.toast(text) },
+          );
+      if (notes.length === 0 || pruned.deny !== undefined) return pruned;
+      return { ...pruned, context: [...(pruned.context ?? []), ...notes] };
     };
     const r = await answer();
     const rt = runtime;
@@ -547,24 +628,50 @@ export const register: Register = (on, rawOptions) => {
   });
 
   // the destination is the repo the call names; the rules pack is the caller's, as a grade's is
+  // one post made for the caller it answers, logged, what follows it handed to the mailbox; the answer is its text,
+  // and whether it refuses
+  const makePost = async (rt: Runtime, log: (text: string) => void, to: string | undefined, input: PostInput): Promise<{ text: string; refused: boolean }> => {
+    const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(to))).checkout.packs['rules'];
+    const hold = async (held: PostInput) => {
+      const id = await rt.held.keep(to, held);
+      return () => rt.held.claim(id);
+    };
+    const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, verdicts: rt.verdicts, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo), hold }, pack, input, options.outbound, options.shadow);
+    const { outbound, decision, action } = posted;
+    if (outbound && decision && action) {
+      const override = posted.override !== undefined ? { override: posted.override, reason: decision.reason, text: outbound.text } : {};
+      record('outbound', action, { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}`, ...override });
+      for (const w of decision.warnings) log(`sift outbound (${outbound.channel}): ${w}`);
+      if (!decision.allow && options.shadow) log(`sift outbound (shadow): would ${options.outbound === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
+    }
+    if (posted.later) follow(log, to, posted.later, `${outbound?.channel} ${String(input.repo)}`);
+    if ('refused' in posted) return { refused: true, text: `sift post refused: ${posted.refused}. ${decision ? 'Rewrite the text, or post again with override set to the reason it should go through as written.' : 'Fix the input and post again.'}` };
+    if ('held' in posted) return { refused: false, text: `held: ${posted.held} ${arrival(to)} Do not post it again.` };
+    if (posted.verdict !== undefined) return { refused: false, text: `${posted.url}\n${posted.verdict}${posted.later ? `. ${arrival(to)}` : ''}` };
+    return { refused: false, text: posted.url };
+  };
+
+  // the destination is the repo the call names; the rules pack is the caller's, as a grade's is
   on('tool.call', { tool: POST_TOOL }, async ($, e) => {
     try {
-      const rt = ready();
-      const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout.packs['rules'];
-      const input = e as unknown as PostInput;
-      const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
-      const { outbound, decision } = posted;
-      if (outbound && decision) {
-        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}` });
-        for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-        if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-      }
-      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. ${decision?.pending ? 'Make the same post again.' : 'Rewrite the text or ask the user.'}` };
-      return { result: [{ type: 'text', text: posted.url }] };
+      const made = await makePost(ready(), (text) => $.ui.log(text), e.agentId, e as unknown as PostInput);
+      return made.refused ? { deny: made.text } : { result: [{ type: 'text', text: made.text }] };
     } catch (error) {
       return { deny: `sift post failed: ${messageOf(error)}` };
     }
   });
+
+  // the posts an environment a reload replaced left held, made here and each told to its caller: the post goes out
+  // once whichever environment makes it, and its caller hears how it went
+  const takeOver = async (rt: Runtime, log: (text: string) => void) => {
+    for (const held of await rt.held.takeOver()) {
+      const parsed = postOf(held.input, rt.forge);
+      const label = 'error' in parsed ? String(held.input.kind) : postLabel(parsed.repo, parsed.post, String(held.input.kind));
+      const head = `sift post: a reload replaced the sift environment that held the ${label}, and this one took it over`;
+      const made = await makePost(rt, log, held.to, held.input).catch((error: unknown) => ({ refused: true, text: `sift post failed: ${messageOf(error)}` }));
+      await rt.mailbox.deliver({ to: held.to, text: `${head}. ${made.text}` }).catch((error: unknown) => log(`${head}, and could not tell its caller (${messageOf(error)}): ${made.text}`));
+    }
+  };
 
   on('agent.spawn', async (_$, e, next) => {
     const r = await next(e);
@@ -629,7 +736,8 @@ export const register: Register = (on, rawOptions) => {
         ([m, s]) =>
           `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms` +
           (s.requestTokens || s.responseTokens ? `  in ${k(s.requestTokens)} out ${k(s.responseTokens)}` : '') +
-          (s.tokensRemoved ? `  removed ${k(s.tokensRemoved)}` : ''),
+          (s.tokensRemoved ? `  removed ${k(s.tokensRemoved)}` : '') +
+          (m === 'outbound' ? `  advised ${s.actions['advise'] ?? 0}  denied ${(s.actions['deny'] ?? 0) + (s.actions['refuse'] ?? 0)}  overridden ${s.actions['override'] ?? 0}` : ''),
       )
       .join('\n');
     const cost = (c: Cost) => `judge in ${k(c.requestTokens)}, out ${k(c.responseTokens)}, context removed ${k(c.tokensRemoved)}`;
@@ -640,7 +748,7 @@ export const register: Register = (on, rawOptions) => {
     return [
       `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${repo ?? 'none'}`,
       judgeLine(rt.judge.name, rt.apiKeyOrigin, rt.judge.keyRejected),
-      `enabled: ${enabled}`,
+      `enabled: ${enabled}; outbound ${options.outbound}`,
       watch,
       `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,
       `all sessions (ring of 500): ${stats.calls} decisions, ${stats.failures} failures`,
@@ -744,7 +852,8 @@ export const register: Register = (on, rawOptions) => {
     }
     if (head === 'clear') {
       await rt.log.clear();
-      return { text: 'decision log cleared' };
+      await rt.verdicts.clear();
+      return { text: 'decision log and kept outbound verdicts cleared' };
     }
     if (head === 'prune') {
       const [action, n] = rest;

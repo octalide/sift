@@ -1,6 +1,7 @@
 import { BUMPS, CONVENTIONAL_BUMPS, CONVENTIONAL_FORMAT, type Bump } from './commits.ts';
 import { CALVER_PATTERN, SEMVER_PATTERN } from './version.ts';
 import type { Channel } from '../gate/channels.ts';
+import { isTextKind, TEXT_KIND_NAMES } from '../rules/kinds.ts';
 
 // presets expand to a regex at resolve time; an explicit pattern beside one wins
 export const COMMIT_FORMATS = { conventional: CONVENTIONAL_FORMAT } as const;
@@ -151,6 +152,12 @@ export function readConfig(text: string, from: string): unknown {
       throw new Error(`sift config ${from}: ${field} is not a valid regex: ${(e as Error).message}`);
     }
   }
+  listOf(fieldsOf(fieldsOf(raw).outbound).channels).forEach((c, i) => {
+    const channel = fieldsOf(c);
+    if (channel.textKind !== undefined && !isTextKind(channel.textKind)) {
+      throw new Error(`sift config ${from}: outbound.channels[${entry(channel.name, i)}].textKind is ${JSON.stringify(channel.textKind)}, not one of ${TEXT_KIND_NAMES.join(', ')}`);
+    }
+  });
   return raw;
 }
 

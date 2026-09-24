@@ -6,7 +6,8 @@ import { textRulesSubjects } from '../repo/subjects.ts';
 import { forgeSource, type Discoveries } from '../rules/discover.ts';
 import { simpleCommands } from '../shell.ts';
 import { channelTable, defaultChannels, POST_TOOL, postKind, textAbout } from './channels.ts';
-import { gateOutbound, outboundOf, type Outbound, type OutboundDecision } from './outbound.ts';
+import { enact, gateOutbound, outboundOf, outboundTarget, settleDecision, verdictLater, verdictOf, type Later, type Outbound, type OutboundDecision, type OutboundMode } from './outbound.ts';
+import type { Verdicts } from './verdicts.ts';
 
 export const VERDICTS: ReviewVerdict[] = ['approve', 'request-changes', 'comment'];
 export const METHODS: MergeMethod[] = ['merge', 'squash', 'rebase'];
@@ -26,10 +27,11 @@ export type PostInput = {
   method?: unknown;
   target?: unknown;
   prerelease?: unknown;
+  override?: unknown;
 };
 
 // the repository and the write a post names, or what is missing or malformed in it
-export function postOf(input: PostInput, forge: Pick<Forge, 'writes'>): { repo: string; post: ForgePost } | { error: string } {
+export function postOf(input: PostInput, forge: Pick<Forge, 'writes'>): { repo: string; post: ForgePost; override?: string } | { error: string } {
   const repo = typeof input.repo === 'string' ? input.repo.trim() : '';
   if (!/^[^/\s]+\/[^\s]+$/.test(repo)) return { error: `repo is the repository to write to as owner/name, got ${JSON.stringify(input.repo)}` };
   const kinds = forge.writes.map(postKind);
@@ -69,7 +71,9 @@ export function postOf(input: PostInput, forge: Pick<Forge, 'writes'>): { repo: 
       }
     }
   })();
-  return 'error' in post ? post : { repo, post };
+  if ('error' in post) return post;
+  if (input.override !== undefined && (typeof input.override !== 'string' || input.override.trim().length === 0)) return { error: `override is the reason the write goes through over the ruling, got ${JSON.stringify(input.override)}` };
+  return typeof input.override === 'string' ? { repo, post, override: input.override.trim() } : { repo, post };
 }
 
 export type PostHost = {
@@ -77,31 +81,84 @@ export type PostHost = {
   judge: Judge;
   // the rule discoveries in flight, shared with every grade of the session
   discoveries: Discoveries;
+  // the gate's kept verdicts, shared with every gate of the session
+  verdicts: Verdicts;
   // the conventions of a repository on the forge
   config: (repo: string) => Promise<RepoConfig>;
+  // keeps a post held while its rules are found, answering the claim to make before writing it: false once a reload
+  // handed the post to the environment that replaced this one. unset, a held post is only held in memory
+  hold?: (input: PostInput) => Promise<() => Promise<boolean>>;
 };
 
-export type Posted = { outbound?: Outbound; decision?: OutboundDecision } & ({ url: string } | { refused: string });
+// action is what the decision log records, verdict what an advised or overridden write carries back to the caller.
+// held: the write waits for its rules; later settles to what the caller is told once they are known, the advice on a
+// write made at once or the outcome of a held one
+export type Posted = { outbound?: Outbound; decision?: OutboundDecision; action?: string; override?: string; later?: Promise<Later> } & ({ url: string; verdict?: string } | { refused: string } | { held: string });
 
 const noFile = async (): Promise<string> => {
   throw new Error('the post tool takes its text inline');
 };
 
 // one post under the repository it names: that repository's conventions, channels and rule documents, read from the
-// forge whatever the caller's working directory is. a limit or a broken rule refuses the write, unless shadow only logs
-export async function postCall(host: PostHost, pack: Pack | undefined, input: PostInput, shadow = false): Promise<Posted> {
+// forge whatever the caller's working directory is. the mode decides what a limit or a broken rule does: off judges
+// nothing, advise writes with the verdict attached, enforce refuses unless the post carries an override. when the
+// text is not judged in full yet (its rules are still being found, or the rules it may break are being checked off the
+// hook's clock), advise writes at once and the verdict follows in later, and enforce holds the write until it is, so
+// the caller never sends the text twice
+export async function postCall(host: PostHost, pack: Pack | undefined, input: PostInput, mode: OutboundMode, shadow = false): Promise<Posted> {
   const parsed = postOf(input, host.forge);
   if ('error' in parsed) return { refused: parsed.error };
-  const { repo, post } = parsed;
+  const { repo, post, override } = parsed;
+  if (mode === 'off') return { url: await host.forge.post(repo, post) };
   const config = await host.config(repo);
   const outbound = await outboundOf(POST_TOOL, input as Record<string, unknown>, noFile, channelTable(defaultChannels(host.forge), config.outbound.channels));
-  let decision: OutboundDecision | undefined;
-  if (outbound && pack) {
-    const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, config);
-    decision = await gateOutbound(outbound, subjects, pack, host.judge, config);
-    if (!decision.allow && !shadow) return { outbound, decision, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
+  if (!outbound || !pack) return { outbound, url: await host.forge.post(repo, post) };
+  const judged = async () => gateOutbound(outbound, await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), discoveries: host.discoveries }, outboundTarget(outbound), config), pack, host.judge, config, host.verdicts);
+  const decision = await judged();
+  const { action, refuse, advise } = enact(mode, decision, shadow, override);
+  const label = postLabel(repo, post, String(input.kind));
+  if (decision.pending && !shadow && action !== 'override') {
+    if (mode === 'advise') {
+      const url = await host.forge.post(repo, post);
+      const later = verdictLater(mode, outbound, decision, judged, `sift outbound advice on the ${label} written at ${url}, now that ${decision.confirming ? 'it is checked' : 'its rules are known'}`);
+      return { outbound, decision, action, url, later, verdict: pendingNote(outbound, decision, repo) };
+    }
+    const claim = host.hold ? await host.hold(input) : async () => true;
+    const later = settleDecision(decision, judged).then(
+      async (d): Promise<Later> => {
+        if (!(await claim())) return { decision: d, action: 'handed-over', text: `sift post handed the held ${label} to the environment that replaced this one on a reload`, handedOver: true };
+        const done = enact(mode, d, shadow);
+        if (done.refuse) return { decision: d, action: done.action, text: `sift post refused the held ${label}, and nothing was written: ${outbound.channel} to ${repo}: ${d.reason}. Rewrite the text, or post again with override set to the reason it should go through as written.` };
+        return { decision: d, action: done.action, text: `sift post wrote the held ${label}: ${await host.forge.post(repo, post)}` };
+      },
+    ).catch((error: unknown): Later => ({ action: 'fail', text: `sift post failed on the held ${label}: ${messageOf(error)}` }));
+    const held = decision.confirming
+      ? `the ${label} is held while the rules it may break are checked beside the rest of their documents and the lines that break them are found (${decision.reason}). It is written or refused once that is done, and the url or the refusal follows`
+      : `the ${label} is held while the rules of ${repo} are still being found. It is judged and written once they are known, and the url or the refusal follows`;
+    return { outbound, decision, action: 'hold', later, held };
   }
-  return { outbound, decision, url: await host.forge.post(repo, post) };
+  if (refuse) return { outbound, decision, action, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
+  const url = await host.forge.post(repo, post);
+  if (action === 'override') return { outbound, decision, action, override, url, verdict: `sift outbound (${outbound.channel}): written over the ruling (${decision.reason}), override: ${override}` };
+  return { outbound, decision, action, url, ...(advise ? { verdict: verdictOf(outbound, decision) } : {}) };
+}
+
+// the write a post makes, for the caller told of it later: its kind and what it is on
+export function postLabel(repo: string, post: ForgePost, kind: string): string {
+  if (post.kind === 'release') return `${kind} ${post.tag} on ${repo}`;
+  if (post.action === 'create') return `${kind} "${post.title}" on ${repo}`;
+  return `${kind} on ${repo}#${post.number}`;
+}
+
+// what text sent before it was judged in full carries back at once, scope naming whose rules: that they are still being
+// found, or the rules it may break, the checked advice on them following
+export function pendingNote(out: Outbound, decision: OutboundDecision, scope: string): string {
+  if (decision.confirming) return `sift outbound (${out.channel}), note: this ${decision.reason.replace(/^may break: /, 'may break ')}, and the checked advice, quoting the lines that break each rule, follows`;
+  return `sift outbound (${out.channel}): the rules of ${scope} are still being found, so the text went out unjudged and the advice on it follows once they are known`;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // the first write in a shell command the forge's own cli or api makes with text people read

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG } from '../src/repo/config.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { GitHubForge, GH_WRITES } from '../src/forge/github.ts';
-import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
+import { enact, gateOutbound, outboundOf, settleDecision, verdictLater, verdictOf } from '../src/gate/outbound.ts';
 import { channelTable, commandBody, defaultChannels, textAbout, type Channel } from '../src/gate/channels.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
@@ -12,7 +12,7 @@ import { CONTEXT_ROOM } from '../src/judge/room.ts';
 import { estimateTokensOf } from '../src/tokens.ts';
 import type { Subject } from '../src/packs/types.ts';
 import { shellWord } from '../src/shell.ts';
-import { discoveries, memorySource, yesJudge } from './fake-source.ts';
+import { discoveries, memorySource, verdicts, yesJudge } from './fake-source.ts';
 
 // the channel table reads the forge's write list alone, so the runner is never reached
 const github = new GitHubForge(async () => ({ exitCode: 1, stdout: '', stderr: '' }));
@@ -30,7 +30,7 @@ describe('outbound extraction', () => {
   };
 
   it('reads discord content and embed text', async () => {
-    expect(await outboundOf('mcp__discord__send_message', { channel_id: '1', content: 'hello' }, noRead)).toEqual({ channel: 'discord-message', text: 'hello', limit: 2000, kind: 'a Discord message' });
+    expect(await outboundOf('mcp__discord__send_message', { channel_id: '1', content: 'hello' }, noRead)).toEqual({ channel: 'discord-message', text: 'hello', limit: 2000, kind: 'a Discord message', textKind: 'message' });
     expect(await outboundOf('mcp__discord__send_embed', { title: 'T', description: 'D' }, noRead)).toMatchObject({ channel: 'discord-embed', text: 'D\nT', limit: 2000 });
     expect(await outboundOf('mcp__discord__send_dm', { message: 'hi' }, noRead)).toMatchObject({ channel: 'discord-dm', text: 'hi' });
     expect(await outboundOf('mcp__discord__list_channels', {}, noRead)).toBeUndefined();
@@ -90,10 +90,10 @@ describe('outbound extraction', () => {
   it('ships discord and one post channel per forge write as the default table', async () => {
     const table = defaultChannels(github);
     expect(table.map((c) => c.name)).toEqual(['discord-message', 'discord-dm', 'discord-forum-post', 'discord-embed', ...GH_WRITES.map((w) => `github-${w.kind}-${w.action}`)]);
-    expect(table.find((c) => c.name === 'github-pr-comment')).toEqual({ name: 'github-pr-comment', tool: '^mcp__sift__post$', text: { fields: ['title', 'body'], when: { kind: 'pr-comment' } }, kind: 'a comment on a pull request' });
+    expect(table.find((c) => c.name === 'github-pr-comment')).toEqual({ name: 'github-pr-comment', tool: '^mcp__sift__post$', text: { fields: ['title', 'body'], when: { kind: 'pr-comment' } }, kind: 'a comment on a pull request', textKind: 'comment' });
     expect(defaultChannels().map((c) => c.name)).toEqual(['discord-message', 'discord-dm', 'discord-forum-post', 'discord-embed']);
     // a post is on the channel of its kind alone, and no shell command is on any forge channel
-    expect(await outboundOf('mcp__sift__post', { repo: 'o/r', kind: 'issue-create', title: 'T', body: 'B' }, noRead, table)).toEqual({ channel: 'github-issue-create', text: 'T\nB', limit: undefined, kind: 'the title and body of a new GitHub issue' });
+    expect(await outboundOf('mcp__sift__post', { repo: 'o/r', kind: 'issue-create', title: 'T', body: 'B' }, noRead, table)).toEqual({ channel: 'github-issue-create', text: 'T\nB', limit: undefined, kind: 'the title and body of a new GitHub issue', textKind: 'issue' });
     expect(await outboundOf('mcp__sift__post', { repo: 'o/r', kind: 'pr-review', verdict: 'approve', body: 'ok' }, noRead, table)).toMatchObject({ channel: 'github-pr-review', text: 'ok' });
     expect(await outboundOf('mcp__sift__post', { repo: 'o/r', kind: 'pr-merge', method: 'merge' }, noRead, table)).toBeUndefined();
     expect(await outboundOf('Bash', { command: 'gh pr comment 5 -b "x"' }, noRead, table)).toBeUndefined();
@@ -174,10 +174,30 @@ describe('outbound gate', () => {
     name: 'fake',
     ask: async (_s, q) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k, i) => [k, { type: 'noul' as const, p: p[i] ?? 0.9 }])) }),
   });
+  // a judge that reads the text: an em dash breaks the first rule, on the line that holds it; terse is unclear when asked to be
+  const reads = (opts: { terse?: number; asked?: string[] } = {}): Judge => ({
+    name: 'fake',
+    ask: async (state, q) => {
+      const text = ((state as { subject?: { text?: string } }).subject?.text ?? '') as string;
+      const answers = Object.fromEntries(
+        Object.entries(q).map(([k, x]) => {
+          opts.asked?.push(x.instructions);
+          const line = /where it breaks the rule in the state: (.*)$/s.exec(x.instructions);
+          const p = line ? (line[1]!.includes('—') ? 0.9 : 0.1) : /No em dashes/.test(x.instructions) ? (text.includes('—') ? 0.1 : 0.9) : /Terse/.test(x.instructions) ? (opts.terse ?? 0.9) : 0.9;
+          return [k, { type: 'noul' as const, p }];
+        }),
+      );
+      return { ok: true, backend: 'fake', latencyMs: 1, answers };
+    },
+  });
+  const dashes = 'breaks: CLAUDE.md "No em dashes.": "a — b" does not follow it';
+  // the decision a caller ends with: a rule the first round finds broken is checked off the hook's clock, and the text
+  // judged again once that lands meets the verdict it kept
+  const settled = async (...args: Parameters<typeof gateOutbound>) => settleDecision(await gateOutbound(...args), () => gateOutbound(...args));
   const pack = BUILTIN_PACKS['rules']!;
 
   it('denies over the channel limit without asking the judge', async () => {
-    const d = await gateOutbound({ channel: 'discord', text: 'x'.repeat(2001), limit: 2000 }, [subject], pack, judge([]), DEFAULT_CONFIG);
+    const d = await gateOutbound({ channel: 'discord', text: 'x'.repeat(2001), limit: 2000 }, [subject], pack, judge([]), DEFAULT_CONFIG, verdicts());
     expect(d).toMatchObject({ allow: false, reason: 'discord text is 2001 chars, the limit is 2000' });
     expect(d.report).toBeUndefined();
   });
@@ -196,7 +216,7 @@ describe('outbound gate', () => {
         return { ok: true, backend: 'fake', latencyMs: 1, answers };
       },
     };
-    const d = await gateOutbound({ channel: 'github-issue-create', text: 'The watcher misses body edits.', kind: 'the body of a new GitHub issue' }, [s], pack, j, config);
+    const d = await gateOutbound({ channel: 'github-issue-create', text: 'The watcher misses body edits.', kind: 'the body of a new GitHub issue' }, [s], pack, j, config, verdicts());
     expect(asked[0]).toBe('The subject (the body of a new GitHub issue) complies with this rule: Pull requests: The body carries verification evidence.');
     expect(d).toMatchObject({ allow: true, reason: 'clear', warnings: ['unclear: Pull requests: The body carries verification evidence.'] });
   });
@@ -204,34 +224,166 @@ describe('outbound gate', () => {
   it('judges a --body-file body and denies one it cannot read', async () => {
     const out = await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file notes.md' }, async () => 'a — b', via);
     const seen: unknown[] = [];
+    const inner = reads();
     const j: Judge = {
       name: 'fake',
       ask: async (state, q) => {
         seen.push((state as { subject: unknown }).subject);
-        return { ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k, i) => [k, { type: 'noul' as const, p: i === 0 ? 0.1 : 0.9 }])) };
+        return inner.ask(state, q);
       },
     };
     const fileSubject: Subject = { ...subject, state: { ...subject.state, subject: { kind: 'text', text: out!.text } } };
-    expect(await gateOutbound(out!, [fileSubject], pack, j, DEFAULT_CONFIG)).toMatchObject({ allow: false, reason: 'breaks: No em dashes.' });
-    expect(seen).toEqual([{ kind: 'text', text: 'a — b' }]);
+    expect(await settled(out!, [fileSubject], pack, j, DEFAULT_CONFIG, verdicts())).toMatchObject({ allow: false, reason: dashes });
+    // the first pass and the confirm read the subject, the lines are read beside the rule alone
+    expect(seen).toEqual([{ kind: 'text', text: 'a — b' }, { kind: 'text', text: 'a — b' }, undefined]);
     const stdin = await outboundOf('Bash', { command: 'gh issue create -t "t" --body-file -' }, async () => '', via);
-    const d = await gateOutbound(stdin!, [subject], pack, judge([]), DEFAULT_CONFIG);
+    const d = await gateOutbound(stdin!, [subject], pack, judge([]), DEFAULT_CONFIG, verdicts());
     expect(d).toMatchObject({ allow: false, reason: 'the body is read from stdin (--body-file -) with no heredoc in the command, so it cannot be judged; pass --body, a file path or a heredoc' });
     expect(d.report).toBeUndefined();
   });
 
   it('denies a broken rule, warns on an unclear one, allows the rest', async () => {
-    const broken = await gateOutbound({ channel: 'github', text: 'a — b' }, [subject], pack, judge([0.1, 0.9]), DEFAULT_CONFIG);
-    expect(broken).toMatchObject({ allow: false, reason: 'breaks: No em dashes.', warnings: [] });
-    const unclear = await gateOutbound({ channel: 'github', text: 'ok' }, [subject], pack, judge([0.9, 0.5]), DEFAULT_CONFIG);
+    const dashed = { ...subject, state: { ...subject.state, subject: { kind: 'text', text: 'a — b' } } };
+    const broken = await settled({ channel: 'github', text: 'a — b' }, [dashed], pack, reads(), DEFAULT_CONFIG, verdicts());
+    expect(broken).toMatchObject({ allow: false, reason: dashes, warnings: [] });
+    const unclear = await settled({ channel: 'github', text: 'ok' }, [subject], pack, reads({ terse: 0.5 }), DEFAULT_CONFIG, verdicts());
     expect(unclear).toMatchObject({ allow: true, reason: 'clear', warnings: ['unclear: Terse by default.'] });
     const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'disabled', message: 'off', backend: 'off' }) };
-    expect((await gateOutbound({ channel: 'github', text: 'ok' }, [subject], pack, off, DEFAULT_CONFIG)).allow).toBe(true);
+    expect((await settled({ channel: 'github', text: 'ok' }, [subject], pack, off, DEFAULT_CONFIG, verdicts())).allow).toBe(true);
   });
 
-  it('denies while rule discovery is still running, where a judge failure would pass, so the same call made again is judged', async () => {
-    const reason = 'rule discovery for o/r outlasted its 5 s wait and keeps running; the next call on it reuses what it finds';
-    const waiting: Subject = { ...subject, judgeError: reason, pending: reason };
-    expect(await gateOutbound({ channel: 'github', text: 'ok' }, [waiting], pack, judge([]), DEFAULT_CONFIG)).toMatchObject({ allow: false, reason, pending: true });
+  // #219: identical text met a different verdict on a retry
+  it('answers the verdict it kept for the same text under the same rules, and judges again when either changes', async () => {
+    let asks = 0;
+    // a judge whose first pass on the first rule drifts across the violated edge between texts judged
+    const drifting: Judge = {
+      name: 'drift',
+      ask: async (s, q) => {
+        const first = Object.values(q).some((x) => /complies with this rule: No em dashes/.test(x.instructions));
+        if (first) asks++;
+        return first && asks % 2 === 0 ? judge([0.9]).ask(s, q) : reads().ask(s, q);
+      },
+    };
+    const kept = verdicts();
+    const dashed = { ...subject, state: { ...subject.state, subject: { kind: 'text', text: 'a — b' } } };
+    const out = { channel: 'github-issue-create', text: 'a — b', kind: 'the title and body of a new GitHub issue' };
+    const first = await settled(out, [dashed], pack, drifting, DEFAULT_CONFIG, kept);
+    expect(first).toMatchObject({ allow: false, reason: dashes });
+    expect(await settled(out, [dashed], pack, drifting, DEFAULT_CONFIG, kept)).toEqual({ allow: false, reason: dashes, warnings: [] });
+    expect(asks).toBe(1);
+    await settled({ ...out, text: 'a, b' }, [subject], pack, drifting, DEFAULT_CONFIG, kept);
+    expect(asks).toBe(2);
+    const fewer = [rules[0]!];
+    await settled(out, [{ ...dashed, facts: { ...dashed.facts, rules: fewer }, state: { ...dashed.state, rules: fewer } }], pack, drifting, DEFAULT_CONFIG, kept);
+    expect(asks).toBe(3);
+    // what the post is, and what it sets beside its text, are read too
+    await settled({ ...out, textKind: 'issue' }, [dashed], pack, drifting, DEFAULT_CONFIG, kept);
+    expect(asks).toBe(4);
+    await settled({ ...out, sets: { base: 'dev' } }, [dashed], pack, drifting, DEFAULT_CONFIG, kept);
+    expect(asks).toBe(5);
+  });
+
+  it('keeps no verdict the judge could not give', async () => {
+    const kept = verdicts();
+    const off: Judge = { name: 'off', ask: async () => ({ ok: false, reason: 'unavailable', message: 'down', backend: 'off' }) };
+    expect(await settled({ channel: 'github', text: 'a — b' }, [subject], pack, off, DEFAULT_CONFIG, kept)).toMatchObject({ allow: true, reason: 'judge unavailable (unavailable: down)' });
+    // the same name answering now is asked, not met with the pass the failure gave
+    const back: Judge = { ...reads(), name: 'off' };
+    const dashed = { ...subject, state: { ...subject.state, subject: { kind: 'text', text: 'a — b' } } };
+    expect(await settled({ channel: 'github', text: 'a — b' }, [dashed], pack, back, DEFAULT_CONFIG, kept)).toMatchObject({ allow: false, reason: dashes });
+  });
+
+  // #220: a refusal's check and quotes are two judge rounds past the first, which the 10 s hook budget cannot carry
+  it('answers pending on a rule the first round finds broken, and checks and quotes it off the hook\'s clock', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const firsts: string[] = [];
+    const inner = reads();
+    // a judge whose first round answers at once and whose check waits until released
+    const slow: Judge = {
+      name: 'slow',
+      ask: async (state, q) => {
+        const qs = Object.values(q).map((x) => x.instructions);
+        if (qs.some((i) => /read beside the other rules/.test(i))) await gate;
+        else if (qs.some((i) => /complies with this rule: /.test(i))) firsts.push(...qs);
+        return inner.ask(state, q);
+      },
+    };
+    const kept = verdicts();
+    const dashed = { ...subject, state: { ...subject.state, subject: { kind: 'text', text: 'a — b' } } };
+    const out = { channel: 'github', text: 'a — b' };
+    const d = await gateOutbound(out, [dashed], pack, slow, DEFAULT_CONFIG, kept);
+    expect(d).toMatchObject({ allow: false, reason: 'may break: CLAUDE.md "No em dashes."', confirming: ['CLAUDE.md "No em dashes."'] });
+    expect(d.pending).toBeInstanceOf(Promise);
+    // the same text while the check runs joins it rather than judging again
+    const joined = await gateOutbound(out, [dashed], pack, slow, DEFAULT_CONFIG, kept);
+    expect(joined).toMatchObject({ allow: false, confirming: [] });
+    expect(firsts).toHaveLength(2);
+    release();
+    expect(await settleDecision(d, () => gateOutbound(out, [dashed], pack, slow, DEFAULT_CONFIG, kept))).toEqual({ allow: false, reason: dashes, warnings: [] });
+    expect(firsts).toHaveLength(2);
+  });
+
+  it('lets text through, and keeps no verdict, when the check of a broken rule fails', async () => {
+    const inner = reads();
+    const failing: Judge = {
+      name: 'fake',
+      ask: async (state, q) => (Object.values(q).some((x) => /read beside the other rules/.test(x.instructions)) ? { ok: false, reason: 'unavailable', message: 'down', backend: 'fake' } : inner.ask(state, q)),
+    };
+    const kept = verdicts();
+    const dashed = { ...subject, state: { ...subject.state, subject: { kind: 'text', text: 'a — b' } } };
+    const out = { channel: 'github', text: 'a — b' };
+    expect(await settled(out, [dashed], pack, failing, DEFAULT_CONFIG, kept)).toEqual({ allow: true, reason: 'judge unavailable (unavailable: down)', warnings: [] });
+    // taken once by the call that settled on it: the next call judges afresh
+    expect(await gateOutbound(out, [dashed], pack, failing, DEFAULT_CONFIG, kept)).toMatchObject({ confirming: ['CLAUDE.md "No em dashes."'] });
+  });
+
+  it('denies while rule discovery is still running, where a judge failure would pass, and settles once it lands', async () => {
+    const reason = 'rule discovery for o/r is still running';
+    const waiting: Subject = { ...subject, judgeError: reason, pending: reason, settled: Promise.resolve(undefined) };
+    const d = await gateOutbound({ channel: 'github', text: 'ok' }, [waiting], pack, judge([]), DEFAULT_CONFIG, verdicts());
+    expect(d).toMatchObject({ allow: false, reason });
+    expect(await d.pending).toBeUndefined();
+    const clear = { allow: true, reason: 'clear', warnings: [] };
+    let asked = 0;
+    // a discovery that lands again pending, its documents changed meanwhile, is waited out too
+    const again = async () => (++asked === 1 ? { ...d } : clear);
+    expect(await settleDecision(d, again)).toEqual(clear);
+    expect(asked).toBe(2);
+    const failed = { ...d, pending: Promise.resolve('rule discovery: unavailable: down') };
+    expect(await settleDecision(failed, again)).toEqual({ allow: false, reason: 'the text was not judged: rule discovery: unavailable: down', warnings: [] });
+    expect(await settleDecision(clear, again)).toBe(clear);
+    // the verdict a refused call would meet follows under its mode's action, and a failure says the text was not judged
+    const out = { channel: 'discord-message', text: 'a — b' };
+    expect(await verdictLater('enforce', out, d, async () => ({ allow: false, reason: 'breaks: No em dashes.', warnings: [] }), 'head')).toEqual({ decision: { allow: false, reason: 'breaks: No em dashes.', warnings: [] }, action: 'deny', text: 'head: sift outbound (discord-message), note: this may break No em dashes.' });
+    expect(await verdictLater('advise', out, failed, again, 'head')).toMatchObject({ action: 'advise', text: 'head: sift outbound (discord-message), note: the text was not judged: rule discovery: unavailable: down' });
+    // one that never stops being pending is refused unjudged rather than waited on for ever
+    expect(await settleDecision(d, async () => ({ ...d }))).toEqual({ allow: false, reason: `the text was not judged: ${reason}`, warnings: [] });
+  });
+});
+
+describe('outbound mode', () => {
+  const broken = { allow: false, reason: 'breaks: No em dashes.', warnings: [] };
+  const clear = { allow: true, reason: 'clear', warnings: ['unclear: Terse by default.'] };
+
+  it('advises on a broken rule and never refuses, enforces unless overridden', () => {
+    expect(enact('advise', broken, false)).toEqual({ action: 'advise', refuse: false, advise: true });
+    expect(enact('advise', clear, false)).toEqual({ action: 'allow', refuse: false, advise: true });
+    expect(enact('advise', { ...broken, pending: Promise.resolve(undefined) }, false)).toEqual({ action: 'pending', refuse: false, advise: true });
+    expect(enact('enforce', { ...broken, pending: Promise.resolve(undefined) }, false)).toEqual({ action: 'pending', refuse: true, advise: false });
+    expect(enact('enforce', { ...broken, pending: Promise.resolve(undefined) }, true)).toEqual({ action: 'would-deny', refuse: false, advise: false });
+    expect(enact('enforce', broken, false)).toEqual({ action: 'deny', refuse: true, advise: false });
+    expect(enact('enforce', broken, false, 'the release PR CONTRIBUTING requires')).toEqual({ action: 'override', refuse: false, advise: false });
+    expect(enact('enforce', clear, false, 'unneeded')).toEqual({ action: 'allow', refuse: false, advise: false });
+  });
+
+  it('refuses and attaches nothing in shadow', () => {
+    expect(enact('enforce', broken, true)).toEqual({ action: 'would-deny', refuse: false, advise: false });
+    expect(enact('advise', broken, true)).toEqual({ action: 'would-advise', refuse: false, advise: false });
+  });
+
+  it('words the verdict a result carries', () => {
+    expect(verdictOf({ channel: 'discord-message', text: 'a — b' }, broken)).toBe('sift outbound (discord-message), note: this may break No em dashes.');
+    expect(verdictOf({ channel: 'discord-message', text: 'ok' }, clear)).toBe('sift outbound (discord-message): clear; unclear: Terse by default.');
   });
 });

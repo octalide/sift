@@ -1,6 +1,6 @@
 {
   "name": "sift",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Typed judgement calls for Claude Code: two primitives, judge and rank, under packs that grade issues, pull requests, plans, commits, releases and rules, a repository watch, tool output pruning and an outbound text gate, backed by TypeSafe Jev or the session's small model.",
   "author": {
     "name": "octalide"
@@ -168,11 +168,16 @@
       "description": "Conventions in the shape of .sift/config.json, as inline JSON or a path relative to the repo root. Three layers apply in order, field by field: the neutral defaults, then this option or, when it is empty, $XDG_CONFIG_HOME/sift/config.json (~/.config/sift/config.json) if it exists, then each repo's own .sift/config.json. Empty with no global file uses the defaults: no commit format, version or changelog checks.",
       "default": ""
     },
-    "gateOutbound": {
-      "type": "boolean",
-      "title": "Outbound text gate",
-      "description": "Refuse forge writes made from the shell (gh pr, issue and release writes with text, and the gh api calls that make them) in favour of the post tool, which judges the text by the rules of the repository it names. Before other text leaves the session through a channel (Discord messages by default, more under outbound.channels in the config), check the channel's length limit and judge the text against the rule documents of the repository checked out where the calling subagent was spawned, else the session's. A broken rule denies the call, an unclear one logs.",
-      "default": false
+    "outbound": {
+      "type": "string",
+      "title": "Outbound mode",
+      "description": "How text leaving the session is held to the rules: post writes, forge writes from the shell (gh pr, issue and release writes with text, and the gh api calls that make them), and other outbound tool calls (Discord messages by default, more under outbound.channels in the config). off judges nothing. advise judges the text against the rules of the repository post names, or the one checked out where the calling subagent was spawned, else the session's, lets every call through and attaches the verdict to its result. enforce refuses a broken rule or a channel's length limit, and refuses forge writes from the shell in favour of post; a post carrying override with a reason goes through anyway and is logged as an override.",
+      "options": [
+        "off",
+        "advise",
+        "enforce"
+      ],
+      "default": "advise"
     },
     "classify": {
       "type": "boolean",

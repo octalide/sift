@@ -13,7 +13,7 @@ import { Checkouts, type CheckoutFs } from '../src/repo/checkout.ts';
 import type { RunLike } from '../src/process.ts';
 import { Spawns } from '../src/spawns.ts';
 import { fakeForge } from './fake-forge.ts';
-import { discoveries, yesJudge } from './fake-source.ts';
+import { discoveries, verdicts, yesJudge } from './fake-source.ts';
 
 const run: RunLike = async (argv, init) => {
   const r = spawnSync(argv[0]!, argv.slice(1), { cwd: init?.cwd, encoding: 'utf8', input: init?.stdin });
@@ -388,7 +388,7 @@ describe('the outbound gate', () => {
       const asked: { state: unknown; instructions: string[] }[] = [];
       const { checkout } = await scopeOf(checkouts, session, undefined, dirs.of(agentId));
       const judge = yesJudge(0.9, asked);
-      const gated = await gateCall({ ...host, judge, discoveries: discoveries(judge) }, checkout, tool, tool === 'mcp__note__send' ? { text } : { content: text }, noRead);
+      const gated = await gateCall({ ...host, judge, discoveries: discoveries(judge), verdicts: verdicts() }, checkout, tool, tool === 'mcp__note__send' ? { text } : { content: text }, noRead);
       return { gated, rules: asked.flatMap((q) => q.instructions).filter((i) => /complies with this rule/.test(i)) };
     };
 

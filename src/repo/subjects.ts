@@ -10,7 +10,8 @@ import { manifestChanges, manifestFormat, type ManifestChange } from './manifest
 import { driftOf, lineDiff } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
-import type { Discoveries, Discovery, Rule, RuleSource } from '../rules/discover.ts';
+import { governs, type Discoveries, type Discovery, type Rule, type RuleSource, type RuleTarget } from '../rules/discover.ts';
+import type { TextKind } from '../rules/kinds.ts';
 import { partName, partsOf } from './parts.ts';
 
 
@@ -375,7 +376,9 @@ export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; disc
 export async function rulesSubjects(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject[]> {
   const { forge, repo } = host;
   const ref = `#${target.number}`;
-  if (!forge || !repo) return [rulesOf(await rulesFound(host, config), `issue:${ref}`, { kind: 'issue', ref }, 'The subject', {})];
+  // an issue carries its labels and milestone, so a rule about them is judged against it
+  const carries: RuleTarget = { metadata: true, kind: 'issue' };
+  if (!forge || !repo) return [rulesOf(await rulesFound(host, config, carries), `issue:${ref}`, { kind: 'issue', ref }, 'The subject', {})];
   const { issue, thread, state } = await readIssue(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' });
   const frame: Frame = {
     text: `${issue.title}\n${issue.body}`,
@@ -389,19 +392,24 @@ export async function rulesSubjects(host: RulesHost, target: RulesTarget, config
     },
   };
   // the subject is read, and a pull request refused, before discovery spends judge calls
-  return partSubjects(await rulesFound(host, config), `issue:${ref}`, frame, `issue ${ref}`);
+  return partSubjects(await rulesFound(host, config, carries), `issue:${ref}`, frame, `issue ${ref}`);
 }
 
-// text about to be written, as the rules read it
-export async function textRulesSubjects(host: RulesHost, target: { text: string; about?: string }, config: RepoConfig): Promise<Subject[]> {
-  const { text, about } = target;
-  const context = { kind: 'text', ...(about ? { about } : {}) };
+// text about to be written: the text, what it is in prose, the kind of text the rules that govern it are written for
+// (every rule when unset), and what the write sets beside the text, such as a pull request's base, head and draft
+export type TextTarget = { text: string; about?: string; kind?: TextKind; sets?: Record<string, string | boolean> };
+
+// text about to be written, as the rules read it: it sets no labels or milestone, so a rule about them is not judged,
+// and only the rules written for its kind of text are. what the write sets is read beside the text and its opening
+export async function textRulesSubjects(host: RulesHost, target: TextTarget, config: RepoConfig): Promise<Subject[]> {
+  const { text, about, kind, sets } = target;
+  const context = { kind: 'text', ...(about ? { about } : {}), ...(sets && Object.keys(sets).length > 0 ? { sets } : {}) };
   const frame: Frame = {
     text,
     whole: { texts: [{ name: 'the text', text, tier: 0 }], build: ([whole]) => ({ ...context, text: whole! }) },
     opening: { texts: [], build: (part, note) => ({ ...context, note, text: part }) },
   };
-  return partSubjects(await rulesFound(host, config), `text:${truncate(text, 40)}`, frame, about);
+  return partSubjects(await rulesFound(host, config, { metadata: false, ...(kind ? { kind } : {}) }), `text:${truncate(text, 40)}`, frame, about);
 }
 
 // a subject the rules read: the texts of its whole state, and the text split into parts when that state does not fit,
@@ -445,18 +453,19 @@ function withCuts(subject: Subject, cuts: Cut[]): Subject {
   return cuts.length > 0 ? { ...subject, cuts } : subject;
 }
 
-type Found = { rules: Rule[]; total: number; discovery: Discovery };
+// outside: the rules found that do not govern the subject
+type Found = { rules: Rule[]; total: number; outside: number; discovery: Discovery };
 
-async function rulesFound(host: RulesHost, config: RepoConfig): Promise<Found> {
+async function rulesFound(host: RulesHost, config: RepoConfig, target: RuleTarget): Promise<Found> {
   const discovery = await host.discoveries.discover(host.source, config.rules);
-  const rules = [...discovery.rules];
+  const rules = discovery.rules.filter((r) => governs(r, target));
   const total = rules.length;
   rules.splice(config.rules.maxRules);
-  return { rules, total, discovery };
+  return { rules, total, outside: discovery.rules.length - total, discovery };
 }
 
 function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, label: string, facts: Record<string, unknown>): Subject {
-  const { rules, total, discovery } = found;
+  const { rules, total, outside, discovery } = found;
   return {
     kind: 'rules',
     ref,
@@ -465,6 +474,7 @@ function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, la
       rules,
       has_rules: rules.length > 0,
       total_rules: total,
+      outside_rules: outside,
       docs: discovery.docs,
       candidates: discovery.candidates,
       kept: discovery.kept,
@@ -473,8 +483,17 @@ function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, la
       ...facts,
     },
     options: {},
-    ...(discovery.pending !== undefined ? { judgeError: discovery.pending, pending: discovery.pending } : discovery.error !== undefined ? { judgeError: `rule discovery: ${discovery.error}` } : {}),
+    // a grade is told a later grade reuses the run; the gate words its own note or refusal from pending
+    ...(discovery.pending !== undefined ? { judgeError: `${discovery.pending}, and a later grade reuses what it finds`, pending: discovery.pending, settled: settledOf(discovery) } : discovery.error !== undefined ? { judgeError: `rule discovery: ${discovery.error}` } : {}),
   };
+}
+
+// why a running discovery failed once it lands, undefined when it found the rules
+function settledOf(discovery: Discovery): Promise<string | undefined> | undefined {
+  return discovery.settled?.then(
+    (d) => (d.error !== undefined ? `rule discovery: ${d.error}` : undefined),
+    (error: unknown) => `rule discovery: ${error instanceof Error ? error.message : String(error)}`,
+  );
 }
 
 // a plan for an issue: the issue's title and body beside the plan text, so the judge reads the plan against what was asked.
