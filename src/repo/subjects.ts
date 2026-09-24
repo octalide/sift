@@ -477,8 +477,16 @@ function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, la
       ...facts,
     },
     options: {},
-    ...(discovery.pending !== undefined ? { judgeError: discovery.pending, pending: discovery.pending } : discovery.error !== undefined ? { judgeError: `rule discovery: ${discovery.error}` } : {}),
+    ...(discovery.pending !== undefined ? { judgeError: discovery.pending, pending: discovery.pending, settled: settledOf(discovery) } : discovery.error !== undefined ? { judgeError: `rule discovery: ${discovery.error}` } : {}),
   };
+}
+
+// why a running discovery failed once it lands, undefined when it found the rules
+function settledOf(discovery: Discovery): Promise<string | undefined> | undefined {
+  return discovery.settled?.then(
+    (d) => (d.error !== undefined ? `rule discovery: ${d.error}` : undefined),
+    (error: unknown) => `rule discovery: ${error instanceof Error ? error.message : String(error)}`,
+  );
 }
 
 // a plan for an issue: the issue's title and body beside the plan text, so the judge reads the plan against what was asked.

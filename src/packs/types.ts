@@ -129,4 +129,6 @@ export type Subject = {
   judgeError?: string;
   // work the subject needs outlasted its wait and keeps running, so the same call made again can answer
   pending?: string;
+  // with pending: settles once that work has finished, to why it failed or undefined when it did not
+  settled?: Promise<string | undefined>;
 };
