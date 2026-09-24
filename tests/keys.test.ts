@@ -26,7 +26,7 @@ describe('watch session keys', () => {
   it('names the session each key belongs to and marks the pre-session keys', () => {
     const k = sessionKeys('abc-1');
     const session = { kind: 'session', id: 'abc-1' };
-    expect([k.subs, k.mail, k.seen, k.state('o/r'), k.tenure, k.agents, k.tally].map(ownerOf)).toEqual([session, session, session, session, session, session, session]);
+    expect([k.subs, k.mail, k.seen, k.state('o/r'), k.tenure, k.agents, k.tally, k.held].map(ownerOf)).toEqual([session, session, session, session, session, session, session, session]);
     expect(ownerOf('watch:o/r')).toBe('legacy');
     expect(ownerOf('decisions')).toBeUndefined();
     const r = rulesKeys('o/r@dev');

@@ -182,6 +182,17 @@ describe('post', () => {
     expect(posted).toHaveLength(1);
   });
 
+  it('writes nothing and tells nothing when a reload handed the held post to another environment', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const { h, land } = slowHost(posted);
+    const kept: unknown[] = [];
+    const r = await postCall({ ...h, hold: async (input) => (kept.push(input), async () => false) }, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }, 'enforce');
+    expect(kept).toEqual([{ repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }]);
+    land();
+    expect(await r.later).toMatchObject({ action: 'handed-over', handedOver: true });
+    expect(posted).toEqual([]);
+  });
+
   it('refuses a held post that breaks a rule once its rules are known, and writes nothing', async () => {
     const posted: { repo: string; post: ForgePost }[] = [];
     const { h, land } = slowHost(posted);

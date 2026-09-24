@@ -2,7 +2,8 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
 import { POST_TOOL, postKind } from '../src/gate/channels.ts';
 import { enact, gateCall, gateText, OUTBOUND_MODES, verdictLater, verdictOf, type Gated, type Later, type OutboundMode } from '../src/gate/outbound.ts';
-import { METHODS, pendingNote, postCall, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
+import { HeldPosts } from '../src/gate/held.ts';
+import { METHODS, pendingNote, postCall, postLabel, postOf, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
 import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
 import { Verdicts } from '../src/gate/verdicts.ts';
 import { ghWriteOf, GitHubForge } from '../src/forge/github.ts';
@@ -110,6 +111,8 @@ type Runtime = GradeHost & {
   watches?: Watches;
   // the channels a delivery reaches its recipient by: the watch's, and what follows an outbound call once its rules are known
   mailbox: Mailbox;
+  // the posts held while their rules are found, kept so a reload hands them on
+  held: HeldPosts;
   sessionId: string;
   // the lifetime of the session's watch keys and every rules cache
   storeKeys: StoreKeys;
@@ -167,12 +170,13 @@ export const register: Register = (on, rawOptions) => {
   };
 
   // what an outbound call whose rules were still being found came to once they are known: recorded, and told to the
-  // caller that made it through the mailbox. an instance a reload replaced only logs it, since its deliveries stand down
+  // caller that made it through the mailbox. an instance a reload replaced only logs it, since its deliveries stand down,
+  // and a held post it handed over is told by the environment that took it
   const follow = (log: (text: string) => void, agentId: string | undefined, later: Promise<Later>, digest: string) =>
     void later.then(async (l) => {
       record('outbound', l.action, { digest: `${digest}: ${l.decision?.reason ?? l.text}` });
       const rt = runtime;
-      if (rt && (await rt.tenure.holds())) await rt.mailbox.deliver({ to: agentId, text: l.text });
+      if (!l.handedOver && rt && (await rt.tenure.holds())) await rt.mailbox.deliver({ to: agentId, text: l.text });
       else log(l.text);
     });
 
@@ -341,7 +345,7 @@ export const register: Register = (on, rawOptions) => {
         })
       : undefined;
     const discoveries = new Discoveries({ judge, store, now: () => Date.now(), log: (text) => $.ui.log(text), schedule: (ms, fn) => $.clock.after(ms, fn), waitMs: DISCOVERY_WAIT_MS });
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: letters, sessionId, storeKeys, tenure, verdicts: new Verdicts(store) };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: letters, held: new HeldPosts({ store: owned, key: keys.held, holds: () => tenure.holds(), now: () => Date.now(), id: () => tenureToken(Date.now()) }), sessionId, storeKeys, tenure, verdicts: new Verdicts(store) };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     // a subagent keeps the tools it was spawned with, so what it was offered is recorded as each is registered
@@ -477,6 +481,8 @@ export const register: Register = (on, rawOptions) => {
       for (const repo of new Set([...(bound.repo ? [bound.repo] : []), ...watchRepos])) warm(repo, checkouts.remoteConfig(forge, repo).then((c) => discoveries.settle(forgeSource(forge, repo), c.rules)));
       if (bound.git) warm(bound.root, discoveries.settle(ruleSource({ forge, fs }, { checkout: bound, named: false }, bound.repo), bound.config.rules));
     }
+    // after the discoveries, so a post taken over finds its rules on the way
+    void takeOver(ready(), (text) => $.ui.log(text)).catch((error: unknown) => $.ui.log(`sift post: taking over held posts failed (${messageOf(error)})`));
     if (watches) {
       await watches.load();
       if (options.watch) {
@@ -617,28 +623,50 @@ export const register: Register = (on, rawOptions) => {
   });
 
   // the destination is the repo the call names; the rules pack is the caller's, as a grade's is
+  // one post made for the caller it answers, logged, what follows it handed to the mailbox; the answer is its text,
+  // and whether it refuses
+  const makePost = async (rt: Runtime, log: (text: string) => void, to: string | undefined, input: PostInput): Promise<{ text: string; refused: boolean }> => {
+    const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(to))).checkout.packs['rules'];
+    const hold = async (held: PostInput) => {
+      const id = await rt.held.keep(to, held);
+      return () => rt.held.claim(id);
+    };
+    const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, verdicts: rt.verdicts, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo), hold }, pack, input, options.outbound, options.shadow);
+    const { outbound, decision, action } = posted;
+    if (outbound && decision && action) {
+      const override = posted.override !== undefined ? { override: posted.override, reason: decision.reason, text: outbound.text } : {};
+      record('outbound', action, { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}`, ...override });
+      for (const w of decision.warnings) log(`sift outbound (${outbound.channel}): ${w}`);
+      if (!decision.allow && options.shadow) log(`sift outbound (shadow): would ${options.outbound === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
+    }
+    if (posted.later) follow(log, to, posted.later, `${outbound?.channel} ${String(input.repo)}`);
+    if ('refused' in posted) return { refused: true, text: `sift post refused: ${posted.refused}. ${decision ? 'Rewrite the text, or post again with override set to the reason it should go through as written.' : 'Fix the input and post again.'}` };
+    if ('held' in posted) return { refused: false, text: `held: ${posted.held} ${arrival(to)} Do not post it again.` };
+    if (posted.verdict !== undefined) return { refused: false, text: `${posted.url}\n${posted.verdict}${posted.later ? `. ${arrival(to)}` : ''}` };
+    return { refused: false, text: posted.url };
+  };
+
+  // the destination is the repo the call names; the rules pack is the caller's, as a grade's is
   on('tool.call', { tool: POST_TOOL }, async ($, e) => {
     try {
-      const rt = ready();
-      const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout.packs['rules'];
-      const input = e as unknown as PostInput;
-      const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, verdicts: rt.verdicts, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.outbound, options.shadow);
-      const { outbound, decision, action } = posted;
-      if (outbound && decision && action) {
-        const override = posted.override !== undefined ? { override: posted.override, reason: decision.reason, text: outbound.text } : {};
-        record('outbound', action, { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}`, ...override });
-        for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-        if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${options.outbound === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
-      }
-      if (posted.later) follow((text) => $.ui.log(text), e.agentId, posted.later, `${outbound?.channel} ${String(input.repo)}`);
-      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. ${decision ? 'Rewrite the text, or post again with override set to the reason it should go through as written.' : 'Fix the input and post again.'}` };
-      if ('held' in posted) return { result: [{ type: 'text', text: `held: ${posted.held} ${arrival(e.agentId)} Do not post it again.` }] };
-      if (posted.verdict !== undefined) return { result: [{ type: 'text', text: `${posted.url}\n${posted.verdict}${posted.later ? `. ${arrival(e.agentId)}` : ''}` }] };
-      return { result: [{ type: 'text', text: posted.url }] };
+      const made = await makePost(ready(), (text) => $.ui.log(text), e.agentId, e as unknown as PostInput);
+      return made.refused ? { deny: made.text } : { result: [{ type: 'text', text: made.text }] };
     } catch (error) {
       return { deny: `sift post failed: ${messageOf(error)}` };
     }
   });
+
+  // the posts an environment a reload replaced left held, made here and each told to its caller: the post goes out
+  // once whichever environment makes it, and its caller hears how it went
+  const takeOver = async (rt: Runtime, log: (text: string) => void) => {
+    for (const held of await rt.held.takeOver()) {
+      const parsed = postOf(held.input, rt.forge);
+      const label = 'error' in parsed ? String(held.input.kind) : postLabel(parsed.repo, parsed.post, String(held.input.kind));
+      const head = `sift post: a reload replaced the sift environment that held the ${label}, and this one took it over`;
+      const made = await makePost(rt, log, held.to, held.input).catch((error: unknown) => ({ refused: true, text: `sift post failed: ${messageOf(error)}` }));
+      await rt.mailbox.deliver({ to: held.to, text: `${head}. ${made.text}` }).catch((error: unknown) => log(`${head}, and could not tell its caller (${messageOf(error)}): ${made.text}`));
+    }
+  };
 
   on('agent.spawn', async (_$, e, next) => {
     const r = await next(e);

@@ -89,7 +89,8 @@ export async function settleDecision(decision: OutboundDecision, again: () => Pr
 
 // what a pending decision came to once its rules were known: the decision, the action the log records and the text
 // the caller is told
-export type Later = { decision?: OutboundDecision; action: string; text: string };
+// handedOver: another environment makes the post and tells its caller, so this one only logs the text
+export type Later = { decision?: OutboundDecision; action: string; text: string; handedOver?: boolean };
 
 // the verdict on text judged before its rules were known, once they are, told under head: the advice on text sent
 // under advise, or under enforce the verdict a call refused while they were found would meet

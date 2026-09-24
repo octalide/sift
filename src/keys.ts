@@ -23,6 +23,7 @@ export const sessionKeys = (session: string) => ({
   tenure: `tenure:${session}`,
   agents: `agents:${session}`,
   tally: `tally:${session}`,
+  held: `held:${session}`,
 });
 
 // every key rule discovery writes for one scope: the cache every session shares, and when a discovery last read it
@@ -41,6 +42,7 @@ const PREFIXES: [string, Owner['kind']][] = [
   ['tenure:', 'session'],
   ['agents:', 'session'],
   ['tally:', 'session'],
+  ['held:', 'session'],
   ['rules:', 'rules'],
   ['rules-seen:', 'rules'],
 ];

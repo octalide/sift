@@ -85,6 +85,9 @@ export type PostHost = {
   verdicts: Verdicts;
   // the conventions of a repository on the forge
   config: (repo: string) => Promise<RepoConfig>;
+  // keeps a post held while its rules are found, answering the claim to make before writing it: false once a reload
+  // handed the post to the environment that replaced this one. unset, a held post is only held in memory
+  hold?: (input: PostInput) => Promise<() => Promise<boolean>>;
 };
 
 // action is what the decision log records, verdict what an advised or overridden write carries back to the caller.
@@ -119,8 +122,10 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
       const later = verdictLater(mode, outbound, decision, judged, `sift outbound advice on the ${label} written at ${url}, now that its rules are known`);
       return { outbound, decision, action, url, later, verdict: pendingNote(outbound, repo) };
     }
+    const claim = host.hold ? await host.hold(input) : async () => true;
     const later = settleDecision(decision, judged).then(
       async (d): Promise<Later> => {
+        if (!(await claim())) return { decision: d, action: 'handed-over', text: `sift post handed the held ${label} to the environment that replaced this one on a reload`, handedOver: true };
         const done = enact(mode, d, shadow);
         if (done.refuse) return { decision: d, action: done.action, text: `sift post refused the held ${label}, and nothing was written: ${outbound.channel} to ${repo}: ${d.reason}. Rewrite the text, or post again with override set to the reason it should go through as written.` };
         return { decision: d, action: done.action, text: `sift post wrote the held ${label}: ${await host.forge.post(repo, post)}` };
