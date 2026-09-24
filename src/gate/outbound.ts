@@ -37,8 +37,9 @@ export async function outboundOf(tool: string, input: Record<string, unknown>, r
 }
 
 // report is the text's, one report of every part when it was judged in parts.
-// pending: the text could not be judged yet and the same call made again can be
-export type OutboundDecision = { allow: boolean; reason: string; report?: Report; warnings: string[]; pending?: boolean };
+// pending: the rules are still being found, so the text could not be judged yet; it settles once they are, to why
+// they could not be found or undefined, and settleDecision then judges the text
+export type OutboundDecision = { allow: boolean; reason: string; report?: Report; warnings: string[]; pending?: Promise<string | undefined> };
 
 // the channel's length limit is mechanical; the rules are judged on every part of the text, an unclear rule warns, and
 // a rule violated in any part is asked again beside the rest of its document before it denies, the refusal quoting the
@@ -49,9 +50,9 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   if (out.limit !== undefined && out.text.length > out.limit) {
     return { allow: false, reason: `${out.channel} text is ${out.text.length} chars, the limit is ${out.limit}`, warnings: [] };
   }
-  // unjudged text is never let through for want of time: the rules are still being found, and the retry finds them
+  // unjudged text is never let through for want of time: the rules are still being found, and the caller settles the decision once they are
   const pending = subjects.find((s) => s.pending !== undefined);
-  if (pending) return { allow: false, reason: pending.pending!, warnings: [], pending: true };
+  if (pending) return { allow: false, reason: pending.pending!, warnings: [], pending: pending.settled ?? Promise.resolve(undefined) };
   const key = verdictKey(out, subjects, pack, judge);
   const kept = await verdicts.get(key);
   if (kept) return kept;
@@ -76,18 +77,51 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   return { ...verdict, report, warnings };
 }
 
+// how many times a pending decision waits out a discovery: the one it was pending on, and one more when the documents
+// changed while it ran and the judgement again found a fresh discovery running
+const SETTLE_ROUNDS = 2;
+
+// a pending decision once its rules are known: the text refused unjudged, naming why they could not be found, else
+// judged again, which now reads them
+export async function settleDecision(decision: OutboundDecision, again: () => Promise<OutboundDecision>): Promise<OutboundDecision> {
+  let d = decision;
+  for (let round = 0; d.pending; round++) {
+    if (round === SETTLE_ROUNDS) return { allow: false, reason: `the text was not judged: ${d.reason}`, warnings: [] };
+    const failed = await d.pending;
+    if (failed !== undefined) return { allow: false, reason: `the text was not judged: ${failed}`, warnings: [] };
+    d = await again();
+  }
+  return d;
+}
+
+// what a pending decision came to once its rules were known: the decision, the action the log records and the text
+// the caller is told
+// handedOver: another environment makes the post and tells its caller, so this one only logs the text
+export type Later = { decision?: OutboundDecision; action: string; text: string; handedOver?: boolean };
+
+// the verdict on text judged before its rules were known, once they are, told under head: the advice on text sent
+// under advise, or under enforce the verdict a call refused while they were found would meet
+export function verdictLater(mode: Exclude<OutboundMode, 'off'>, out: Outbound, decision: OutboundDecision, again: () => Promise<OutboundDecision>, head: string): Promise<Later> {
+  return settleDecision(decision, again).then(
+    (d): Later => ({ decision: d, action: enact(mode, d, false).action, text: `${head}: ${verdictOf(out, d)}` }),
+    (error: unknown): Later => ({ action: 'fail', text: `${head}: the text was not judged: ${error instanceof Error ? error.message : String(error)}` }),
+  );
+}
+
 // how outbound text is held to the rules: off judges nothing, advise judges and lets everything through with the
 // verdict attached, enforce refuses a broken rule
 export const OUTBOUND_MODES = ['off', 'advise', 'enforce'] as const;
 export type OutboundMode = (typeof OUTBOUND_MODES)[number];
 
 // what a mode makes of a decision: the action the decision log records, and whether the call is refused. an override
-// lets an enforced refusal through; shadow refuses nothing and attaches nothing
+// lets an enforced refusal through; shadow refuses nothing and attaches nothing. a pending decision is recorded
+// pending, and again as its verdict once its rules are known
 export function enact(mode: OutboundMode, decision: OutboundDecision, shadow: boolean, override?: string): { action: string; refuse: boolean; advise: boolean } {
-  if (mode === 'advise') return { action: decision.allow ? 'allow' : shadow ? 'would-advise' : 'advise', refuse: false, advise: !shadow };
+  if (mode === 'advise') return { action: decision.allow ? 'allow' : shadow ? 'would-advise' : decision.pending ? 'pending' : 'advise', refuse: false, advise: !shadow };
   if (decision.allow) return { action: 'allow', refuse: false, advise: false };
   if (override !== undefined) return { action: 'override', refuse: false, advise: false };
-  return { action: shadow ? 'would-deny' : 'deny', refuse: !shadow, advise: false };
+  if (shadow) return { action: 'would-deny', refuse: false, advise: false };
+  return { action: decision.pending ? 'pending' : 'deny', refuse: true, advise: false };
 }
 
 // the verdict an advised call carries back to its caller
@@ -98,7 +132,8 @@ export function verdictOf(out: Outbound, decision: OutboundDecision): string {
 
 export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'discoveries'> & { verdicts: Verdicts };
 
-export type Gated = { outbound: Outbound; decision: OutboundDecision };
+// checkout: the one whose rules judged the text
+export type Gated = { outbound: Outbound; decision: OutboundDecision; checkout: Checkout };
 
 // one tool call under the checkout it is made from: that checkout's channel table, rules pack and rule documents;
 // undefined when the call sends no text or the checkout has no rules pack
@@ -112,7 +147,7 @@ export async function gateText(host: GateHost, checkout: Checkout, outbound: Out
   const pack = checkout.packs['rules'];
   if (!pack) return undefined;
   const subjects = await textRulesSubjects({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), discoveries: host.discoveries }, outboundTarget(outbound), checkout.config);
-  return { outbound, decision: await gateOutbound(outbound, subjects, pack, host.judge, checkout.config, host.verdicts) };
+  return { outbound, decision: await gateOutbound(outbound, subjects, pack, host.judge, checkout.config, host.verdicts), checkout };
 }
 
 // what the rules read of outbound text: the text, what it is and what the write sets beside it

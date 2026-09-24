@@ -444,6 +444,8 @@ describe('rules subject', () => {
     release();
     const done = await second;
     expect(done.pending).toBeUndefined();
+    // the pending answer settles with the run it left going, found without a failure
+    expect(await s.settled).toBeUndefined();
     expect(done.facts['docs']).toEqual(['CONTRIBUTING.md']);
     // one paragraph round, the contributing guide being kept unjudged: a second run would have asked again
     expect(asked).toHaveLength(1);

@@ -166,13 +166,88 @@ describe('post', () => {
     expect(posted).toHaveLength(1);
   });
 
-  it('refuses and writes nothing while the named repository\'s rule discovery outlasts its wait', async () => {
+  // a host whose rule discovery outlasts its wait until the test lets it land, and fails outright when down says so
+  const slowHost = (posted: { repo: string; post: ForgePost }[], down = false) => {
+    let land!: () => void;
+    const landed = new Promise<void>((r) => (land = r));
+    const inner = judge();
+    const slow: Judge = { name: 'slow', ask: async (state, q) => (await landed, down ? { ok: false, reason: 'unavailable', message: 'jev down', backend: 'slow' } : inner.ask(state, q)) };
+    // only the first call's wait runs out
+    let waits = 0;
+    const h = { ...host(posted), discoveries: discoveries(slow, undefined, { schedule: (_, fn) => (waits++ === 0 && void Promise.resolve().then(fn), { cancel: () => {} }) }) };
+    return { h, land };
+  };
+
+  it('holds a post under enforce while the named repository\'s rules are found, then judges and writes it in the same call', async () => {
     const posted: { repo: string; post: ForgePost }[] = [];
-    const never: Judge = { name: 'never', ask: () => new Promise(() => {}) };
-    const h = { ...host(posted, [], {}, never), discoveries: discoveries(never, undefined, { schedule: (_, fn) => (void Promise.resolve().then(fn), { cancel: () => {} }) }) };
+    const { h, land } = slowHost(posted);
     const r = await postCall(h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }, 'enforce');
-    expect(r).toMatchObject({ refused: 'github-pr-comment to o/target: rule discovery for o/target outlasted its 5 s wait and keeps running; the next call on it reuses what it finds', decision: { allow: false, pending: true } });
+    expect(r).toMatchObject({ action: 'hold', held: 'the pr-comment on o/target#4 is held while the rules of o/target are still being found. It is judged and written once they are known, and the url or the refusal follows' });
     expect(posted).toEqual([]);
+    land();
+    expect(await r.later).toMatchObject({ action: 'allow', text: 'sift post wrote the held pr-comment on o/target#4: https://github.com/o/target/pr/1' });
+    expect(posted).toHaveLength(1);
+  });
+
+  it('writes nothing and tells nothing when a reload handed the held post to another environment', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const { h, land } = slowHost(posted);
+    const kept: unknown[] = [];
+    const r = await postCall({ ...h, hold: async (input) => (kept.push(input), async () => false) }, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }, 'enforce');
+    expect(kept).toEqual([{ repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }]);
+    land();
+    expect(await r.later).toMatchObject({ action: 'handed-over', handedOver: true });
+    expect(posted).toEqual([]);
+  });
+
+  it('refuses a held post that breaks a rule once its rules are known, and writes nothing', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const { h, land } = slowHost(posted);
+    const r = await postCall(h, pack, { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' }, 'enforce');
+    land();
+    const later = await r.later!;
+    expect(later.action).toBe('deny');
+    expect(later.text).toBe('sift post refused the held issue-create "Watcher misses edits" on o/target, and nothing was written: github-issue-create to o/target: breaks: CONTRIBUTING.md "Prose: No em dashes in anything you write.": "It drops them — every time." does not follow it. Rewrite the text, or post again with override set to the reason it should go through as written.');
+    expect(posted).toEqual([]);
+  });
+
+  it('refuses a held post naming the failure when discovery fails outright, and writes it under advise saying it was not judged', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const held = slowHost(posted, true);
+    const r = await postCall(held.h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }, 'enforce');
+    held.land();
+    expect((await r.later!).text).toBe('sift post refused the held pr-comment on o/target#4, and nothing was written: github-pr-comment to o/target: the text was not judged: rule discovery: unavailable: jev down. Rewrite the text, or post again with override set to the reason it should go through as written.');
+    expect(posted).toEqual([]);
+    const advised = slowHost(posted, true);
+    const a = await postCall(advised.h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }, 'advise');
+    expect(a).toMatchObject({ url: 'https://github.com/o/target/pr/1', action: 'pending' });
+    advised.land();
+    expect((await a.later!).text).toBe('sift outbound advice on the pr-comment on o/target#4 written at https://github.com/o/target/pr/1, now that its rules are known: sift outbound (github-pr-comment), note: the text was not judged: rule discovery: unavailable: jev down');
+    expect(posted).toHaveLength(1);
+  });
+
+  it('writes at once under advise while the rules are found, and the advice follows', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const { h, land } = slowHost(posted);
+    const r = await postCall(h, pack, { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' }, 'advise');
+    expect(r).toMatchObject({ url: 'https://github.com/o/target/issue/1', action: 'pending', verdict: 'sift outbound (github-issue-create): the rules of o/target are still being found, so the text went out unjudged and the advice on it follows once they are known' });
+    expect(posted).toHaveLength(1);
+    land();
+    const later = await r.later!;
+    expect(later.action).toBe('advise');
+    expect(later.text).toBe('sift outbound advice on the issue-create "Watcher misses edits" on o/target written at https://github.com/o/target/issue/1, now that its rules are known: sift outbound (github-issue-create), note: this may break CONTRIBUTING.md "Prose: No em dashes in anything you write.": "It drops them — every time." does not follow it');
+    expect(posted).toHaveLength(1);
+  });
+
+  it('writes at once with nothing to follow in shadow or with an override while the rules are found', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const shadow = await postCall(slowHost(posted).h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }, 'enforce', true);
+    expect(shadow).toMatchObject({ url: 'https://github.com/o/target/pr/1', action: 'would-deny' });
+    expect(shadow.later).toBeUndefined();
+    const override = await postCall(slowHost(posted).h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.', override: 'the owner asked for it now' }, 'enforce');
+    expect(override).toMatchObject({ url: 'https://github.com/o/target/pr/1', action: 'override' });
+    expect(override.later).toBeUndefined();
+    expect(posted).toHaveLength(2);
   });
 
   it('writes with no judge call under off', async () => {

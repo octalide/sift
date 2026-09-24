@@ -48,7 +48,8 @@ export class Mailbox {
     }
   }
 
-  async deliver(d: WatchDelivery): Promise<void> {
+  // a watch delivery, or anything else that follows a call once it is known: the main loop's when to is unset
+  async deliver(d: Pick<WatchDelivery, 'to' | 'text'>): Promise<void> {
     if (d.to === undefined) return this.host.submit(d.text);
     this.letters.push({ to: d.to, text: d.text, at: this.host.now() });
     await this.save();
