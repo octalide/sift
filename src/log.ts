@@ -12,7 +12,7 @@ const MAX = 500;
 export type Stats = {
   calls: number;
   failures: number;
-  byModule: Record<string, { calls: number; acted: number; shadow: number; latencyMs: number; requestTokens: number; responseTokens: number; tokensRemoved: number }>;
+  byModule: Record<string, { calls: number; acted: number; shadow: number; latencyMs: number; requestTokens: number; responseTokens: number; tokensRemoved: number; actions: Record<string, number> }>;
   // this session alone, every decision it made; the ring holds the last MAX of every session that ran the plugin
   session: Tally;
   cost: Cost;
@@ -107,8 +107,9 @@ export class DecisionLog {
       stats.calls += 1;
       if (!d.ok) stats.failures += 1;
       add(stats.cost, d);
-      const m = (stats.byModule[d.module] ??= { calls: 0, acted: 0, shadow: 0, latencyMs: 0, requestTokens: 0, responseTokens: 0, tokensRemoved: 0 });
+      const m = (stats.byModule[d.module] ??= { calls: 0, acted: 0, shadow: 0, latencyMs: 0, requestTokens: 0, responseTokens: 0, tokensRemoved: 0, actions: {} });
       m.calls += 1;
+      m.actions[d.action] = (m.actions[d.action] ?? 0) + 1;
       if (d.shadow) m.shadow += 1;
       else if (d.action !== 'none' && d.action !== 'fallback') m.acted += 1;
       m.latencyMs += d.latencyMs ?? 0;

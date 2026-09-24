@@ -648,7 +648,8 @@ export const register: Register = (on, rawOptions) => {
         ([m, s]) =>
           `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms` +
           (s.requestTokens || s.responseTokens ? `  in ${k(s.requestTokens)} out ${k(s.responseTokens)}` : '') +
-          (s.tokensRemoved ? `  removed ${k(s.tokensRemoved)}` : ''),
+          (s.tokensRemoved ? `  removed ${k(s.tokensRemoved)}` : '') +
+          (m === 'outbound' ? `  advised ${s.actions['advise'] ?? 0}  denied ${(s.actions['deny'] ?? 0) + (s.actions['refuse'] ?? 0)}  overridden ${s.actions['override'] ?? 0}` : ''),
       )
       .join('\n');
     const cost = (c: Cost) => `judge in ${k(c.requestTokens)}, out ${k(c.responseTokens)}, context removed ${k(c.tokensRemoved)}`;
@@ -659,7 +660,7 @@ export const register: Register = (on, rawOptions) => {
     return [
       `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${repo ?? 'none'}`,
       judgeLine(rt.judge.name, rt.apiKeyOrigin, rt.judge.keyRejected),
-      `enabled: ${enabled}`,
+      `enabled: ${enabled}; outbound ${options.outbound}`,
       watch,
       `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,
       `all sessions (ring of 500): ${stats.calls} decisions, ${stats.failures} failures`,
