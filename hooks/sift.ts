@@ -1,8 +1,8 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
 import { POST_TOOL, postKind } from '../src/gate/channels.ts';
-import { enact, gateCall, OUTBOUND_MODES, verdictOf, type OutboundMode } from '../src/gate/outbound.ts';
-import { METHODS, postCall, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
+import { adviseLater, enact, gateCall, gateText, OUTBOUND_MODES, verdictOf, type Later, type Outbound, type OutboundDecision, type OutboundMode } from '../src/gate/outbound.ts';
+import { METHODS, pendingNote, postCall, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
 import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
 import { Verdicts } from '../src/gate/verdicts.ts';
 import { ghWriteOf, GitHubForge } from '../src/forge/github.ts';
@@ -21,7 +21,7 @@ import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
 import { Discoveries, DISCOVERY_WAIT_MS } from '../src/rules/discover.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, commandInputOf, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
-import { Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
+import { GRACE_MS, Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
 import { SEEN_EVERY_MS, sessionKeys, StoreKeys } from '../src/keys.ts';
 import { Spawns } from '../src/spawns.ts';
 import { Tenure, tenureToken } from '../src/tenure.ts';
@@ -108,8 +108,8 @@ type Runtime = GradeHost & {
   session: () => Promise<Checkout>;
   // the session's watch subscriptions and their pollers; absent without the triage pack
   watches?: Watches;
-  // the channels a delivery reaches its recipient by; with the watches
-  mailbox?: Mailbox;
+  // the channels a delivery reaches its recipient by: the watch's, and what follows an outbound call once its rules are known
+  mailbox: Mailbox;
   sessionId: string;
   // the lifetime of the session's watch keys and every rules cache
   storeKeys: StoreKeys;
@@ -165,6 +165,22 @@ export const register: Register = (on, rawOptions) => {
       ...extra,
     });
   };
+
+  // what an outbound call whose rules were still being found came to once they are known: recorded, and told to the
+  // caller that made it through the mailbox. an instance a reload replaced only logs it, since its deliveries stand down
+  const follow = (log: (text: string) => void, agentId: string | undefined, later: Promise<Later>, digest: string) =>
+    void later.then(async (l) => {
+      record('outbound', l.action, { digest: `${digest}: ${l.decision?.reason ?? l.text}` });
+      const rt = runtime;
+      if (rt && (await rt.tenure.holds())) await rt.mailbox.deliver({ to: agentId, text: l.text });
+      else log(l.text);
+    });
+
+  // where what follows a call reaches the caller that made it
+  const arrival = (agentId: string | undefined) =>
+    agentId
+      ? `It arrives with the result of your next tool call, or as a message that resumes you if you make none within ${GRACE_MS / 1000} s or have ended your turn.`
+      : 'It arrives as a prompt in this session.';
 
   const ready = (): Runtime => {
     if (!runtime) throw new Error(UNBOUND);
@@ -325,7 +341,7 @@ export const register: Register = (on, rawOptions) => {
         })
       : undefined;
     const discoveries = new Discoveries({ judge, store, now: () => Date.now(), log: (text) => $.ui.log(text), schedule: (ms, fn) => $.clock.after(ms, fn), waitMs: DISCOVERY_WAIT_MS });
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: watches ? letters : undefined, sessionId, storeKeys, tenure, verdicts: new Verdicts(store) };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: letters, sessionId, storeKeys, tenure, verdicts: new Verdicts(store) };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     // a subagent keeps the tools it was spawned with, so what it was offered is recorded as each is registered
@@ -452,8 +468,8 @@ export const register: Register = (on, rawOptions) => {
     });
     await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|poll|pause|resume|reset|deferred [repo]|start [repo] [for <pr|branch>]|subscribe <repo> [scope]|unsubscribe <id>]' });
 
+    await letters.load();
     if (watches) {
-      await letters.load();
       await watches.load();
       if (options.watch) {
         const repos = options.watchRepos.split(',').map((r) => r.trim()).filter(Boolean);
@@ -498,6 +514,17 @@ export const register: Register = (on, rawOptions) => {
       const checkoutOf = async () => (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout;
       // verdicts an advised call carries back beside its result
       const notes: string[] = [];
+      // a verdict at once, or when the rules are still being found, a note that it follows once they are known
+      const advised = (checkout: Checkout, outbound: Outbound, decision: OutboundDecision) => {
+        if (!decision.pending) return void notes.push(verdictOf(outbound, decision));
+        const again = async () => {
+          const gated = await gateText(rt, checkout, outbound);
+          if (!gated) throw new Error(`the checkout ${checkout.root} has no rules pack`);
+          return gated.decision;
+        };
+        follow((text) => $.ui.log(text), e.agentId, adviseLater(outbound, decision, again, `the ${outbound.channel} text of this ${e.tool} call`), outbound.channel);
+        notes.push(`${pendingNote(outbound, checkout.repo ?? checkout.root)}. ${arrival(e.agentId)}`);
+      };
       // a forge write from the shell goes through post under enforce, which names its destination; a loop without
       // post, and every loop under advise, has its text judged
       const raw = shell !== undefined ? rawWriteOf(rt.forge, shell) : undefined;
@@ -518,7 +545,7 @@ export const register: Register = (on, rawOptions) => {
           for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
           if (done.refuse) return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${fallbackNote(rt.forge)}. Rewrite the text or ask the user.` };
           if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${mode === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
-          if (done.advise) notes.push(verdictOf(outbound, decision));
+          if (done.advise) advised(gate.gated.checkout, outbound, decision);
         }
       }
       const checkout = mode !== 'off' && !raw ? await checkoutOf() : undefined;
@@ -530,7 +557,7 @@ export const register: Register = (on, rawOptions) => {
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
         if (done.refuse) return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${decision.pending ? 'Make the same call again.' : 'Rewrite the text or ask the user.'}` };
         if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${mode === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
-        if (done.advise) notes.push(verdictOf(outbound, decision));
+        if (done.advise) advised(gated.checkout, outbound, decision);
       }
       const r = await next(e);
       const pruned: Awaited<ReturnType<typeof next>> = !options.prune
@@ -580,8 +607,10 @@ export const register: Register = (on, rawOptions) => {
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
         if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${options.outbound === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
       }
-      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. ${decision?.pending ? 'Make the same post again.' : decision ? 'Rewrite the text, or post again with override set to the reason it should go through as written.' : 'Fix the input and post again.'}` };
-      if (posted.verdict !== undefined) return { result: [{ type: 'text', text: `${posted.url}\n${posted.verdict}` }] };
+      if (posted.later) follow((text) => $.ui.log(text), e.agentId, posted.later, `${outbound?.channel} ${String(input.repo)}`);
+      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. ${decision ? 'Rewrite the text, or post again with override set to the reason it should go through as written.' : 'Fix the input and post again.'}` };
+      if ('held' in posted) return { result: [{ type: 'text', text: `held: ${posted.held} ${arrival(e.agentId)} Do not post it again.` }] };
+      if (posted.verdict !== undefined) return { result: [{ type: 'text', text: `${posted.url}\n${posted.verdict}${posted.later ? `. ${arrival(e.agentId)}` : ''}` }] };
       return { result: [{ type: 'text', text: posted.url }] };
     } catch (error) {
       return { deny: `sift post failed: ${messageOf(error)}` };
