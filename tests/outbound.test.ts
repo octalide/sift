@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG } from '../src/repo/config.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { GitHubForge, GH_WRITES } from '../src/forge/github.ts';
-import { enact, gateOutbound, outboundOf, settleDecision, verdictOf } from '../src/gate/outbound.ts';
+import { enact, gateOutbound, outboundOf, settleDecision, verdictLater, verdictOf } from '../src/gate/outbound.ts';
 import { channelTable, commandBody, defaultChannels, textAbout, type Channel } from '../src/gate/channels.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
@@ -271,6 +271,10 @@ describe('outbound gate', () => {
     const failed = { ...d, pending: Promise.resolve('rule discovery: unavailable: down') };
     expect(await settleDecision(failed, again)).toEqual({ allow: false, reason: 'the text was not judged: rule discovery: unavailable: down', warnings: [] });
     expect(await settleDecision(clear, again)).toBe(clear);
+    // the verdict a refused call would meet follows under its mode's action, and a failure says the text was not judged
+    const out = { channel: 'discord-message', text: 'a — b' };
+    expect(await verdictLater('enforce', out, d, async () => ({ allow: false, reason: 'breaks: No em dashes.', warnings: [] }), 'head')).toEqual({ decision: { allow: false, reason: 'breaks: No em dashes.', warnings: [] }, action: 'deny', text: 'head: sift outbound (discord-message), note: this may break No em dashes.' });
+    expect(await verdictLater('advise', out, failed, again, 'head')).toMatchObject({ action: 'advise', text: 'head: sift outbound (discord-message), note: the text was not judged: rule discovery: unavailable: down' });
     // one that never stops being pending is refused unjudged rather than waited on for ever
     expect(await settleDecision(d, async () => ({ ...d }))).toEqual({ allow: false, reason: `the text was not judged: ${reason}`, warnings: [] });
   });
@@ -284,6 +288,8 @@ describe('outbound mode', () => {
     expect(enact('advise', broken, false)).toEqual({ action: 'advise', refuse: false, advise: true });
     expect(enact('advise', clear, false)).toEqual({ action: 'allow', refuse: false, advise: true });
     expect(enact('advise', { ...broken, pending: Promise.resolve(undefined) }, false)).toEqual({ action: 'pending', refuse: false, advise: true });
+    expect(enact('enforce', { ...broken, pending: Promise.resolve(undefined) }, false)).toEqual({ action: 'pending', refuse: true, advise: false });
+    expect(enact('enforce', { ...broken, pending: Promise.resolve(undefined) }, true)).toEqual({ action: 'would-deny', refuse: false, advise: false });
     expect(enact('enforce', broken, false)).toEqual({ action: 'deny', refuse: true, advise: false });
     expect(enact('enforce', broken, false, 'the release PR CONTRIBUTING requires')).toEqual({ action: 'override', refuse: false, advise: false });
     expect(enact('enforce', clear, false, 'unneeded')).toEqual({ action: 'allow', refuse: false, advise: false });

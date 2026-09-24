@@ -6,7 +6,7 @@ import { textRulesSubjects } from '../repo/subjects.ts';
 import { forgeSource, type Discoveries } from '../rules/discover.ts';
 import { simpleCommands } from '../shell.ts';
 import { channelTable, defaultChannels, POST_TOOL, postKind, textAbout } from './channels.ts';
-import { adviseLater, enact, gateOutbound, outboundOf, settleDecision, verdictOf, type Later, type Outbound, type OutboundDecision, type OutboundMode } from './outbound.ts';
+import { enact, gateOutbound, outboundOf, settleDecision, verdictLater, verdictOf, type Later, type Outbound, type OutboundDecision, type OutboundMode } from './outbound.ts';
 import type { Verdicts } from './verdicts.ts';
 
 export const VERDICTS: ReviewVerdict[] = ['approve', 'request-changes', 'comment'];
@@ -116,7 +116,7 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
   if (decision.pending && !shadow && action !== 'override') {
     if (mode === 'advise') {
       const url = await host.forge.post(repo, post);
-      const later = adviseLater(outbound, decision, judged, `the ${label} written at ${url}`);
+      const later = verdictLater(mode, outbound, decision, judged, `sift outbound advice on the ${label} written at ${url}, now that its rules are known`);
       return { outbound, decision, action, url, later, verdict: pendingNote(outbound, repo) };
     }
     const later = settleDecision(decision, judged).then(

@@ -1,7 +1,7 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
 import { POST_TOOL, postKind } from '../src/gate/channels.ts';
-import { adviseLater, enact, gateCall, gateText, OUTBOUND_MODES, verdictOf, type Later, type Outbound, type OutboundDecision, type OutboundMode } from '../src/gate/outbound.ts';
+import { enact, gateCall, gateText, OUTBOUND_MODES, verdictLater, verdictOf, type Gated, type Later, type OutboundMode } from '../src/gate/outbound.ts';
 import { METHODS, pendingNote, postCall, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
 import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
 import { Verdicts } from '../src/gate/verdicts.ts';
@@ -522,16 +522,31 @@ export const register: Register = (on, rawOptions) => {
       const checkoutOf = async () => (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout;
       // verdicts an advised call carries back beside its result
       const notes: string[] = [];
-      // a verdict at once, or when the rules are still being found, a note that it follows once they are known
-      const advised = (checkout: Checkout, outbound: Outbound, decision: OutboundDecision) => {
-        if (!decision.pending) return void notes.push(verdictOf(outbound, decision));
+      // a pending decision's verdict, told to this caller under head once the rules are known. sift does not make
+      // this call itself, so it is never held: under advise it runs now, under enforce it is refused now
+      const later = ({ checkout, outbound, decision }: Gated, head: string) => {
         const again = async () => {
           const gated = await gateText(rt, checkout, outbound);
           if (!gated) throw new Error(`the checkout ${checkout.root} has no rules pack`);
           return gated.decision;
         };
-        follow((text) => $.ui.log(text), e.agentId, adviseLater(outbound, decision, again, `the ${outbound.channel} text of this ${e.tool} call`), outbound.channel);
+        if (mode !== 'off') follow((text) => $.ui.log(text), e.agentId, verdictLater(mode, outbound, decision, again, head), outbound.channel);
+      };
+      // a verdict at once, or when the rules are still being found, a note that it follows once they are known
+      const advised = (gated: Gated) => {
+        const { checkout, outbound, decision } = gated;
+        if (!decision.pending) return void notes.push(verdictOf(outbound, decision));
+        later(gated, `sift outbound advice on the ${outbound.channel} text of this ${e.tool} call, now that its rules are known`);
         notes.push(`${pendingNote(outbound, checkout.repo ?? checkout.root)}. ${arrival(e.agentId)}`);
+      };
+      // an enforced refusal; while the rules are still being found the call is refused unjudged, and the verdict it
+      // would meet follows once they are known, for the caller to run it again then
+      const refusal = (gated: Gated, then: string) => {
+        const { checkout, outbound, decision } = gated;
+        if (!decision.pending) return `sift outbound (${outbound.channel}): ${decision.reason}. ${then}`;
+        const scope = checkout.repo ?? checkout.root;
+        later(gated, `sift outbound: the rules of ${scope} are known, and this is the verdict the ${outbound.channel} text of the ${e.tool} call refused while they were found would meet. Run that call again, rewritten if it breaks a rule`);
+        return `sift outbound (${outbound.channel}): the rules of ${scope} are still being found, so this call is refused unjudged. The verdict on its text follows once they are known. ${arrival(e.agentId)} Run the call again then.`;
       };
       // a forge write from the shell goes through post under enforce, which names its destination; a loop without
       // post, and every loop under advise, has its text judged
@@ -551,9 +566,9 @@ export const register: Register = (on, rawOptions) => {
           const done = enact(mode, decision, options.shadow);
           record('outbound', done.action, { digest: `${outbound.channel}${without} ${outbound.text.length} chars: ${decision.reason}` });
           for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-          if (done.refuse) return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${fallbackNote(rt.forge)}. Rewrite the text or ask the user.` };
+          if (done.refuse) return { deny: refusal(gate.gated, `${fallbackNote(rt.forge)}. Rewrite the text or ask the user.`) };
           if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${mode === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
-          if (done.advise) advised(gate.gated.checkout, outbound, decision);
+          if (done.advise) advised(gate.gated);
         }
       }
       const checkout = mode !== 'off' && !raw ? await checkoutOf() : undefined;
@@ -563,9 +578,9 @@ export const register: Register = (on, rawOptions) => {
         const done = enact(mode, decision, options.shadow);
         record('outbound', done.action, { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-        if (done.refuse) return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${decision.pending ? 'Make the same call again.' : 'Rewrite the text or ask the user.'}` };
+        if (done.refuse) return { deny: refusal(gated, 'Rewrite the text or ask the user.') };
         if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${mode === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
-        if (done.advise) advised(gated.checkout, outbound, decision);
+        if (done.advise) advised(gated);
       }
       const r = await next(e);
       const pruned: Awaited<ReturnType<typeof next>> = !options.prune

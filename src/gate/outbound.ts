@@ -91,11 +91,11 @@ export async function settleDecision(decision: OutboundDecision, again: () => Pr
 // the caller is told
 export type Later = { decision?: OutboundDecision; action: string; text: string };
 
-// the advice on text sent before its rules were known, about naming what was sent
-export function adviseLater(out: Outbound, decision: OutboundDecision, again: () => Promise<OutboundDecision>, about: string): Promise<Later> {
-  const head = `sift outbound advice on ${about}, now that its rules are known`;
+// the verdict on text judged before its rules were known, once they are, told under head: the advice on text sent
+// under advise, or under enforce the verdict a call refused while they were found would meet
+export function verdictLater(mode: Exclude<OutboundMode, 'off'>, out: Outbound, decision: OutboundDecision, again: () => Promise<OutboundDecision>, head: string): Promise<Later> {
   return settleDecision(decision, again).then(
-    (d): Later => ({ decision: d, action: enact('advise', d, false).action, text: `${head}: ${verdictOf(out, d)}` }),
+    (d): Later => ({ decision: d, action: enact(mode, d, false).action, text: `${head}: ${verdictOf(out, d)}` }),
     (error: unknown): Later => ({ action: 'fail', text: `${head}: the text was not judged: ${error instanceof Error ? error.message : String(error)}` }),
   );
 }
@@ -106,13 +106,14 @@ export const OUTBOUND_MODES = ['off', 'advise', 'enforce'] as const;
 export type OutboundMode = (typeof OUTBOUND_MODES)[number];
 
 // what a mode makes of a decision: the action the decision log records, and whether the call is refused. an override
-// lets an enforced refusal through; shadow refuses nothing and attaches nothing. advice on a pending decision is
-// recorded pending, and again as the advice once its rules are known
+// lets an enforced refusal through; shadow refuses nothing and attaches nothing. a pending decision is recorded
+// pending, and again as its verdict once its rules are known
 export function enact(mode: OutboundMode, decision: OutboundDecision, shadow: boolean, override?: string): { action: string; refuse: boolean; advise: boolean } {
   if (mode === 'advise') return { action: decision.allow ? 'allow' : shadow ? 'would-advise' : decision.pending ? 'pending' : 'advise', refuse: false, advise: !shadow };
   if (decision.allow) return { action: 'allow', refuse: false, advise: false };
   if (override !== undefined) return { action: 'override', refuse: false, advise: false };
-  return { action: shadow ? 'would-deny' : 'deny', refuse: !shadow, advise: false };
+  if (shadow) return { action: 'would-deny', refuse: false, advise: false };
+  return { action: decision.pending ? 'pending' : 'deny', refuse: true, advise: false };
 }
 
 // the verdict an advised call carries back to its caller
