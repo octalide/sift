@@ -6,7 +6,7 @@ import { METHODS, pendingNote, postCall, rawWriteOf, VERDICTS, type PostInput } 
 import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
 import { Verdicts } from '../src/gate/verdicts.ts';
 import { ghWriteOf, GitHubForge } from '../src/forge/github.ts';
-import { grade, scopeOf, type GradeHost, type GradeOptions } from '../src/grade.ts';
+import { grade, ruleSource, scopeOf, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
 import { configLayers, globalConfigPath, readConfig } from '../src/repo/config.ts';
 import { digestOf, judgeLine, JUDGE_DEFAULTS, LoggedJudge, makeJudge, resolveApiKey, type ApiKey, type Backend, type Decision } from '../src/judge/index.ts';
@@ -18,7 +18,7 @@ import type { Report } from '../src/packs/types.ts';
 import { pruneCall } from '../src/prune/call.ts';
 import { PRUNE_TOOL, PruneLoops } from '../src/prune/loops.ts';
 import { PRUNE_DEFAULTS } from '../src/prune/prune.ts';
-import { Discoveries, DISCOVERY_WAIT_MS } from '../src/rules/discover.ts';
+import { Discoveries, DISCOVERY_WAIT_MS, forgeSource } from '../src/rules/discover.ts';
 import { Watches } from '../src/watch/registry.ts';
 import { CI_FILTERS, commandInputOf, formatSubscription, subscriptionOf, type CiFilter, type Filter, type SubscribeInput } from '../src/watch/subscription.ts';
 import { GRACE_MS, Mailbox, ownerNotice, refusalOf } from '../src/watch/mailbox.ts';
@@ -469,10 +469,18 @@ export const register: Register = (on, rawOptions) => {
     await $.command.register({ name: 'sift', description: 'sift status, log, prune and watch control', argumentHint: '[status|log|clear|prune off [n]|prune on|watch status|list|poll|pause|resume|reset|deferred [repo]|start [repo] [for <pr|branch>]|subscribe <repo> [scope]|unsubscribe <id>]' });
 
     await letters.load();
+    const watchRepos = options.watchRepos.split(',').map((r) => r.trim()).filter(Boolean);
+    // the rules a post and the gate read are found in the background before the first write needs them: the bound
+    // repository's and each watched one's on the forge, and the bound checkout's own
+    if (options.outbound !== 'off' && options.backend !== 'off' && bound.packs['rules']) {
+      const warm = (scope: string, found: Promise<unknown>) => void found.catch((error: unknown) => $.ui.log(`sift rules ${scope}: discovery at start failed (${messageOf(error)})`));
+      for (const repo of new Set([...(bound.repo ? [bound.repo] : []), ...watchRepos])) warm(repo, checkouts.remoteConfig(forge, repo).then((c) => discoveries.settle(forgeSource(forge, repo), c.rules)));
+      if (bound.git) warm(bound.root, discoveries.settle(ruleSource({ forge, fs }, { checkout: bound, named: false }, bound.repo), bound.config.rules));
+    }
     if (watches) {
       await watches.load();
       if (options.watch) {
-        const repos = options.watchRepos.split(',').map((r) => r.trim()).filter(Boolean);
+        const repos = [...watchRepos];
         if (repos.length === 0 && bound.repo) repos.push(bound.repo);
         if (repos.length === 0) $.ui.log(`sift watch: no repository to watch (set watchRepos or run in a checkout with a ${forge.name} remote)`);
         for (const repo of repos) await watches.subscribe({ repo, scope: { kind: 'repo' }, filter: defaultFilter() });
