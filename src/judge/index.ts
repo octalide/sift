@@ -1,7 +1,7 @@
 import { JEV_DEFAULTS, JevJudge, type FetchLike } from './jev.ts';
 import { ModelJudge, type CompleteLike } from './model.ts';
 import { labelOf } from './bands.ts';
-import { failureText, KEY_SOURCE_FIX, keyRefText, shadowedText, type Judge, type Judgement, type KeyOrigin, type KeySource, type Questions } from './types.ts';
+import { failureText, keyFix, keyRefText, shadowedText, type Judge, type Judgement, type KeyOrigin, type KeySource, type Questions } from './types.ts';
 
 export type Backend = 'auto' | 'jev' | 'model' | 'off';
 
@@ -26,12 +26,20 @@ export type ApiKey = { key: string; origin: KeyOrigin };
 
 const ending = (key: string) => key.slice(-4);
 
+// the credentials file of the session's config dir, where the engine keeps the apiKey option
+export function credentialsPath(configDir: string | undefined): string {
+  const dir = configDir?.replace(/\/+$/, '');
+  return dir ? `${dir}/.credentials.json` : '~/.claude/.credentials.json';
+}
+
 // the jev key and where it came from: the apiKey option, then the environment, then the settings env block.
-// every other source holding a key is named by its last four characters, so a shadowed key is visible
+// every other source holding a key is named by its last four characters, so a shadowed key is visible.
+// configDir is CLAUDE_CONFIG_DIR, which names the credentials file the option is stored in
 export async function resolveApiKey(sources: {
   option?: string;
   env: () => Promise<string | undefined>;
   settings: () => Promise<Record<string, unknown>>;
+  configDir: () => Promise<string | undefined>;
 }): Promise<ApiKey | undefined> {
   const fromSettings = ((await sources.settings())['env'] as Record<string, unknown> | undefined)?.['TYPESAFE_API_KEY'];
   const held: { source: KeySource; key: string | undefined }[] = [
@@ -42,7 +50,9 @@ export async function resolveApiKey(sources: {
   const [chosen, ...rest] = held.filter((h): h is { source: KeySource; key: string } => !!h.key);
   if (!chosen) return undefined;
   const others = rest.map((o) => ({ source: o.source, ending: ending(o.key), same: o.key === chosen.key }));
-  return { key: chosen.key, origin: { source: chosen.source, ending: ending(chosen.key), others } };
+  const origin: KeyOrigin = { source: chosen.source, ending: ending(chosen.key), others };
+  if (chosen.source === 'option') origin.stored = credentialsPath(await sources.configDir());
+  return { key: chosen.key, origin };
 }
 
 // the backend in one line; for jev where its key came from, its last four characters and any shadowed key, never a key.
@@ -50,7 +60,7 @@ export async function resolveApiKey(sources: {
 export function judgeLine(backend: string, origin?: KeyOrigin, rejected = false): string {
   if (backend !== 'jev' || !origin) return `judge: ${backend}`;
   const head = rejected
-    ? [`judge: jev, key rejected from ${keyRefText(origin)}`, `fix: ${KEY_SOURCE_FIX[origin.source]}`]
+    ? [`judge: jev, key rejected from ${keyRefText(origin)}`, `fix: ${keyFix(origin)}`]
     : [`judge: jev, key from ${keyRefText(origin)}`];
   return [...head, ...shadowedText(origin)].join('; ');
 }
