@@ -102,8 +102,9 @@ const noFile = async (): Promise<string> => {
 // one post under the repository it names: that repository's conventions, channels and rule documents, read from the
 // forge whatever the caller's working directory is. the mode decides what a limit or a broken rule does: off judges
 // nothing, advise writes with the verdict attached, enforce refuses unless the post carries an override. when the
-// rules are still being found, advise writes at once and the verdict follows in later, and enforce holds the write
-// until they are, so the caller never sends the text twice
+// text is not judged in full yet (its rules are still being found, or the rules it may break are being checked off the
+// hook's clock), advise writes at once and the verdict follows in later, and enforce holds the write until it is, so
+// the caller never sends the text twice
 export async function postCall(host: PostHost, pack: Pack | undefined, input: PostInput, mode: OutboundMode, shadow = false): Promise<Posted> {
   const parsed = postOf(input, host.forge);
   if ('error' in parsed) return { refused: parsed.error };
@@ -119,8 +120,8 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
   if (decision.pending && !shadow && action !== 'override') {
     if (mode === 'advise') {
       const url = await host.forge.post(repo, post);
-      const later = verdictLater(mode, outbound, decision, judged, `sift outbound advice on the ${label} written at ${url}, now that its rules are known`);
-      return { outbound, decision, action, url, later, verdict: pendingNote(outbound, repo) };
+      const later = verdictLater(mode, outbound, decision, judged, `sift outbound advice on the ${label} written at ${url}, now that ${decision.confirming ? 'it is checked' : 'its rules are known'}`);
+      return { outbound, decision, action, url, later, verdict: pendingNote(outbound, decision, repo) };
     }
     const claim = host.hold ? await host.hold(input) : async () => true;
     const later = settleDecision(decision, judged).then(
@@ -131,7 +132,10 @@ export async function postCall(host: PostHost, pack: Pack | undefined, input: Po
         return { decision: d, action: done.action, text: `sift post wrote the held ${label}: ${await host.forge.post(repo, post)}` };
       },
     ).catch((error: unknown): Later => ({ action: 'fail', text: `sift post failed on the held ${label}: ${messageOf(error)}` }));
-    return { outbound, decision, action: 'hold', later, held: `the ${label} is held while the rules of ${repo} are still being found. It is judged and written once they are known, and the url or the refusal follows` };
+    const held = decision.confirming
+      ? `the ${label} is held while the rules it may break are checked beside the rest of their documents and the lines that break them are found (${decision.reason}). It is written or refused once that is done, and the url or the refusal follows`
+      : `the ${label} is held while the rules of ${repo} are still being found. It is judged and written once they are known, and the url or the refusal follows`;
+    return { outbound, decision, action: 'hold', later, held };
   }
   if (refuse) return { outbound, decision, action, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
   const url = await host.forge.post(repo, post);
@@ -146,8 +150,10 @@ export function postLabel(repo: string, post: ForgePost, kind: string): string {
   return `${kind} on ${repo}#${post.number}`;
 }
 
-// what text sent before its rules were known carries back at once, scope naming whose rules
-export function pendingNote(out: Outbound, scope: string): string {
+// what text sent before it was judged in full carries back at once, scope naming whose rules: that they are still being
+// found, or the rules it may break, the checked advice on them following
+export function pendingNote(out: Outbound, decision: OutboundDecision, scope: string): string {
+  if (decision.confirming) return `sift outbound (${out.channel}), note: this ${decision.reason.replace(/^may break: /, 'may break ')}, and the checked advice, quoting the lines that break each rule, follows`;
   return `sift outbound (${out.channel}): the rules of ${scope} are still being found, so the text went out unjudged and the advice on it follows once they are known`;
 }
 

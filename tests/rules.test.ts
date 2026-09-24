@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { templateKind } from '../src/forge/github.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import { rulesSubjects, textRulesSubjects } from '../src/repo/subjects.ts';
-import { gateOutbound } from '../src/gate/outbound.ts';
+import { gateOutbound, settleDecision } from '../src/gate/outbound.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { runPack } from '../src/packs/run.ts';
@@ -328,7 +328,9 @@ describe('rule discovery', () => {
         name: 'fake',
         ask: async (_s, q) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.entries(q).map(([k, x]) => [k, { type: 'noul' as const, p: (/subject: log/.test(x.instructions) && /removes/.test(text)) || (/conventional format/.test(x.instructions) && !/^\w+(\(#\d+\))?!?: /.test(text)) ? 0.1 : 0.9 }])) }),
       };
-      return gateOutbound({ channel: 'github-pr-create', text, kind: 'the title and body of a new pull request' }, subjects, BUILTIN_PACKS['rules']!, gateJudge, config, verdicts());
+      const kept = verdicts();
+      const judged = () => gateOutbound({ channel: 'github-pr-create', text, kind: 'the title and body of a new pull request' }, subjects, BUILTIN_PACKS['rules']!, gateJudge, config, kept);
+      return settleDecision(await judged(), judged);
     };
     expect(await gate('feat(#188)!: remove the ci pack\n\nThis removes the `log` subject kind: a repo pack may no longer declare `subject: log`.')).toMatchObject({ allow: true, reason: 'clear' });
     expect(await gate('removed the ci pack')).toMatchObject({ allow: false, reason: 'breaks: CONTRIBUTING.md "Contributing: Commits use conventional format.": "removed the ci pack" does not follow it' });
@@ -435,8 +437,8 @@ describe('rules subject', () => {
     await Promise.resolve();
     timers.shift()!();
     const s = await first;
-    const pending = 'rule discovery for mem outlasted its 5 s wait and keeps running; the next call on it reuses what it finds';
-    expect(s).toMatchObject({ judgeError: pending, pending });
+    const pending = 'rule discovery for mem is still running';
+    expect(s).toMatchObject({ judgeError: `${pending}, and a later grade reuses what it finds`, pending });
     const report = await runPack(BUILTIN_PACKS['rules']!, s, inner, resolveConfig(undefined));
     expect(report.verdict).toBe('unknown');
     // the second call joins the same run rather than starting another, and answers once it lands

@@ -9,6 +9,8 @@ import type { Outbound } from './outbound.ts';
 const VERSION = 2;
 const KEY = 'outbound-verdicts';
 const MAX = 500;
+// verdicts settled without being kept, waiting for the call that settles on them
+const MAX_UNKEPT = 100;
 
 // what the gate decided on text it judged in full
 export type Verdict = { allow: boolean; reason: string; warnings: string[] };
@@ -41,7 +43,39 @@ export class Verdicts {
 
   // every kept verdict, so text a wrong one met is judged afresh
   async clear(): Promise<void> {
+    this.settling.clear();
     await this.store.set(KEY, []);
+  }
+
+  // verdicts still being settled off the hook's clock, by key, in this environment: the one in flight joined by a
+  // call on the same text, and one settled without being kept (the judge failed) answered once to the call that
+  // settles on it
+  private readonly settling = new Map<string, Promise<Verdict>>();
+  private readonly unkept = new Map<string, Verdict>();
+
+  // work that settles the verdict for key; kept says whether it went to the store
+  settle(key: string, work: Promise<{ verdict: Verdict; kept: boolean }>): Promise<Verdict> {
+    const done = work.then(({ verdict, kept }) => {
+      this.settling.delete(key);
+      if (!kept) {
+        this.unkept.set(key, verdict);
+        for (const old of this.unkept.keys()) if (this.unkept.size > MAX_UNKEPT) this.unkept.delete(old);
+      }
+      return verdict;
+    });
+    done.catch(() => this.settling.delete(key));
+    this.settling.set(key, done);
+    return done;
+  }
+
+  // the settle in flight for key, or the verdict one settled without keeping, taken so a later call judges afresh
+  inFlight(key: string): { running: Promise<Verdict> } | { settled: Verdict } | undefined {
+    const running = this.settling.get(key);
+    if (running) return { running };
+    const settled = this.unkept.get(key);
+    if (!settled) return undefined;
+    this.unkept.delete(key);
+    return { settled };
   }
 
   private async entries(): Promise<Entry[]> {

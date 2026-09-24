@@ -140,9 +140,14 @@ describe('post', () => {
   it('refuses a broken rule and writes nothing, and only logs it in shadow', async () => {
     const posted: { repo: string; post: ForgePost }[] = [];
     const input = { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' };
-    const r = await postCall(host(posted), pack, input, 'enforce');
-    expect(r).toMatchObject({ refused: 'github-issue-create to o/target: breaks: CONTRIBUTING.md "Prose: No em dashes in anything you write.": "It drops them — every time." does not follow it' });
+    const h = host(posted);
+    const r = await postCall(h, pack, input, 'enforce');
+    // the first round finds the rule it may break; the post is held while that is checked and the line found off the hook's clock
+    expect(r).toMatchObject({ action: 'hold', held: 'the issue-create "Watcher misses edits" on o/target is held while the rules it may break are checked beside the rest of their documents and the lines that break them are found (may break: CONTRIBUTING.md "Prose: No em dashes in anything you write."). It is written or refused once that is done, and the url or the refusal follows' });
+    expect((await r.later!).text).toBe('sift post refused the held issue-create "Watcher misses edits" on o/target, and nothing was written: github-issue-create to o/target: breaks: CONTRIBUTING.md "Prose: No em dashes in anything you write.": "It drops them — every time." does not follow it. Rewrite the text, or post again with override set to the reason it should go through as written.');
     expect(posted).toEqual([]);
+    // the same text again meets the verdict kept once the check landed, refused at once
+    expect(await postCall(h, pack, input, 'enforce')).toMatchObject({ refused: 'github-issue-create to o/target: breaks: CONTRIBUTING.md "Prose: No em dashes in anything you write.": "It drops them — every time." does not follow it' });
     const shadow = await postCall(host(posted), pack, input, 'enforce', true);
     expect(shadow).toMatchObject({ url: 'https://github.com/o/target/issue/1', decision: { allow: false } });
     expect(posted).toHaveLength(1);
@@ -271,7 +276,9 @@ describe('post', () => {
     const off = await postCall({ ...kept, verdicts: { get: untouched, set: untouched, clear: untouched } as unknown as Verdicts }, pack, input, 'off');
     expect(off).toEqual({ url: 'https://github.com/o/target/issue/1' });
     expect(store.map.size).toBe(0);
-    expect(await postCall(kept, pack, input, 'advise')).toMatchObject({ action: 'advise' });
+    const advised = await postCall(kept, pack, input, 'advise');
+    expect(advised).toMatchObject({ action: 'pending' });
+    expect(await advised.later!).toMatchObject({ action: 'advise' });
     expect(store.map.get('outbound-verdicts')).toHaveLength(1);
     // a judge that now finds nothing broken is not asked: the kept refusal is enforced
     const lenient: Judge = { name: 'fake', ask: async () => ({ ok: false, reason: 'unavailable', message: 'not asked', backend: 'fake' }) };
@@ -284,7 +291,9 @@ describe('post', () => {
   it('writes under advise whatever the verdict, and carries the verdict back', async () => {
     const posted: { repo: string; post: ForgePost }[] = [];
     const broken = await postCall(host(posted), pack, { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' }, 'advise');
-    expect(broken).toMatchObject({ url: 'https://github.com/o/target/issue/1', action: 'advise', verdict: 'sift outbound (github-issue-create), note: this may break CONTRIBUTING.md "Prose: No em dashes in anything you write.": "It drops them — every time." does not follow it' });
+    // written at once, the note naming the rule it may break, the checked advice quoting the line following
+    expect(broken).toMatchObject({ url: 'https://github.com/o/target/issue/1', action: 'pending', verdict: 'sift outbound (github-issue-create), note: this may break CONTRIBUTING.md "Prose: No em dashes in anything you write.", and the checked advice, quoting the lines that break each rule, follows' });
+    expect((await broken.later!).text).toBe('sift outbound advice on the issue-create "Watcher misses edits" on o/target written at https://github.com/o/target/issue/1, now that it is checked: sift outbound (github-issue-create), note: this may break CONTRIBUTING.md "Prose: No em dashes in anything you write.": "It drops them — every time." does not follow it');
     const clear = await postCall(host(posted), pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right, merging.' }, 'advise');
     expect(clear).toMatchObject({ url: 'https://github.com/o/target/pr/1', action: 'allow', verdict: 'sift outbound (github-pr-comment): clear' });
     const config = resolveConfig([{ outbound: { channels: [{ name: 'github-pr-comment', tool: '^mcp__sift__post$', text: { fields: ['body'], when: { kind: 'pr-comment' } }, limit: 10, kind: 'a comment on a pull request' }] } }]);
@@ -298,7 +307,7 @@ describe('post', () => {
     const input = { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' };
     const r = await postCall(host(posted), pack, { ...input, override: ' the dash is quoted from the log ' }, 'enforce');
     expect(r).toMatchObject({ url: 'https://github.com/o/target/issue/1', action: 'override', override: 'the dash is quoted from the log', decision: { allow: false }, outbound: { text: 'Watcher misses edits\nIt drops them — every time.' } });
-    expect((r as { verdict: string }).verdict).toMatch(/written over the ruling \(breaks: CONTRIBUTING.md "Prose: No em dashes.*\), override: the dash is quoted from the log$/);
+    expect((r as { verdict: string }).verdict).toMatch(/written over the ruling \(may break: CONTRIBUTING.md "Prose: No em dashes.*\), override: the dash is quoted from the log$/);
     for (const override of ['', '  ', 3]) expect(await postCall(host(posted), pack, { ...input, override }, 'enforce')).toEqual({ refused: `override is the reason the write goes through over the ruling, got ${JSON.stringify(override)}` });
     expect(posted).toHaveLength(1);
   });
@@ -406,7 +415,7 @@ describe('post', () => {
       expect(body.length).toBeGreaterThan(150_000);
       expect(body.indexOf('—')).toBeGreaterThan(100_000);
       const r = await postCall(longHost(posted, seen), pack, post(body), 'enforce');
-      expect(r).toMatchObject({ refused: expect.stringMatching(/^github-release-create to o\/long: breaks: CONTRIBUTING.md "Prose: No em dashes in anything you write\." \(in part [2-9] of \d \("Section \d+"( to "Section \d+")?\)\): "This line has one — dash\." does not follow it$/) });
+      expect((await r.later!).text).toMatch(/nothing was written: github-release-create to o\/long: breaks: CONTRIBUTING.md "Prose: No em dashes in anything you write\." \(in part [2-9] of \d \("Section \d+"( to "Section \d+")?\)\): "This line has one — dash\." does not follow it\. Rewrite the text/);
       expect(posted).toEqual([]);
     });
 
@@ -441,7 +450,7 @@ describe('post', () => {
       }
       // the same notes with the impact missing are refused at the opening
       const missing = await postCall(longHost(posted, []), pack, post(notes(false).replace('SemVer impact: minor.', 'Impact: minor.')), 'enforce');
-      expect(missing).toMatchObject({ refused: expect.stringMatching(/breaks: CONTRIBUTING.md "Releases: Release notes state the SemVer impact\." \(in the opening, part 1 of \d+ [^)]*\)\): the text lacks what it requires$/) });
+      expect((await missing.later!).text).toMatch(/breaks: CONTRIBUTING.md "Releases: Release notes state the SemVer impact\." \(in the opening, part 1 of \d+ [^)]*\)\): the text lacks what it requires\. Rewrite the text/);
     });
   });
 
@@ -532,7 +541,7 @@ describe('post', () => {
       expect(await gateOutbound(out!, subjects, pack, h.judge, DEFAULT_CONFIG, h.verdicts)).toMatchObject({ allow: true, reason: 'clear' });
       // the same text as release notes is held to the versioning rule, and the refusal quotes the line that breaks it
       const notes = await postCall(machHost([], []), pack, { repo: 'briar/mach', kind: 'release-create', tag: 'v5.12.0', title: 'v5.12.0', body: 'Fixes only.\n\nA minor release: comptime unions.' }, 'enforce');
-      expect(notes).toMatchObject({ refused: 'github-release-create to briar/mach: breaks: CONTRIBUTING.md "Versioning: PATCH: backward-compatible bug fixes, documentation, and internal refactors.": "A minor release: comptime unions." does not follow it' });
+      expect((await notes.later!).text).toContain('nothing was written: github-release-create to briar/mach: breaks: CONTRIBUTING.md "Versioning: PATCH: backward-compatible bug fixes, documentation, and internal refactors.": "A minor release: comptime unions." does not follow it.');
     });
 
     it('passes the dev to main integration pull request the release rule requires, and refuses a feature branch to main', async () => {
@@ -540,7 +549,9 @@ describe('post', () => {
       const asked: Asked[] = [];
       const integration = { repo: 'briar/mach', kind: 'pr-create', title: 'release: 5.12.0', body: 'Integration merge for 5.12.0.', base: 'main', head: 'dev' };
       const r = await postCall(machHost(posted, asked), pack, integration, 'enforce');
-      expect(r).toMatchObject({ url: 'https://github.com/briar/mach/pr/1', decision: { allow: true, reason: 'clear' } });
+      // the first round reads the target rule alone and may refuse; the post is held, the check clears it and it is written
+      expect(r).toMatchObject({ action: 'hold' });
+      expect(await r.later!).toMatchObject({ action: 'allow', text: 'sift post wrote the held pr-create "release: 5.12.0" on briar/mach: https://github.com/briar/mach/pr/1' });
       // the judge read the base, head and draft the post sets, and the confirm read the release rule beside the target rule
       const first = asked.find((a) => /complies with this rule: Branching: `dev` is the target/.test(a.instructions))!;
       expect((first.state['subject'] as { sets: unknown }).sets).toEqual({ base: 'main', head: 'dev', draft: false });
@@ -548,7 +559,7 @@ describe('post', () => {
       expect(confirm.state['rules']).toEqual(expect.arrayContaining([{ source: 'CONTRIBUTING.md', text: 'Branching: Tags are created on `main` after the integration merge from `dev`.' }]));
       expect(posted).toHaveLength(1);
       const feature = await postCall(machHost([], []), pack, { ...integration, title: 'feat: unions', body: 'Adds unions.', head: 'feat/3867' }, 'enforce');
-      expect(feature).toMatchObject({ refused: 'github-pr-create to briar/mach: breaks: CONTRIBUTING.md "Branching: `dev` is the target of every pull request.": "base: main" does not follow it' });
+      expect((await feature.later!).text).toContain('nothing was written: github-pr-create to briar/mach: breaks: CONTRIBUTING.md "Branching: `dev` is the target of every pull request.": "base: main" does not follow it.');
       // a draft to dev from a feature branch passes whatever its body says
       expect(await postCall(machHost([], []), pack, { ...integration, title: 'feat: unions', body: 'Anything at all.', base: 'dev', head: 'feat/3867', draft: true }, 'enforce')).toMatchObject({ decision: { allow: true } });
     });

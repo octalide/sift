@@ -57,7 +57,8 @@ export type Discovery = {
   cached: boolean;
   // the judge failed, nothing was cached
   error?: string;
-  // the discovery outlasted the wait and keeps running, for the next call on the scope to join or read from the cache
+  // the discovery outlasted the wait and keeps running, for the next call on the scope to join or read from the cache;
+  // a neutral fact, each caller saying what it means for its own call
   pending?: string;
   // with pending: the running discovery, for a caller that goes on once it lands
   settled?: Promise<Discovery>;
@@ -281,7 +282,7 @@ export class Discoveries {
     let timer: { cancel: () => void } | undefined;
     const late = new Promise<Discovery>((resolve) => {
       timer = schedule(waitMs, () =>
-        resolve({ docs: [], rules: [], candidates: 0, kept: [], cached: false, pending: `rule discovery for ${source.scope} outlasted its ${waitMs / 1000} s wait and keeps running; the next call on it reuses what it finds`, settled: task }),
+        resolve({ docs: [], rules: [], candidates: 0, kept: [], cached: false, pending: `rule discovery for ${source.scope} is still running`, settled: task }),
       );
     });
     try {

@@ -448,7 +448,7 @@ export const register: Register = (on, rawOptions) => {
     await tool({
       name: 'post',
       description:
-        `Write an issue, pull request, comment, review, merge or release on ${forge.name} to the repository named in repo, never the one the working directory implies. What happens to its text follows the outbound mode. Under advise, the default, the text is judged against that repository's rule documents and its outbound channels, the write is made whatever the verdict, and the url is returned with the verdict. Under enforce a broken rule or a channel's length limit refuses the write with the rule quoted and nothing is written, unless override gives the reason it goes through as written. Under off the write is made unjudged. While the rules of the repository are still being found, advise writes at once and the advice follows, and enforce answers held and judges and writes the post once they are known, the url or the refusal following; what follows arrives with a later tool call or as a message, so never make the same post again. Every kind takes repo and kind. issue-create: title, body. pr-create: title, body, base, head (a branch, or owner:branch from a fork), draft. issue-comment, pr-comment: number, body. issue-edit, pr-edit: number, title or body or both. pr-review: number, verdict, body (required unless approving). pr-merge: number, method, title and body for the merge commit. release-create: tag, body (the notes), title, target, draft, prerelease. release-edit: tag, title or body. Writing these through gh in Bash is refused under enforce; labels, assignees, closing and the like stay with gh.`,
+        `Write an issue, pull request, comment, review, merge or release on ${forge.name} to the repository named in repo, never the one the working directory implies. What happens to its text follows the outbound mode. Under advise, the default, the text is judged against that repository's rule documents and its outbound channels, the write is made whatever the verdict, and the url is returned with the verdict. Under enforce a broken rule or a channel's length limit refuses the write, naming the rule and quoting the lines that break it, and nothing is written, unless override gives the reason it goes through as written. Under off the write is made unjudged. While the rules of the repository are still being found, or the rules the text may break are checked, advise writes at once and the advice follows, and enforce answers held and writes or refuses the post once that is done, the url or the refusal following; what follows arrives with a later tool call or as a message, so never make the same post again. Every kind takes repo and kind. issue-create: title, body. pr-create: title, body, base, head (a branch, or owner:branch from a fork), draft. issue-comment, pr-comment: number, body. issue-edit, pr-edit: number, title or body or both. pr-review: number, verdict, body (required unless approving). pr-merge: number, method, title and body for the merge commit. release-create: tag, body (the notes), title, target, draft, prerelease. release-edit: tag, title or body. Writing these through gh in Bash is refused under enforce; labels, assignees, closing and the like stay with gh.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -542,14 +542,19 @@ export const register: Register = (on, rawOptions) => {
       const advised = (gated: Gated) => {
         const { checkout, outbound, decision } = gated;
         if (!decision.pending) return void notes.push(verdictOf(outbound, decision));
-        later(gated, `sift outbound advice on the ${outbound.channel} text of this ${e.tool} call, now that its rules are known`);
-        notes.push(`${pendingNote(outbound, checkout.repo ?? checkout.root)}. ${arrival(e.agentId)}`);
+        later(gated, `sift outbound advice on the ${outbound.channel} text of this ${e.tool} call, now that ${decision.confirming ? 'it is checked' : 'its rules are known'}`);
+        notes.push(`${pendingNote(outbound, decision, checkout.repo ?? checkout.root)}. ${arrival(e.agentId)}`);
       };
       // an enforced refusal; while the rules are still being found the call is refused unjudged, and the verdict it
-      // would meet follows once they are known, for the caller to run it again then
+      // would meet follows once they are known, for the caller to run it again then. one the first round found may
+      // break a rule is refused now, and the checked verdict, quoting what breaks each rule, follows
       const refusal = (gated: Gated, then: string) => {
         const { checkout, outbound, decision } = gated;
         if (!decision.pending) return `sift outbound (${outbound.channel}): ${decision.reason}. ${then}`;
+        if (decision.confirming) {
+          later(gated, `sift outbound: the checked verdict on the ${outbound.channel} text of the ${e.tool} call refused as it may break a rule. Run that call again, rewritten if it breaks one`);
+          return `sift outbound (${outbound.channel}): this call is refused, as its text ${decision.reason.replace(/^may break: /, 'may break ')}. The checked verdict, quoting the lines that break each rule, follows. ${arrival(e.agentId)} ${then}`;
+        }
         const scope = checkout.repo ?? checkout.root;
         later(gated, `sift outbound: the rules of ${scope} are known, and this is the verdict the ${outbound.channel} text of the ${e.tool} call refused while they were found would meet. Run that call again, rewritten if it breaks a rule`);
         return `sift outbound (${outbound.channel}): the rules of ${scope} are still being found, so this call is refused unjudged. The verdict on its text follows once they are known. ${arrival(e.agentId)} Run the call again then.`;

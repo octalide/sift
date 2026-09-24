@@ -37,14 +37,16 @@ export async function outboundOf(tool: string, input: Record<string, unknown>, r
 }
 
 // report is the text's, one report of every part when it was judged in parts.
-// pending: the rules are still being found, so the text could not be judged yet; it settles once they are, to why
-// they could not be found or undefined, and settleDecision then judges the text
-export type OutboundDecision = { allow: boolean; reason: string; report?: Report; warnings: string[]; pending?: Promise<string | undefined> };
+// pending: the text is not judged in full yet; it settles to why it could not be, or undefined, and settleDecision then
+// judges it again. confirming: what it waits on is the check of the rules the first round found broken, named here,
+// rather than the rules themselves being found
+export type OutboundDecision = { allow: boolean; reason: string; report?: Report; warnings: string[]; pending?: Promise<string | undefined>; confirming?: string[] };
 
 // the channel's length limit is mechanical; the rules are judged on every part of the text, an unclear rule warns, and
-// a rule violated in any part is asked again beside the rest of its document before it denies, the refusal quoting the
-// lines that break it. each is named by the parts it was found in when the text was judged in parts. a verdict judged
-// in full is kept, and the same text under the same rules meets it again without a judge call
+// each is named by the parts it was found in when the text was judged in parts. a rule violated in any part is asked
+// again beside the rest of its document and the lines that break it found, off the hook's clock: the decision answers
+// pending on that, and the text judged again once it lands meets the verdict it kept. a verdict judged in full is
+// kept, and the same text under the same rules meets it again without a judge call
 export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pack, judge: Judge, config: RepoConfig, verdicts: Verdicts): Promise<OutboundDecision> {
   if (out.denied !== undefined) return { allow: false, reason: out.denied, warnings: [] };
   if (out.limit !== undefined && out.text.length > out.limit) {
@@ -56,30 +58,61 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   const key = verdictKey(out, subjects, pack, judge);
   const kept = await verdicts.get(key);
   if (kept) return kept;
+  const flight = verdicts.inFlight(key);
+  if (flight && 'settled' in flight) return flight.settled;
+  if (flight) return confirming(flight.running, [], []);
+  const rules = (subjects[0]?.facts['rules'] as Rule[] | undefined) ?? [];
   const report = await runParts(pack, subjects, judge, config);
   if (report.judgeError) return { allow: true, reason: `judge unavailable (${report.judgeError})`, report, warnings: [] };
-  const confirmed = await confirmBreaches(report, subjects, judge);
-  if (!confirmed.ok) return { allow: true, reason: `judge unavailable (${confirmed.error})`, report, warnings: [] };
-  // a rule is asked in the opening and again in each later part, under another question; it is named once, with every
-  // part it was found in, and a rule that breaks the text is not also a warning
-  const rules = (subjects[0]?.facts['rules'] as Rule[] | undefined) ?? [];
-  const byRule = new Map<string, string[]>();
+  // a rule is asked in the opening and again in each later part, under another question; it is named once, with every part it was found in
+  const unclear = new Map<string, string[]>();
+  const violated: Rule[] = [];
   for (const item of report.ranked[0]?.items ?? []) {
-    const rule = rules[item.index]?.text;
+    const rule = rules[item.index];
     if (rule === undefined) continue;
-    for (const j of item.asked) if (j.band === 'unclear' && j.severity !== 'info') byRule.set(rule, [...(byRule.get(rule) ?? []), ...(j.parts ?? [])]);
+    for (const j of item.asked) if (j.band === 'unclear' && j.severity !== 'info') unclear.set(rule.text, [...(unclear.get(rule.text) ?? []), ...(j.parts ?? [])]);
+    if (item.asked.some((j) => j.band === 'violated' && j.severity !== 'info')) violated.push(rule);
   }
-  for (const u of confirmed.unclear) byRule.set(u.rule.text, [...(byRule.get(u.rule.text) ?? []), ...u.parts]);
-  for (const b of confirmed.breaches) byRule.delete(b.rule.text);
-  const warnings = [...byRule].map(([rule, at]) => `unclear: ${at.length > 0 ? `${rule} (in ${[...new Set(at)].join(', ')})` : rule}`);
-  const verdict = confirmed.breaches.length > 0 ? { allow: false, reason: `breaks: ${confirmed.breaches.map(breachText).join(' | ')}` } : { allow: true, reason: 'clear' };
-  await verdicts.set(key, { ...verdict, warnings });
-  return { ...verdict, report, warnings };
+  if (violated.length === 0) {
+    const verdict = { allow: true, reason: 'clear', warnings: warningsOf(unclear) };
+    await verdicts.set(key, verdict);
+    return { ...verdict, report };
+  }
+  const work = confirmBreaches(report, subjects, judge).then(async (confirmed) => {
+    if (!confirmed.ok) return { verdict: { allow: true, reason: `judge unavailable (${confirmed.error})`, warnings: [] }, kept: false };
+    // a rule that breaks the text is not also a warning
+    for (const u of confirmed.unclear) unclear.set(u.rule.text, [...(unclear.get(u.rule.text) ?? []), ...u.parts]);
+    for (const b of confirmed.breaches) unclear.delete(b.rule.text);
+    const verdict = confirmed.breaches.length > 0 ? { allow: false, reason: `breaks: ${confirmed.breaches.map(breachText).join(' | ')}`, warnings: warningsOf(unclear) } : { allow: true, reason: 'clear', warnings: warningsOf(unclear) };
+    await verdicts.set(key, verdict);
+    return { verdict, kept: true };
+  });
+  return confirming(verdicts.settle(key, work), violated, warningsOf(unclear), report);
 }
 
-// how many times a pending decision waits out a discovery: the one it was pending on, and one more when the documents
-// changed while it ran and the judgement again found a fresh discovery running
-const SETTLE_ROUNDS = 2;
+// a decision pending on the check of the rules the first round found broken, named by their documents
+function confirming(running: Promise<unknown>, violated: Rule[], warnings: string[], report?: Report): OutboundDecision {
+  const names = violated.map((r) => `${r.source} ${JSON.stringify(r.text)}`);
+  return {
+    allow: false,
+    reason: names.length > 0 ? `may break: ${names.join(' | ')}` : 'the rules this text may break are being checked',
+    warnings,
+    ...(report ? { report } : {}),
+    pending: running.then(
+      () => undefined,
+      (error: unknown) => `the check of the rules it may break failed: ${error instanceof Error ? error.message : String(error)}`,
+    ),
+    confirming: names,
+  };
+}
+
+function warningsOf(unclear: Map<string, string[]>): string[] {
+  return [...unclear].map(([rule, at]) => `unclear: ${at.length > 0 ? `${rule} (in ${[...new Set(at)].join(', ')})` : rule}`);
+}
+
+// how many times a pending decision waits: the discovery it was pending on, one more when the documents changed while
+// it ran and the judgement again found a fresh discovery running, and the check of the rules the text may break
+const SETTLE_ROUNDS = 3;
 
 // a pending decision once its rules are known: the text refused unjudged, naming why they could not be found, else
 // judged again, which now reads them

@@ -483,7 +483,8 @@ function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, la
       ...facts,
     },
     options: {},
-    ...(discovery.pending !== undefined ? { judgeError: discovery.pending, pending: discovery.pending, settled: settledOf(discovery) } : discovery.error !== undefined ? { judgeError: `rule discovery: ${discovery.error}` } : {}),
+    // a grade is told a later grade reuses the run; the gate words its own note or refusal from pending
+    ...(discovery.pending !== undefined ? { judgeError: `${discovery.pending}, and a later grade reuses what it finds`, pending: discovery.pending, settled: settledOf(discovery) } : discovery.error !== undefined ? { judgeError: `rule discovery: ${discovery.error}` } : {}),
   };
 }
 
