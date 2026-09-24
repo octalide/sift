@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG } from '../src/repo/config.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { GitHubForge, GH_WRITES } from '../src/forge/github.ts';
-import { gateOutbound, outboundOf } from '../src/gate/outbound.ts';
+import { enact, gateOutbound, outboundOf, verdictOf } from '../src/gate/outbound.ts';
 import { channelTable, commandBody, defaultChannels, textAbout, type Channel } from '../src/gate/channels.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { entryOf, fillQuestion } from '../src/judge/rank.ts';
@@ -233,5 +233,29 @@ describe('outbound gate', () => {
     const reason = 'rule discovery for o/r outlasted its 5 s wait and keeps running; the next call on it reuses what it finds';
     const waiting: Subject = { ...subject, judgeError: reason, pending: reason };
     expect(await gateOutbound({ channel: 'github', text: 'ok' }, [waiting], pack, judge([]), DEFAULT_CONFIG)).toMatchObject({ allow: false, reason, pending: true });
+  });
+});
+
+describe('outbound mode', () => {
+  const broken = { allow: false, reason: 'breaks: No em dashes.', warnings: [] };
+  const clear = { allow: true, reason: 'clear', warnings: ['unclear: Terse by default.'] };
+
+  it('advises on a broken rule and never refuses, enforces unless overridden', () => {
+    expect(enact('advise', broken, false)).toEqual({ action: 'advise', refuse: false, advise: true });
+    expect(enact('advise', clear, false)).toEqual({ action: 'allow', refuse: false, advise: true });
+    expect(enact('advise', { ...broken, pending: true }, false)).toMatchObject({ refuse: false });
+    expect(enact('enforce', broken, false)).toEqual({ action: 'deny', refuse: true, advise: false });
+    expect(enact('enforce', broken, false, 'the release PR CONTRIBUTING requires')).toEqual({ action: 'override', refuse: false, advise: false });
+    expect(enact('enforce', clear, false, 'unneeded')).toEqual({ action: 'allow', refuse: false, advise: false });
+  });
+
+  it('refuses and attaches nothing in shadow', () => {
+    expect(enact('enforce', broken, true)).toEqual({ action: 'would-deny', refuse: false, advise: false });
+    expect(enact('advise', broken, true)).toEqual({ action: 'would-advise', refuse: false, advise: false });
+  });
+
+  it('words the verdict a result carries', () => {
+    expect(verdictOf({ channel: 'discord-message', text: 'a — b' }, broken)).toBe('sift outbound (discord-message), note: this may break No em dashes.');
+    expect(verdictOf({ channel: 'discord-message', text: 'ok' }, clear)).toBe('sift outbound (discord-message): clear; unclear: Terse by default.');
   });
 });

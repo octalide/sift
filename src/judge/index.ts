@@ -109,6 +109,9 @@ export type Decision = {
   requestTokens?: number;
   responseTokens?: number;
   tokensRemoved?: number;
+  // an outbound write let through over its ruling: the reason given, and the text written
+  override?: string;
+  text?: string;
 };
 
 // a judge that records every call for the /sift report and calibration

@@ -6,7 +6,7 @@ import { textRulesSubjects } from '../repo/subjects.ts';
 import { forgeSource, type Discoveries } from '../rules/discover.ts';
 import { simpleCommands } from '../shell.ts';
 import { channelTable, defaultChannels, POST_TOOL, postKind, textAbout } from './channels.ts';
-import { gateOutbound, outboundOf, type Outbound, type OutboundDecision } from './outbound.ts';
+import { enact, gateOutbound, outboundOf, verdictOf, type Outbound, type OutboundDecision, type OutboundMode } from './outbound.ts';
 
 export const VERDICTS: ReviewVerdict[] = ['approve', 'request-changes', 'comment'];
 export const METHODS: MergeMethod[] = ['merge', 'squash', 'rebase'];
@@ -26,10 +26,11 @@ export type PostInput = {
   method?: unknown;
   target?: unknown;
   prerelease?: unknown;
+  override?: unknown;
 };
 
 // the repository and the write a post names, or what is missing or malformed in it
-export function postOf(input: PostInput, forge: Pick<Forge, 'writes'>): { repo: string; post: ForgePost } | { error: string } {
+export function postOf(input: PostInput, forge: Pick<Forge, 'writes'>): { repo: string; post: ForgePost; override?: string } | { error: string } {
   const repo = typeof input.repo === 'string' ? input.repo.trim() : '';
   if (!/^[^/\s]+\/[^\s]+$/.test(repo)) return { error: `repo is the repository to write to as owner/name, got ${JSON.stringify(input.repo)}` };
   const kinds = forge.writes.map(postKind);
@@ -69,7 +70,9 @@ export function postOf(input: PostInput, forge: Pick<Forge, 'writes'>): { repo: 
       }
     }
   })();
-  return 'error' in post ? post : { repo, post };
+  if ('error' in post) return post;
+  if (input.override !== undefined && (typeof input.override !== 'string' || input.override.trim().length === 0)) return { error: `override is the reason the write goes through over the ruling, got ${JSON.stringify(input.override)}` };
+  return typeof input.override === 'string' ? { repo, post, override: input.override.trim() } : { repo, post };
 }
 
 export type PostHost = {
@@ -81,27 +84,31 @@ export type PostHost = {
   config: (repo: string) => Promise<RepoConfig>;
 };
 
-export type Posted = { outbound?: Outbound; decision?: OutboundDecision } & ({ url: string } | { refused: string });
+// action is what the decision log records, verdict what an advised or overridden write carries back to the caller
+export type Posted = { outbound?: Outbound; decision?: OutboundDecision; action?: string; override?: string } & ({ url: string; verdict?: string } | { refused: string });
 
 const noFile = async (): Promise<string> => {
   throw new Error('the post tool takes its text inline');
 };
 
 // one post under the repository it names: that repository's conventions, channels and rule documents, read from the
-// forge whatever the caller's working directory is. a limit or a broken rule refuses the write, unless shadow only logs
-export async function postCall(host: PostHost, pack: Pack | undefined, input: PostInput, shadow = false): Promise<Posted> {
+// forge whatever the caller's working directory is. the mode decides what a limit or a broken rule does: off judges
+// nothing, advise writes with the verdict attached, enforce refuses unless the post carries an override
+export async function postCall(host: PostHost, pack: Pack | undefined, input: PostInput, mode: OutboundMode, shadow = false): Promise<Posted> {
   const parsed = postOf(input, host.forge);
   if ('error' in parsed) return { refused: parsed.error };
-  const { repo, post } = parsed;
+  const { repo, post, override } = parsed;
+  if (mode === 'off') return { url: await host.forge.post(repo, post) };
   const config = await host.config(repo);
   const outbound = await outboundOf(POST_TOOL, input as Record<string, unknown>, noFile, channelTable(defaultChannels(host.forge), config.outbound.channels));
-  let decision: OutboundDecision | undefined;
-  if (outbound && pack) {
-    const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, config);
-    decision = await gateOutbound(outbound, subjects, pack, host.judge, config);
-    if (!decision.allow && !shadow) return { outbound, decision, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
-  }
-  return { outbound, decision, url: await host.forge.post(repo, post) };
+  if (!outbound || !pack) return { outbound, url: await host.forge.post(repo, post) };
+  const subjects = await textRulesSubjects({ forge: host.forge, repo, source: forgeSource(host.forge, repo), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, config);
+  const decision = await gateOutbound(outbound, subjects, pack, host.judge, config);
+  const { action, refuse, advise } = enact(mode, decision, shadow, override);
+  if (refuse) return { outbound, decision, action, refused: `${outbound.channel} to ${repo}: ${decision.reason}` };
+  const url = await host.forge.post(repo, post);
+  if (action === 'override') return { outbound, decision, action, override, url, verdict: `sift outbound (${outbound.channel}): written over the ruling (${decision.reason}), override: ${override}` };
+  return { outbound, decision, action, url, ...(advise ? { verdict: verdictOf(outbound, decision) } : {}) };
 }
 
 // the first write in a shell command the forge's own cli or api makes with text people read
