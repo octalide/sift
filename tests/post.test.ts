@@ -121,7 +121,7 @@ describe('post', () => {
   it('judges the text by the rules of the repository it names and writes it there', async () => {
     const posted: { repo: string; post: ForgePost }[] = [];
     const asked: string[] = [];
-    const r = await postCall(host(posted, asked), pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right, merging.' });
+    const r = await postCall(host(posted, asked), pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right, merging.' }, 'enforce');
     expect(r).toMatchObject({ url: 'https://github.com/o/target/pr/1', outbound: { channel: 'github-pr-comment', kind: 'a comment on a pull request' }, decision: { allow: true } });
     expect(posted).toEqual([{ repo: 'o/target', post: { kind: 'pr', action: 'comment', number: 4, body: 'Looks right, merging.' } }]);
     expect(asked.some((q) => /em dash/.test(q))).toBe(true);
@@ -131,10 +131,10 @@ describe('post', () => {
   it('refuses a broken rule and writes nothing, and only logs it in shadow', async () => {
     const posted: { repo: string; post: ForgePost }[] = [];
     const input = { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' };
-    const r = await postCall(host(posted), pack, input);
+    const r = await postCall(host(posted), pack, input, 'enforce');
     expect(r).toMatchObject({ refused: expect.stringMatching(/^github-issue-create to o\/target: breaks: Prose: No em dashes/) });
     expect(posted).toEqual([]);
-    const shadow = await postCall(host(posted), pack, input, true);
+    const shadow = await postCall(host(posted), pack, input, 'enforce', true);
     expect(shadow).toMatchObject({ url: 'https://github.com/o/target/issue/1', decision: { allow: false } });
     expect(posted).toHaveLength(1);
   });
@@ -142,18 +142,18 @@ describe('post', () => {
   it('holds the text to the named repository\'s channel limit', async () => {
     const posted: { repo: string; post: ForgePost }[] = [];
     const config = resolveConfig([{ outbound: { channels: [{ name: 'github-pr-comment', tool: '^mcp__sift__post$', text: { fields: ['body'], when: { kind: 'pr-comment' } }, limit: 10, kind: 'a comment on a pull request' }] } }]);
-    const r = await postCall(host(posted, [], { 'o/target': config }), pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'eleven chars' });
+    const r = await postCall(host(posted, [], { 'o/target': config }), pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'eleven chars' }, 'enforce');
     expect(r).toMatchObject({ refused: 'github-pr-comment to o/target: github-pr-comment text is 12 chars, the limit is 10' });
     expect(posted).toEqual([]);
-    expect(await postCall(host(posted, [], { 'o/target': config }), pack, { repo: 'o/other', kind: 'pr-comment', number: 4, body: 'eleven chars' })).toMatchObject({ url: 'https://github.com/o/other/pr/1' });
+    expect(await postCall(host(posted, [], { 'o/target': config }), pack, { repo: 'o/other', kind: 'pr-comment', number: 4, body: 'eleven chars' }, 'enforce')).toMatchObject({ url: 'https://github.com/o/other/pr/1' });
   });
 
   it('writes a textless merge without a judge call, and refuses bad input before any read', async () => {
     const posted: { repo: string; post: ForgePost }[] = [];
     const asked: string[] = [];
-    expect(await postCall(host(posted, asked), pack, { repo: 'o/target', kind: 'pr-merge', number: 4, method: 'merge' })).toEqual({ outbound: undefined, decision: undefined, url: 'https://github.com/o/target/pr/1' });
+    expect(await postCall(host(posted, asked), pack, { repo: 'o/target', kind: 'pr-merge', number: 4, method: 'merge' }, 'enforce')).toEqual({ outbound: undefined, decision: undefined, url: 'https://github.com/o/target/pr/1' });
     expect(asked).toEqual([]);
-    expect(await postCall(host(posted), pack, { repo: 'o/target', kind: 'pr-merge', number: 4 })).toEqual({ refused: 'pr-merge needs method, one of merge, squash, rebase' });
+    expect(await postCall(host(posted), pack, { repo: 'o/target', kind: 'pr-merge', number: 4 }, 'enforce')).toEqual({ refused: 'pr-merge needs method, one of merge, squash, rebase' });
     expect(posted).toHaveLength(1);
   });
 
@@ -161,9 +161,40 @@ describe('post', () => {
     const posted: { repo: string; post: ForgePost }[] = [];
     const never: Judge = { name: 'never', ask: () => new Promise(() => {}) };
     const h = { ...host(posted, [], {}, never), discoveries: discoveries(never, undefined, { schedule: (_, fn) => (void Promise.resolve().then(fn), { cancel: () => {} }) }) };
-    const r = await postCall(h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' });
+    const r = await postCall(h, pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right.' }, 'enforce');
     expect(r).toMatchObject({ refused: 'github-pr-comment to o/target: rule discovery for o/target outlasted its 5 s wait and keeps running; the next call on it reuses what it finds', decision: { allow: false, pending: true } });
     expect(posted).toEqual([]);
+  });
+
+  it('writes with no judge call under off', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const asked: string[] = [];
+    const r = await postCall(host(posted, asked), pack, { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' }, 'off');
+    expect(r).toEqual({ url: 'https://github.com/o/target/issue/1' });
+    expect(asked).toEqual([]);
+    expect(posted).toHaveLength(1);
+  });
+
+  it('writes under advise whatever the verdict, and carries the verdict back', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const broken = await postCall(host(posted), pack, { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' }, 'advise');
+    expect(broken).toMatchObject({ url: 'https://github.com/o/target/issue/1', action: 'advise', verdict: expect.stringMatching(/^sift outbound \(github-issue-create\), note: this may break Prose: No em dashes/) });
+    const clear = await postCall(host(posted), pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'Looks right, merging.' }, 'advise');
+    expect(clear).toMatchObject({ url: 'https://github.com/o/target/pr/1', action: 'allow', verdict: 'sift outbound (github-pr-comment): clear' });
+    const config = resolveConfig([{ outbound: { channels: [{ name: 'github-pr-comment', tool: '^mcp__sift__post$', text: { fields: ['body'], when: { kind: 'pr-comment' } }, limit: 10, kind: 'a comment on a pull request' }] } }]);
+    const long = await postCall(host(posted, [], { 'o/target': config }), pack, { repo: 'o/target', kind: 'pr-comment', number: 4, body: 'eleven chars' }, 'advise');
+    expect(long).toMatchObject({ action: 'advise', verdict: 'sift outbound (github-pr-comment), note: github-pr-comment text is 12 chars, the limit is 10' });
+    expect(posted).toHaveLength(3);
+  });
+
+  it('writes a refused post under enforce when override gives a reason, and refuses an override without one', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const input = { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' };
+    const r = await postCall(host(posted), pack, { ...input, override: ' the dash is quoted from the log ' }, 'enforce');
+    expect(r).toMatchObject({ url: 'https://github.com/o/target/issue/1', action: 'override', override: 'the dash is quoted from the log', decision: { allow: false }, outbound: { text: 'Watcher misses edits\nIt drops them — every time.' } });
+    expect((r as { verdict: string }).verdict).toMatch(/written over the ruling \(breaks: Prose: No em dashes.*\), override: the dash is quoted from the log$/);
+    for (const override of ['', '  ', 3]) expect(await postCall(host(posted), pack, { ...input, override }, 'enforce')).toEqual({ refused: `override is the reason the write goes through over the ruling, got ${JSON.stringify(override)}` });
+    expect(posted).toHaveLength(1);
   });
 
   describe('a shell write from a loop that cannot call post', () => {
@@ -177,24 +208,31 @@ describe('post', () => {
     const bash = (command: string) => ({ command });
 
     it('is refused toward post when the loop can call it', async () => {
-      const r = await gateShellWrite(shell(), write, true, at, bash('gh pr comment 4 -b "fine"'), noRead);
+      const r = await gateShellWrite(shell(), write, true, 'enforce', at, bash('gh pr comment 4 -b "fine"'), noRead);
       expect(r).toEqual({ write, fallback: false, refused: rawWriteRefusal(shell().forge, write) });
     });
 
     it('is judged on its text by the checkout\'s rules, allowed or refused on it', async () => {
       const asked: string[] = [];
-      const ok = await gateShellWrite(shell(asked), write, false, at, bash('gh pr comment 4 --body "Looks right, merging."'), noRead);
+      const ok = await gateShellWrite(shell(asked), write, false, 'enforce', at, bash('gh pr comment 4 --body "Looks right, merging."'), noRead);
       expect(ok).toMatchObject({ fallback: true, gated: { outbound: { channel: 'github-shell-pr-comment', text: 'Looks right, merging.' }, decision: { allow: true } } });
       expect(asked.some((q) => /em dash/.test(q))).toBe(true);
       const heredoc = `gh pr comment 4 --body-file - <<'EOF'\nIt drops them — every time.\nEOF`;
-      const broken = await gateShellWrite(shell(), write, false, at, bash(heredoc), noRead);
+      const broken = await gateShellWrite(shell(), write, false, 'enforce', at, bash(heredoc), noRead);
       expect(broken).toMatchObject({ fallback: true, gated: { outbound: { channel: 'github-shell-pr-comment' }, decision: { allow: false, reason: expect.stringMatching(/No em dashes/) } } });
-      const created = await gateShellWrite(shell(), { kind: 'issue', action: 'create' }, false, at, bash('gh issue new -t "Watcher misses edits" -b "It drops them."'), noRead);
+      const created = await gateShellWrite(shell(), { kind: 'issue', action: 'create' }, false, 'enforce', at, bash('gh issue new -t "Watcher misses edits" -b "It drops them."'), noRead);
       expect(created).toMatchObject({ gated: { outbound: { channel: 'github-shell-issue-create' }, decision: { allow: true } } });
     });
 
+    it('is judged on its text under advise even when the loop can call post, and says so when its text cannot be read', async () => {
+      const ok = await gateShellWrite(shell(), write, true, 'advise', at, bash('gh pr comment 4 --body "It drops them — every time."'), noRead);
+      expect(ok).toMatchObject({ fallback: false, gated: { outbound: { channel: 'github-shell-pr-comment' }, decision: { allow: false, reason: expect.stringMatching(/No em dashes/) } } });
+      const unread = await gateShellWrite(shell(), write, true, 'advise', at, bash('gh api repos/o/target/issues/4/comments -f body=hi'), noRead);
+      expect(unread).toMatchObject({ fallback: false, unread: expect.stringContaining('its text could not be read from the command, so it was not judged') });
+    });
+
     it('names the fallback when the text cannot be read, and when it judged', async () => {
-      const r = await gateShellWrite(shell(), write, false, at, bash('gh api repos/o/target/issues/4/comments -f body=hi'), noRead);
+      const r = await gateShellWrite(shell(), write, false, 'enforce', at, bash('gh api repos/o/target/issues/4/comments -f body=hi'), noRead);
       expect(r).toMatchObject({ fallback: true, refused: expect.stringContaining('this loop started before sift registered mcp__sift__post, so it cannot call it') });
       expect((r as { refused: string }).refused).toContain('--body-file');
       expect(fallbackNote(shell().forge)).toMatch(/judged on its text by the checkout's rules instead of refused/);
@@ -259,7 +297,7 @@ describe('post', () => {
       const body = notes(true);
       expect(body.length).toBeGreaterThan(150_000);
       expect(body.indexOf('—')).toBeGreaterThan(100_000);
-      const r = await postCall(longHost(posted, seen), pack, post(body));
+      const r = await postCall(longHost(posted, seen), pack, post(body), 'enforce');
       expect(r).toMatchObject({ refused: expect.stringMatching(/^github-release-create to o\/long: breaks: Prose: No em dashes in anything you write\. \(in part [2-9] of \d \("Section \d+"( to "Section \d+")?\)\)$/) });
       expect(posted).toEqual([]);
     });
@@ -268,7 +306,7 @@ describe('post', () => {
       const posted: { repo: string; post: ForgePost }[] = [];
       const seen: Seen[] = [];
       const body = notes(false);
-      const r = await postCall(longHost(posted, seen), pack, post(body));
+      const r = await postCall(longHost(posted, seen), pack, post(body), 'enforce');
       expect(r).toMatchObject({ url: 'https://github.com/o/long/release/1', decision: { allow: true, reason: 'clear' } });
       expect(r.decision?.report?.parts?.length).toBeGreaterThan(1);
       // the post's text is its title and body joined; the parts the judge read, in order, are exactly that text
@@ -281,7 +319,7 @@ describe('post', () => {
     it('judges a whole-text rule on the opening alone, so later parts need not satisfy it', async () => {
       const posted: { repo: string; post: ForgePost }[] = [];
       const seen: Seen[] = [];
-      const r = await postCall(longHost(posted, seen), pack, post(notes(false)));
+      const r = await postCall(longHost(posted, seen), pack, post(notes(false)), 'enforce');
       expect(r).toMatchObject({ decision: { allow: true, warnings: [] } });
       const [opening, ...later] = [...seen].sort((a, b) => Number(b.text.startsWith('v1.0.0')) - Number(a.text.startsWith('v1.0.0')));
       expect(opening!.kind).toBe('text');
@@ -294,7 +332,7 @@ describe('post', () => {
         expect(part.criteria.every((c) => /judged on the opening of the text: a part without it does not break it/.test(c))).toBe(true);
       }
       // the same notes with the impact missing are refused at the opening
-      const missing = await postCall(longHost(posted, []), pack, post(notes(false).replace('SemVer impact: minor.', 'Impact: minor.')));
+      const missing = await postCall(longHost(posted, []), pack, post(notes(false).replace('SemVer impact: minor.', 'Impact: minor.')), 'enforce');
       expect(missing).toMatchObject({ refused: expect.stringMatching(/breaks: Releases: Release notes state the SemVer impact\. \(in the opening, part 1 of \d+/) });
     });
   });

@@ -67,7 +67,7 @@ The `/sift` command offers the same controls. See [Tools and options](docs/tools
 ## Hooks and watch
 
 - **prune** (on) drops the chunks of long Bash and Read output that the current task does not need.
-- **gateOutbound** (off) refuses forge writes from the shell in favour of `post`, and checks other outgoing text against the repo's rules.
+- **outbound** (advise) holds `post`, forge writes from the shell and other outgoing text to the repo's rules: `off` judges nothing, `advise` judges and attaches the verdict, `enforce` refuses a broken rule and points shell writes at `post`.
 - **classify** (off) answers the engine's own small classifications from the judge.
 - **watch** (off) polls repositories for issues, pull requests, comments and CI, and delivers what needs acting on as prompts, to the main loop or to the subagent that subscribed.
 

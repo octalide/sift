@@ -1,7 +1,7 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code';
 
 import { POST_TOOL, postKind } from '../src/gate/channels.ts';
-import { gateCall } from '../src/gate/outbound.ts';
+import { enact, gateCall, OUTBOUND_MODES, verdictOf, type OutboundMode } from '../src/gate/outbound.ts';
 import { METHODS, postCall, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
 import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
 import { ghWriteOf, GitHubForge } from '../src/forge/github.ts';
@@ -50,7 +50,7 @@ type Options = {
   watchDeferMaxAgeHours: number;
   watchStallHours: number;
   grade: boolean;
-  gateOutbound: boolean;
+  outbound: OutboundMode;
   classify: boolean;
   // conventions under every repo's .sift/config.json: a path or inline json, replacing the global file
   config: string;
@@ -79,7 +79,7 @@ const DEFAULTS: Options = {
   watchDeferMaxAgeHours: 24,
   watchStallHours: 1,
   grade: true,
-  gateOutbound: false,
+  outbound: 'advise',
   classify: false,
   config: '',
 };
@@ -94,6 +94,7 @@ export function resolveOptions(raw: PluginOptions): Options {
     else if (typeof fallback === 'string' && typeof v === 'string') out[key] = v;
   }
   if (typeof raw['apiKey'] === 'string' && raw['apiKey'].length > 0) out['apiKey'] = raw['apiKey'];
+  if (!(OUTBOUND_MODES as readonly unknown[]).includes(out['outbound'])) out['outbound'] = DEFAULTS.outbound;
   return out as Options;
 }
 
@@ -424,7 +425,7 @@ export const register: Register = (on, rawOptions) => {
     await tool({
       name: 'post',
       description:
-        `Write an issue, pull request, comment, review, merge or release on ${forge.name} to the repository named in repo, never the one the working directory implies. The text is judged against that repository's rule documents and its outbound channels first: a broken rule or a channel's length limit refuses the write with the rule quoted, and nothing is written. Otherwise the write is made and its url returned. Every kind takes repo and kind. issue-create: title, body. pr-create: title, body, base, head (a branch, or owner:branch from a fork), draft. issue-comment, pr-comment: number, body. issue-edit, pr-edit: number, title or body or both. pr-review: number, verdict, body (required unless approving). pr-merge: number, method, title and body for the merge commit. release-create: tag, body (the notes), title, target, draft, prerelease. release-edit: tag, title or body. Writing these through gh in Bash is refused while the outbound gate is on; labels, assignees, closing and the like stay with gh.`,
+        `Write an issue, pull request, comment, review, merge or release on ${forge.name} to the repository named in repo, never the one the working directory implies. What happens to its text follows the outbound mode. Under advise, the default, the text is judged against that repository's rule documents and its outbound channels, the write is made whatever the verdict, and the url is returned with the verdict. Under enforce a broken rule or a channel's length limit refuses the write with the rule quoted and nothing is written, unless override gives the reason it goes through as written. Under off the write is made unjudged. Every kind takes repo and kind. issue-create: title, body. pr-create: title, body, base, head (a branch, or owner:branch from a fork), draft. issue-comment, pr-comment: number, body. issue-edit, pr-edit: number, title or body or both. pr-review: number, verdict, body (required unless approving). pr-merge: number, method, title and body for the merge commit. release-create: tag, body (the notes), title, target, draft, prerelease. release-edit: tag, title or body. Writing these through gh in Bash is refused under enforce; labels, assignees, closing and the like stay with gh.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -441,6 +442,7 @@ export const register: Register = (on, rawOptions) => {
           method: { type: 'string', enum: [...METHODS], description: 'pr-merge: how the pull request is merged' },
           target: { type: 'string', description: 'release-create: the branch or sha the tag is created from when it does not exist' },
           prerelease: { type: 'boolean', description: 'release-create: mark the release a prerelease' },
+          override: { type: 'string', description: 'under enforce: the reason this write goes through although the judge refuses it. The decision log records it with the ruling and the text' },
         },
         required: ['repo', 'kind'],
       },
@@ -481,55 +483,65 @@ export const register: Register = (on, rawOptions) => {
       if (e.tool.startsWith('mcp__sift__')) return next(e);
       const rt = runtime;
       const command = (e as unknown as { command?: unknown }).command;
-      const shell = options.gateOutbound && e.tool === 'Bash' && typeof command === 'string' ? command : undefined;
-      // a reload's new environment answers before its session start has bound it: a forge write waits for the gate,
-      // read by the cli of the forge session start binds
+      const mode = options.outbound;
+      const shell = mode !== 'off' && e.tool === 'Bash' && typeof command === 'string' ? command : undefined;
+      // a reload's new environment answers before its session start has bound it: an enforced forge write waits for
+      // the gate, read by the cli of the forge session start binds
       if (!rt) {
-        const early = shell !== undefined ? rawWriteOf({ writeOf: ghWriteOf }, shell) : undefined;
+        const early = mode === 'enforce' && shell !== undefined ? rawWriteOf({ writeOf: ghWriteOf }, shell) : undefined;
         return early ? { deny: `sift outbound: ${UNBOUND}, so this ${postKind(early)} write from the shell cannot be judged yet. Run the command again in a moment.` } : next(e);
       }
       // the checkout a grade with no cwd reads: where this loop was spawned, else the session's
       const checkoutOf = async () => (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout;
-      // a forge write from the shell goes through post, which names its destination; a loop without post has its text judged
+      // verdicts an advised call carries back beside its result
+      const notes: string[] = [];
+      // a forge write from the shell goes through post under enforce, which names its destination; a loop without
+      // post, and every loop under advise, has its text judged
       const raw = shell !== undefined ? rawWriteOf(rt.forge, shell) : undefined;
-      if (raw) {
-        const gate = await gateShellWrite(rt, raw, spawns.has(e.agentId, POST_TOOL), checkoutOf, e as unknown as Record<string, unknown>, readFile);
+      if (raw && mode !== 'off') {
+        const gate = await gateShellWrite(rt, raw, spawns.has(e.agentId, POST_TOOL), mode, checkoutOf, e as unknown as Record<string, unknown>, readFile);
         const without = gate.fallback ? ' without post' : '';
         if ('refused' in gate) {
           record('outbound', options.shadow ? 'would-refuse' : 'refuse', { digest: `shell ${postKind(raw)}${without}` });
           if (options.shadow) $.ui.log(`sift outbound (shadow): would refuse: ${gate.refused}`);
           else return { deny: `sift outbound: ${gate.refused}.` };
+        } else if (gate.unread !== undefined) {
+          record('outbound', options.shadow ? 'would-advise' : 'advise', { digest: `shell ${postKind(raw)}${without}: text not read` });
+          if (!options.shadow) notes.push(gate.unread);
         } else if (gate.gated) {
           const { outbound, decision } = gate.gated;
-          record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel}${without} ${outbound.text.length} chars: ${decision.reason}` });
+          const done = enact(mode, decision, options.shadow);
+          record('outbound', done.action, { digest: `${outbound.channel}${without} ${outbound.text.length} chars: ${decision.reason}` });
           for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-          if (!decision.allow) {
-            if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-            else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${fallbackNote(rt.forge)}. Rewrite the text or ask the user.` };
-          }
+          if (done.refuse) return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${fallbackNote(rt.forge)}. Rewrite the text or ask the user.` };
+          if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${mode === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
+          if (done.advise) notes.push(verdictOf(outbound, decision));
         }
       }
-      const checkout = options.gateOutbound && !raw ? await checkoutOf() : undefined;
+      const checkout = mode !== 'off' && !raw ? await checkoutOf() : undefined;
       const gated = checkout ? await gateCall(rt, checkout, e.tool, e as unknown as Record<string, unknown>, readFile) : undefined;
       if (gated) {
         const { outbound, decision } = gated;
-        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
+        const done = enact(mode, decision, options.shadow);
+        record('outbound', done.action, { digest: `${outbound.channel} ${outbound.text.length} chars: ${decision.reason}` });
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-        if (!decision.allow) {
-          if (options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
-          else return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${decision.pending ? 'Make the same call again.' : 'Rewrite the text or ask the user.'}` };
-        }
+        if (done.refuse) return { deny: `sift outbound (${outbound.channel}): ${decision.reason}. ${decision.pending ? 'Make the same call again.' : 'Rewrite the text or ask the user.'}` };
+        if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${mode === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
+        if (done.advise) notes.push(verdictOf(outbound, decision));
       }
       const r = await next(e);
-      if (!options.prune) return r;
-      return pruneCall(
-        { tool: e.tool, input: e as unknown as Record<string, unknown>, agentId: e.agentId },
-        r,
-        pruneLoops,
-        rt.judge,
-        { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold, tools: pruneTools(options), shadow: options.shadow },
-        { record: (action, extra) => record('prune', action, extra), toast: (text) => $.ui.toast(text) },
-      );
+      const pruned: Awaited<ReturnType<typeof next>> = !options.prune
+        ? r
+        : await pruneCall(
+            { tool: e.tool, input: e as unknown as Record<string, unknown>, agentId: e.agentId },
+            r,
+            pruneLoops,
+            rt.judge,
+            { ...PRUNE_DEFAULTS, floorTokens: options.pruneFloorTokens, chunkLines: options.pruneChunkLines, keepThreshold: options.pruneKeepThreshold, tools: pruneTools(options), shadow: options.shadow },
+            { record: (action, extra) => record('prune', action, extra), toast: (text) => $.ui.toast(text) },
+          );
+      if (notes.length === 0 || pruned.deny !== undefined) return pruned;
+      return { ...pruned, context: [...(pruned.context ?? []), ...notes] };
     };
     const r = await answer();
     const rt = runtime;
@@ -557,14 +569,16 @@ export const register: Register = (on, rawOptions) => {
       const rt = ready();
       const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout.packs['rules'];
       const input = e as unknown as PostInput;
-      const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.shadow);
-      const { outbound, decision } = posted;
-      if (outbound && decision) {
-        record('outbound', decision.allow ? 'allow' : options.shadow ? 'would-deny' : 'deny', { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}` });
+      const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.outbound, options.shadow);
+      const { outbound, decision, action } = posted;
+      if (outbound && decision && action) {
+        const override = posted.override !== undefined ? { override: posted.override, reason: decision.reason, text: outbound.text } : {};
+        record('outbound', action, { digest: `${outbound.channel} ${String(input.repo)} ${outbound.text.length} chars: ${decision.reason}`, ...override });
         for (const w of decision.warnings) $.ui.log(`sift outbound (${outbound.channel}): ${w}`);
-        if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would deny ${outbound.channel} text: ${decision.reason}`);
+        if (!decision.allow && options.shadow) $.ui.log(`sift outbound (shadow): would ${options.outbound === 'enforce' ? 'deny' : 'advise on'} ${outbound.channel} text: ${decision.reason}`);
       }
-      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. ${decision?.pending ? 'Make the same post again.' : 'Rewrite the text or ask the user.'}` };
+      if ('refused' in posted) return { deny: `sift post refused: ${posted.refused}. ${decision?.pending ? 'Make the same post again.' : decision ? 'Rewrite the text, or post again with override set to the reason it should go through as written.' : 'Fix the input and post again.'}` };
+      if (posted.verdict !== undefined) return { result: [{ type: 'text', text: `${posted.url}\n${posted.verdict}` }] };
       return { result: [{ type: 'text', text: posted.url }] };
     } catch (error) {
       return { deny: `sift post failed: ${messageOf(error)}` };
@@ -634,7 +648,8 @@ export const register: Register = (on, rawOptions) => {
         ([m, s]) =>
           `  ${m.padEnd(10)} calls ${String(s.calls).padStart(4)}  acted ${String(s.acted).padStart(4)}  shadow ${String(s.shadow).padStart(4)}  avg ${s.calls ? Math.round(s.latencyMs / s.calls) : 0}ms` +
           (s.requestTokens || s.responseTokens ? `  in ${k(s.requestTokens)} out ${k(s.responseTokens)}` : '') +
-          (s.tokensRemoved ? `  removed ${k(s.tokensRemoved)}` : ''),
+          (s.tokensRemoved ? `  removed ${k(s.tokensRemoved)}` : '') +
+          (m === 'outbound' ? `  advised ${s.actions['advise'] ?? 0}  denied ${(s.actions['deny'] ?? 0) + (s.actions['refuse'] ?? 0)}  overridden ${s.actions['override'] ?? 0}` : ''),
       )
       .join('\n');
     const cost = (c: Cost) => `judge in ${k(c.requestTokens)}, out ${k(c.responseTokens)}, context removed ${k(c.tokensRemoved)}`;
@@ -645,7 +660,7 @@ export const register: Register = (on, rawOptions) => {
     return [
       `sift: judge ${rt.judge.name}${options.shadow ? ' (shadow mode)' : ''}, repo ${repo ?? 'none'}`,
       judgeLine(rt.judge.name, rt.apiKeyOrigin, rt.judge.keyRejected),
-      `enabled: ${enabled}`,
+      `enabled: ${enabled}; outbound ${options.outbound}`,
       watch,
       `this session: ${stats.session.calls} decisions, ${stats.session.failures} failures${last ? ` (last ${last.module} at ${new Date(last.at).toISOString()}: ${last.backend}: ${last.reason ?? 'no reason'})` : ''}`,
       `all sessions (ring of 500): ${stats.calls} decisions, ${stats.failures} failures`,
