@@ -1,6 +1,7 @@
 import type { Judge } from '../src/judge/types.ts';
 import { Discoveries, type DiscoveriesHost, type RuleSource } from '../src/rules/discover.ts';
 import type { KeyStore } from '../src/keys.ts';
+import { Verdicts } from '../src/gate/verdicts.ts';
 
 // a rule source over a map of path to text, with templates beside the files, ids for the files that have one, and
 // remote files keyed repo:path@ref
@@ -33,4 +34,9 @@ export function yesJudge(p = 0.9, asked: { state: unknown; instructions: string[
       return { ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.keys(q).map((k) => [k, { type: 'noul' as const, p }])) };
     },
   };
+}
+
+// the gate's kept verdicts over a store of the test's own
+export function verdicts(store = memoryStore()): Verdicts {
+  return new Verdicts(store);
 }

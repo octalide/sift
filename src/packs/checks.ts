@@ -154,13 +154,16 @@ export const CHECKS: Record<string, Check> = {
     const docs = (s.facts['docs'] as string[] | undefined) ?? [];
     const candidates = Number(s.facts['candidates'] ?? 0);
     const kept = (s.facts['kept'] as string[] | undefined) ?? [];
+    const outside = Number(s.facts['outside_rules'] ?? 0);
     if (!s.facts['has_rules']) {
+      if (outside > 0) return [info('rules.present', `none of the ${outside} rule${outside === 1 ? '' : 's'} found governs the subject${s.facts['cached'] ? ' (cached)' : ''}`)];
       if (candidates === 0 && kept.length === 0) return [info('rules.present', 'no rule documents found in the repo')];
       return [info('rules.present', `no rules found in ${candidates} candidate document${candidates === 1 ? '' : 's'}, kept ${kept.join(', ') || 'none'}${s.facts['cached'] ? ' (cached)' : ''}`)];
     }
     const total = Number(s.facts['total_rules'] ?? 0);
     const used = Math.min(total, c.rules.maxRules);
-    const out = [info('rules.present', `${used} rule${used === 1 ? '' : 's'} from ${docs.join(', ')}${s.facts['cached'] ? ' (cached)' : ''}`)];
+    const left = outside > 0 ? `, ${outside} that do not govern the subject left out` : '';
+    const out = [info('rules.present', `${used} rule${used === 1 ? '' : 's'} from ${docs.join(', ')}${left}${s.facts['cached'] ? ' (cached)' : ''}`)];
     if (total > c.rules.maxRules) out.push(warn('rules.present', `${c.rules.maxRules} of ${total} rules used, raise rules.maxRules to judge the rest`));
     return out;
   },

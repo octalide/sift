@@ -10,7 +10,8 @@ import type { Checkout } from '../src/repo/checkout.ts';
 import { DEFAULT_CONFIG, resolveConfig, type RepoConfig } from '../src/repo/config.ts';
 import { simpleCommands } from '../src/shell.ts';
 import { fakeForge } from './fake-forge.ts';
-import { discoveries } from './fake-source.ts';
+import type { Verdicts } from '../src/gate/verdicts.ts';
+import { discoveries, memoryStore, verdicts } from './fake-source.ts';
 
 const github = new GitHubForge(async () => ({ exitCode: 1, stdout: '', stderr: '' }));
 
@@ -114,6 +115,7 @@ describe('post', () => {
     }),
     judge: j,
     discoveries: discoveries(j),
+    verdicts: verdicts(),
     config: async (repo: string) => configs[repo] ?? DEFAULT_CONFIG,
   });
   const pack = BUILTIN_PACKS['rules']!;
@@ -173,6 +175,28 @@ describe('post', () => {
     expect(r).toEqual({ url: 'https://github.com/o/target/issue/1' });
     expect(asked).toEqual([]);
     expect(posted).toHaveLength(1);
+  });
+
+  // #219: a kept verdict is what the mode acts on, and off neither reads nor keeps one
+  it('meets a post with the verdict kept for its text whatever the mode, and keeps none under off', async () => {
+    const posted: { repo: string; post: ForgePost }[] = [];
+    const store = memoryStore();
+    const input = { repo: 'o/target', kind: 'issue-create', title: 'Watcher misses edits', body: 'It drops them — every time.' };
+    const kept = { ...host(posted), verdicts: verdicts(store) };
+    const untouched = async () => {
+      throw new Error('off read or kept a verdict');
+    };
+    const off = await postCall({ ...kept, verdicts: { get: untouched, set: untouched, clear: untouched } as unknown as Verdicts }, pack, input, 'off');
+    expect(off).toEqual({ url: 'https://github.com/o/target/issue/1' });
+    expect(store.map.size).toBe(0);
+    expect(await postCall(kept, pack, input, 'advise')).toMatchObject({ action: 'advise' });
+    expect(store.map.get('outbound-verdicts')).toHaveLength(1);
+    // a judge that now finds nothing broken is not asked: the kept refusal is enforced
+    const lenient: Judge = { name: 'fake', ask: async () => ({ ok: false, reason: 'unavailable', message: 'not asked', backend: 'fake' }) };
+    const r = await postCall({ ...kept, judge: lenient }, pack, input, 'enforce');
+    expect(r).toMatchObject({ action: 'deny', refused: expect.stringMatching(/breaks: Prose: No em dashes/) });
+    await kept.verdicts.clear();
+    expect(await postCall({ ...kept, judge: lenient }, pack, input, 'enforce')).toMatchObject({ url: 'https://github.com/o/target/issue/1', decision: { allow: true, reason: 'judge unavailable (unavailable: not asked)' } });
   });
 
   it('writes under advise whatever the verdict, and carries the verdict back', async () => {

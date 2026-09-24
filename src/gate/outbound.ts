@@ -7,6 +7,7 @@ import type { RepoConfig } from '../repo/config.ts';
 import { textRulesSubjects } from '../repo/subjects.ts';
 import type { RuleSource } from '../rules/discover.ts';
 import { channelTable, defaultChannels, textOf, type Channel } from './channels.ts';
+import { verdictKey, type Verdicts } from './verdicts.ts';
 
 // text a tool call is about to send somewhere people read, the hard limit of that channel, and what the text is;
 // denied names the reason the text could not be obtained at all, which the gate refuses without a judge call
@@ -36,8 +37,9 @@ export async function outboundOf(tool: string, input: Record<string, unknown>, r
 export type OutboundDecision = { allow: boolean; reason: string; report?: Report; warnings: string[]; pending?: boolean };
 
 // the channel's length limit is mechanical; the rules are judged on every part of the text, a violated rule in any part
-// denies, an unclear one warns, each named by the parts it was found in when the text was judged in parts
-export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pack, judge: Judge, config: RepoConfig): Promise<OutboundDecision> {
+// denies, an unclear one warns, each named by the parts it was found in when the text was judged in parts. a verdict
+// judged in full is kept, and the same text under the same rules meets it again without a judge call
+export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pack, judge: Judge, config: RepoConfig, verdicts: Verdicts): Promise<OutboundDecision> {
   if (out.denied !== undefined) return { allow: false, reason: out.denied, warnings: [] };
   if (out.limit !== undefined && out.text.length > out.limit) {
     return { allow: false, reason: `${out.channel} text is ${out.text.length} chars, the limit is ${out.limit}`, warnings: [] };
@@ -45,6 +47,9 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   // unjudged text is never let through for want of time: the rules are still being found, and the retry finds them
   const pending = subjects.find((s) => s.pending !== undefined);
   if (pending) return { allow: false, reason: pending.pending!, warnings: [], pending: true };
+  const key = verdictKey(out, subjects, pack, judge);
+  const kept = await verdicts.get(key);
+  if (kept) return kept;
   const report = await runParts(pack, subjects, judge, config);
   if (report.judgeError) return { allow: true, reason: `judge unavailable (${report.judgeError})`, report, warnings: [] };
   // a rule is asked in the opening and again in each later part, under another question; it is named once, with every part it was found in
@@ -59,8 +64,9 @@ export async function gateOutbound(out: Outbound, subjects: Subject[], pack: Pac
   };
   const violated = found('violated');
   const warnings = found('unclear').map((w) => `unclear: ${w}`);
-  if (violated.length > 0) return { allow: false, reason: `breaks: ${violated.join(' | ')}`, report, warnings };
-  return { allow: true, reason: 'clear', report, warnings };
+  const verdict = violated.length > 0 ? { allow: false, reason: `breaks: ${violated.join(' | ')}` } : { allow: true, reason: 'clear' };
+  await verdicts.set(key, { ...verdict, warnings });
+  return { ...verdict, report, warnings };
 }
 
 // how outbound text is held to the rules: off judges nothing, advise judges and lets everything through with the
@@ -88,7 +94,7 @@ function ruleOf(instructions: string): string {
   return instructions.replace(/^.*? (?:complies with|does not break) this rule: /s, '');
 }
 
-export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'discoveries'>;
+export type GateHost = Pick<GradeHost, 'forge' | 'fs' | 'judge' | 'discoveries'> & { verdicts: Verdicts };
 
 export type Gated = { outbound: Outbound; decision: OutboundDecision };
 
@@ -104,7 +110,7 @@ export async function gateText(host: GateHost, checkout: Checkout, outbound: Out
   const pack = checkout.packs['rules'];
   if (!pack) return undefined;
   const subjects = await textRulesSubjects({ forge: host.forge, repo: checkout.repo, source: rulesOf(host, checkout), discoveries: host.discoveries }, { text: outbound.text, about: outbound.kind }, checkout.config);
-  return { outbound, decision: await gateOutbound(outbound, subjects, pack, host.judge, checkout.config) };
+  return { outbound, decision: await gateOutbound(outbound, subjects, pack, host.judge, checkout.config, host.verdicts) };
 }
 
 // a directory in no repository has no rule documents of its own; entries the config names in another repository still read from the forge

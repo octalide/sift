@@ -10,7 +10,7 @@ import { manifestChanges, manifestFormat, type ManifestChange } from './manifest
 import { driftOf, lineDiff } from './diff.ts';
 import type { GitSource } from './source.ts';
 import { tagPatternFor, type RepoConfig } from './config.ts';
-import type { Discoveries, Discovery, Rule, RuleSource } from '../rules/discover.ts';
+import { governs, type Discoveries, type Discovery, type Rule, type RuleSource, type RuleTarget } from '../rules/discover.ts';
 import { partName, partsOf } from './parts.ts';
 
 
@@ -375,7 +375,9 @@ export type RulesHost = { forge?: Forge; repo?: string; source: RuleSource; disc
 export async function rulesSubjects(host: RulesHost, target: RulesTarget, config: RepoConfig): Promise<Subject[]> {
   const { forge, repo } = host;
   const ref = `#${target.number}`;
-  if (!forge || !repo) return [rulesOf(await rulesFound(host, config), `issue:${ref}`, { kind: 'issue', ref }, 'The subject', {})];
+  // an issue carries its labels and milestone, so a rule about them is judged against it
+  const carries: RuleTarget = { metadata: true };
+  if (!forge || !repo) return [rulesOf(await rulesFound(host, config, carries), `issue:${ref}`, { kind: 'issue', ref }, 'The subject', {})];
   const { issue, thread, state } = await readIssue(forge, repo, target.number, config, { pack: target.pack, kind: 'rules' });
   const frame: Frame = {
     text: `${issue.title}\n${issue.body}`,
@@ -389,10 +391,10 @@ export async function rulesSubjects(host: RulesHost, target: RulesTarget, config
     },
   };
   // the subject is read, and a pull request refused, before discovery spends judge calls
-  return partSubjects(await rulesFound(host, config), `issue:${ref}`, frame, `issue ${ref}`);
+  return partSubjects(await rulesFound(host, config, carries), `issue:${ref}`, frame, `issue ${ref}`);
 }
 
-// text about to be written, as the rules read it
+// text about to be written, as the rules read it: it sets no labels or milestone, so a rule about them is not judged
 export async function textRulesSubjects(host: RulesHost, target: { text: string; about?: string }, config: RepoConfig): Promise<Subject[]> {
   const { text, about } = target;
   const context = { kind: 'text', ...(about ? { about } : {}) };
@@ -401,7 +403,7 @@ export async function textRulesSubjects(host: RulesHost, target: { text: string;
     whole: { texts: [{ name: 'the text', text, tier: 0 }], build: ([whole]) => ({ ...context, text: whole! }) },
     opening: { texts: [], build: (part, note) => ({ ...context, note, text: part }) },
   };
-  return partSubjects(await rulesFound(host, config), `text:${truncate(text, 40)}`, frame, about);
+  return partSubjects(await rulesFound(host, config, { metadata: false }), `text:${truncate(text, 40)}`, frame, about);
 }
 
 // a subject the rules read: the texts of its whole state, and the text split into parts when that state does not fit,
@@ -445,18 +447,19 @@ function withCuts(subject: Subject, cuts: Cut[]): Subject {
   return cuts.length > 0 ? { ...subject, cuts } : subject;
 }
 
-type Found = { rules: Rule[]; total: number; discovery: Discovery };
+// outside: the rules found that do not govern the subject
+type Found = { rules: Rule[]; total: number; outside: number; discovery: Discovery };
 
-async function rulesFound(host: RulesHost, config: RepoConfig): Promise<Found> {
+async function rulesFound(host: RulesHost, config: RepoConfig, target: RuleTarget): Promise<Found> {
   const discovery = await host.discoveries.discover(host.source, config.rules);
-  const rules = [...discovery.rules];
+  const rules = discovery.rules.filter((r) => governs(r, target));
   const total = rules.length;
   rules.splice(config.rules.maxRules);
-  return { rules, total, discovery };
+  return { rules, total, outside: discovery.rules.length - total, discovery };
 }
 
 function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, label: string, facts: Record<string, unknown>): Subject {
-  const { rules, total, discovery } = found;
+  const { rules, total, outside, discovery } = found;
   return {
     kind: 'rules',
     ref,
@@ -465,6 +468,7 @@ function rulesOf(found: Found, ref: string, subject: Record<string, unknown>, la
       rules,
       has_rules: rules.length > 0,
       total_rules: total,
+      outside_rules: outside,
       docs: discovery.docs,
       candidates: discovery.candidates,
       kept: discovery.kept,

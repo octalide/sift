@@ -4,6 +4,7 @@ import { POST_TOOL, postKind } from '../src/gate/channels.ts';
 import { enact, gateCall, OUTBOUND_MODES, verdictOf, type OutboundMode } from '../src/gate/outbound.ts';
 import { METHODS, postCall, rawWriteOf, VERDICTS, type PostInput } from '../src/gate/post.ts';
 import { fallbackNote, gateShellWrite } from '../src/gate/shell.ts';
+import { Verdicts } from '../src/gate/verdicts.ts';
 import { ghWriteOf, GitHubForge } from '../src/forge/github.ts';
 import { grade, scopeOf, type GradeHost, type GradeOptions } from '../src/grade.ts';
 import { Checkouts, type Checkout } from '../src/repo/checkout.ts';
@@ -114,6 +115,8 @@ type Runtime = GradeHost & {
   storeKeys: StoreKeys;
   // whether this environment still owns the session's background work, or a reload replaced it
   tenure: Tenure;
+  // the outbound gate's kept verdicts, every session's
+  verdicts: Verdicts;
 };
 
 // the config option is inline json or a path, relative to the repo root
@@ -322,7 +325,7 @@ export const register: Register = (on, rawOptions) => {
         })
       : undefined;
     const discoveries = new Discoveries({ judge, store, now: () => Date.now(), log: (text) => $.ui.log(text), schedule: (ms, fn) => $.clock.after(ms, fn), waitMs: DISCOVERY_WAIT_MS });
-    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: watches ? letters : undefined, sessionId, storeKeys, tenure };
+    runtime = { judge, apiKeyOrigin: apiKey?.origin, log, forge, checkouts, session, fs, discoveries, watches, mailbox: watches ? letters : undefined, sessionId, storeKeys, tenure, verdicts: new Verdicts(store) };
     $.ui.log(`sift: judge ${judge.name}, repo ${bound.repo ?? 'none'}, packs ${Object.keys(bound.packs).join(' ')}`);
 
     // a subagent keeps the tools it was spawned with, so what it was offered is recorded as each is registered
@@ -569,7 +572,7 @@ export const register: Register = (on, rawOptions) => {
       const rt = ready();
       const pack = (await scopeOf(rt.checkouts, rt.session, undefined, spawns.of(e.agentId))).checkout.packs['rules'];
       const input = e as unknown as PostInput;
-      const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.outbound, options.shadow);
+      const posted = await postCall({ forge: rt.forge, judge: rt.judge, discoveries: rt.discoveries, verdicts: rt.verdicts, config: (repo) => rt.checkouts.remoteConfig(rt.forge, repo) }, pack, input, options.outbound, options.shadow);
       const { outbound, decision, action } = posted;
       if (outbound && decision && action) {
         const override = posted.override !== undefined ? { override: posted.override, reason: decision.reason, text: outbound.text } : {};
@@ -764,7 +767,8 @@ export const register: Register = (on, rawOptions) => {
     }
     if (head === 'clear') {
       await rt.log.clear();
-      return { text: 'decision log cleared' };
+      await rt.verdicts.clear();
+      return { text: 'decision log and kept outbound verdicts cleared' };
     }
     if (head === 'prune') {
       const [action, n] = rest;
