@@ -18,8 +18,9 @@ export type SiftUsage = { requestTokens: number; responseTokens: number; source:
 // a key named without its value: where it came from and its last four characters
 export type SiftKeyRef = { source: 'option' | 'env' | 'settings'; ending: string };
 
-// the key in use, and every other source that holds a key, marked when that key is the same one
-export type SiftKeyOrigin = SiftKeyRef & { others: (SiftKeyRef & { same: boolean })[] };
+// the key in use, and every other source that holds a key, marked when that key is the same one.
+// stored is the file the key in use is kept in, when sift can name it: the session's credentials file for the option
+export type SiftKeyOrigin = SiftKeyRef & { others: (SiftKeyRef & { same: boolean })[]; stored?: string };
 
 export type SiftJudgement =
   | { ok: true; answers: Record<string, SiftAnswer>; backend: string; latencyMs: number; usage?: SiftUsage }

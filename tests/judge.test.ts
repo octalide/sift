@@ -128,10 +128,12 @@ describe('backend selection', () => {
 });
 
 describe('api key source', () => {
-  const none = { env: async () => undefined, settings: async () => ({}) };
+  const none = { env: async () => undefined, settings: async () => ({}), configDir: async () => undefined };
   const settingsKey = (key: string) => async () => ({ env: { TYPESAFE_API_KEY: key } });
   const fix = {
     option: "fix: set a new key in the plugin's options, or clear the option to fall back to TYPESAFE_API_KEY (the option is stored in ~/.claude/.credentials.json, not in a settings file)",
+    optionIn: (dir: string) =>
+      `fix: set a new key in the plugin's options, or clear the option to fall back to TYPESAFE_API_KEY (the option is stored in ${dir}/.credentials.json, not in a settings file)`,
     env: 'fix: export a valid TYPESAFE_API_KEY',
     settings: 'fix: update env.TYPESAFE_API_KEY in the settings file',
   };
@@ -146,17 +148,22 @@ describe('api key source', () => {
   };
 
   it('takes the option, then the environment, then the settings env block', async () => {
-    expect(await resolveApiKey({ ...none, option: 'opt-1234' })).toEqual({ key: 'opt-1234', origin: { source: 'option', ending: '1234', others: [] } });
+    expect(await resolveApiKey({ ...none, option: 'opt-1234' })).toEqual({ key: 'opt-1234', origin: { source: 'option', ending: '1234', others: [], stored: '~/.claude/.credentials.json' } });
     expect(await resolveApiKey({ ...none, env: async () => 'env-5678' })).toEqual({ key: 'env-5678', origin: { source: 'env', ending: '5678', others: [] } });
     expect(await resolveApiKey({ ...none, settings: settingsKey('set-9012') })).toEqual({ key: 'set-9012', origin: { source: 'settings', ending: '9012', others: [] } });
     expect(await resolveApiKey(none)).toBeUndefined();
   });
 
   it('names every other source holding a key by its last four characters, marking the same key', async () => {
-    const all = await resolveApiKey({ option: 'fake-opt-abcd', env: async () => 'fake-env-wxyz', settings: settingsKey('fake-opt-abcd') });
+    const all = await resolveApiKey({ ...none, option: 'fake-opt-abcd', env: async () => 'fake-env-wxyz', settings: settingsKey('fake-opt-abcd') });
     expect(all).toEqual({
       key: 'fake-opt-abcd',
-      origin: { source: 'option', ending: 'abcd', others: [{ source: 'env', ending: 'wxyz', same: false }, { source: 'settings', ending: 'abcd', same: true }] },
+      origin: {
+        source: 'option',
+        ending: 'abcd',
+        others: [{ source: 'env', ending: 'wxyz', same: false }, { source: 'settings', ending: 'abcd', same: true }],
+        stored: '~/.claude/.credentials.json',
+      },
     });
     // nothing but the chosen key leaves as a key
     expect(JSON.stringify(all!.origin)).not.toContain('fake');
@@ -165,7 +172,8 @@ describe('api key source', () => {
   it('names the source, the last four characters and the fix for each source on a rejection', async () => {
     for (const source of ['option', 'env', 'settings'] as const) {
       for (const status of [401, 403]) {
-        const { judge } = counted({ source, ending: '0000', others: [] }, status);
+        const origin: KeyOrigin = { source, ending: '0000', others: [], ...(source === 'option' ? { stored: '~/.claude/.credentials.json' } : {}) };
+        const { judge } = counted(origin, status);
         const result = await judge.ask({}, questions);
         expect(result).toMatchObject({ ok: false, reason: 'unavailable', status, key: { source, ending: '0000' } });
         if (result.ok) throw new Error('expected a failure');
@@ -173,6 +181,27 @@ describe('api key source', () => {
         expect(failureText(result)).not.toContain('fake-key');
       }
     }
+  });
+
+  it("names the credentials file of the session's config dir for the option", async () => {
+    for (const [configDir, dir] of [
+      ['/home/u/.claude-briar', '/home/u/.claude-briar'],
+      ['/home/u/.claude-briar/', '/home/u/.claude-briar'],
+      [undefined, '~/.claude'],
+      ['', '~/.claude'],
+    ] as const) {
+      const resolved = await resolveApiKey({ ...none, option: 'fake-opt-abcd', configDir: async () => configDir });
+      const origin = resolved!.origin;
+      expect(origin.stored).toBe(`${dir}/.credentials.json`);
+      expect(judgeLine('jev', origin, true)).toBe(`judge: jev, key rejected from the apiKey option (ending abcd); ${fix.optionIn(dir)}`);
+      const { judge } = counted(origin, 401);
+      const result = await judge.ask({}, questions);
+      if (result.ok) throw new Error('expected a failure');
+      expect(failureText(result)).toBe(`unavailable: jev rejected the key from the apiKey option (ending abcd); ${fix.optionIn(dir)}; http 401: Please check your API key`);
+    }
+    // a key from another source names no credentials file
+    const env = await resolveApiKey({ ...none, env: async () => 'fake-env-wxyz', configDir: async () => '/home/u/.claude-briar' });
+    expect(env!.origin.stored).toBeUndefined();
   });
 
   it('leaves a failure that is not a key rejection as it was', async () => {
@@ -185,7 +214,7 @@ describe('api key source', () => {
   });
 
   it('names a shadowed environment key on the failure and on the status line', async () => {
-    const resolved = await resolveApiKey({ option: 'fake-opt-abcd', env: async () => 'fake-env-wxyz', settings: async () => ({}) });
+    const resolved = await resolveApiKey({ ...none, option: 'fake-opt-abcd', env: async () => 'fake-env-wxyz' });
     const origin = resolved!.origin;
     const shadow = 'TYPESAFE_API_KEY in the environment (ending wxyz) is set but shadowed';
     expect(judgeLine('jev', origin)).toBe(`judge: jev, key from the apiKey option (ending abcd); ${shadow}`);
@@ -194,7 +223,7 @@ describe('api key source', () => {
     if (result.ok) throw new Error('expected a failure');
     expect(failureText(result)).toBe(`unavailable: jev rejected the key from the apiKey option (ending abcd); ${fix.option}; ${shadow}; http 403: Please check your API key`);
     // a source holding the same key shadows nothing
-    const same = await resolveApiKey({ option: 'fake-opt-abcd', env: async () => 'fake-opt-abcd', settings: async () => ({}) });
+    const same = await resolveApiKey({ ...none, option: 'fake-opt-abcd', env: async () => 'fake-opt-abcd' });
     expect(judgeLine('jev', same!.origin)).toBe('judge: jev, key from the apiKey option (ending abcd)');
   });
 

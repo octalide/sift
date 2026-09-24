@@ -132,7 +132,12 @@ async function globalConfig($: EngineInterface, path: string | undefined): Promi
 }
 
 async function apiKeyOf($: EngineInterface, options: Options): Promise<ApiKey | undefined> {
-  return resolveApiKey({ option: options.apiKey, env: () => $.env.get('TYPESAFE_API_KEY'), settings: () => $.settings.read() });
+  return resolveApiKey({
+    option: options.apiKey,
+    env: () => $.env.get('TYPESAFE_API_KEY'),
+    settings: () => $.settings.read(),
+    configDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
+  });
 }
 
 const WATCH_ACTIONS = ['status', 'list', 'start', 'subscribe', 'unsubscribe', 'poll', 'pause', 'resume', 'reset', 'deferred'] as const;

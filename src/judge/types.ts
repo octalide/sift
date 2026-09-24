@@ -52,19 +52,26 @@ export const KEY_SOURCE_LABEL: Record<KeySource, string> = {
   settings: 'TYPESAFE_API_KEY in the settings env block',
 };
 
-// what to change when jev rejects the key from each source
-export const KEY_SOURCE_FIX: Record<KeySource, string> = {
-  option:
-    "set a new key in the plugin's options, or clear the option to fall back to TYPESAFE_API_KEY (the option is stored in ~/.claude/.credentials.json, not in a settings file)",
-  env: 'export a valid TYPESAFE_API_KEY',
-  settings: 'update env.TYPESAFE_API_KEY in the settings file',
-};
-
 // a key named without its value: where it came from and its last four characters
 export type KeyRef = { source: KeySource; ending: string };
 
-// the key in use, and every other source that holds a key, marked when that key is the same one
-export type KeyOrigin = KeyRef & { others: (KeyRef & { same: boolean })[] };
+// the key in use, and every other source that holds a key, marked when that key is the same one.
+// stored is the file the key in use is kept in, when sift can name it: the session's credentials file for the option
+export type KeyOrigin = KeyRef & { others: (KeyRef & { same: boolean })[]; stored?: string };
+
+// what to change when jev rejects the key in use
+export function keyFix(origin: KeyOrigin): string {
+  switch (origin.source) {
+    case 'option': {
+      const where = origin.stored ? ` (the option is stored in ${origin.stored}, not in a settings file)` : '';
+      return `set a new key in the plugin's options, or clear the option to fall back to TYPESAFE_API_KEY${where}`;
+    }
+    case 'env':
+      return 'export a valid TYPESAFE_API_KEY';
+    case 'settings':
+      return 'update env.TYPESAFE_API_KEY in the settings file';
+  }
+}
 
 export function keyRefText(k: KeyRef): string {
   return `${KEY_SOURCE_LABEL[k.source]} (ending ${k.ending})`;
@@ -85,7 +92,7 @@ export type Judgement =
 // a failure as one line; key is set only when the backend rejected the key, and then the line names it and the fix
 export function failureText(f: { reason: JudgeFailure; message: string; key?: KeyOrigin }): string {
   if (!f.key) return `${f.reason}: ${f.message}`;
-  const clauses = [`jev rejected the key from ${keyRefText(f.key)}`, `fix: ${KEY_SOURCE_FIX[f.key.source]}`, ...shadowedText(f.key), f.message];
+  const clauses = [`jev rejected the key from ${keyRefText(f.key)}`, `fix: ${keyFix(f.key)}`, ...shadowedText(f.key), f.message];
   return `${f.reason}: ${clauses.join('; ')}`;
 }
 

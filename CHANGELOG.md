@@ -6,6 +6,8 @@ Notes begin at 0.10.0. Earlier releases, and 0.10.1 and 0.10.2, have no recorded
 
 ## [Unreleased]
 
+Fixed: when jev rejected the key from the `apiKey` option, the fix in the notice and on the status line said the option is stored in `~/.claude/.credentials.json` even in a session run with `CLAUDE_CONFIG_DIR` set, whose option is stored in that directory's credentials file. The fix now names `$CLAUDE_CONFIG_DIR/.credentials.json` when the variable is set and `~/.claude/.credentials.json` otherwise. `resolveApiKey` takes a `configDir` source, a key origin from the option carries the file as `stored` (declared on `SiftKeyOrigin` too), and `KEY_SOURCE_FIX` becomes `keyFix(origin)`.
+
 ## [0.15.0] - 2026-09-23
 
 Fixed: the issue pack judged only the first 20,000 characters of an issue's body, so acceptance criteria, a checklist or a template section past that point was judged missing, and the report did not say the body was cut. The body now goes to the judge whole, the state sized by the judge's state limit in tokens rather than a fixed character count, and the thread takes the room the body leaves. A body too dense to fit on its own is cut to the room there is, and `subject.cut` warns with how much of it the questions read. The rules pack keeps reading an issue's body in parts.
