@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { templateKind } from '../src/forge/github.ts';
 import { DEFAULT_CONFIG, resolveConfig } from '../src/repo/config.ts';
 import { rulesSubjects, textRulesSubjects } from '../src/repo/subjects.ts';
-import { gateOutbound } from '../src/gate/outbound.ts';
+import { gateOutbound, settleDecision } from '../src/gate/outbound.ts';
 import type { Judge } from '../src/judge/types.ts';
 import { BUILTIN_PACKS } from '../src/packs/builtin.ts';
 import { runPack } from '../src/packs/run.ts';
 import { candidate, checkoutSource, contributingGuide, discoverRules, excluded, forgeSource, PARAGRAPH_QUESTION, ruleDoc, type RuleSource } from '../src/rules/discover.ts';
 import { ruleParagraphs } from '../src/rules/paragraphs.ts';
+import { TEXT_KIND_NAMES } from '../src/rules/kinds.ts';
 import { rulesKeys, STALE_MS, StoreKeys } from '../src/keys.ts';
 import { fakeForge } from './fake-forge.ts';
 import { discoveries, memorySource, memoryStore, verdicts, yesJudge } from './fake-source.ts';
@@ -20,7 +21,7 @@ const quiet = () => {};
 const rules = (over: Partial<typeof DEFAULT_CONFIG.rules> = {}) => ({ ...DEFAULT_CONFIG.rules, ...over });
 
 // answers the document question by path, the paragraph question by text, and whether text can break it (yes unless told)
-function judgeBy(docs: (path: string) => number, paragraphs: (text: string) => number, asked: { state: unknown; instructions: string[] }[] = [], texts: (text: string) => number = () => 0.9): Judge {
+function judgeBy(docs: (path: string) => number, paragraphs: (text: string) => number, asked: { state: unknown; instructions: string[] }[] = [], texts: (text: string) => number = () => 0.9, kinds: (kind: string, text: string) => number = () => 0.9): Judge {
   return {
     name: 'fake',
     ask: async (state, q) => {
@@ -29,7 +30,8 @@ function judgeBy(docs: (path: string) => number, paragraphs: (text: string) => n
         Object.entries(q).map(([k, x]) => {
           const doc = /^The document (.+) states rules/.exec(x.instructions);
           const text = /can follow or break this paragraph: (.*)$/s.exec(x.instructions);
-          const p = doc ? docs(doc[1]!) : text ? texts(text[1]!) : paragraphs(x.instructions.replace(/^.*not a description of what the software does: /, ''));
+          const kind = /this paragraph governs (.+?): (.*)$/s.exec(x.instructions);
+          const p = doc ? docs(doc[1]!) : text ? texts(text[1]!) : kind ? kinds(kind[1]!, kind[2]!) : paragraphs(x.instructions.replace(/^.*not a description of what the software does: /, ''));
           return [k, { type: 'noul' as const, p }];
         }),
       );
@@ -85,9 +87,9 @@ describe('rule discovery', () => {
     expect(found).toEqual({
       docs: ['CONTRIBUTING.md', 'docs/style.md'],
       rules: [
-        { source: 'CONTRIBUTING.md', text: 'Contributing: Conventional commits, the issue number as the scope.', scope: { text: true } },
-        { source: 'CONTRIBUTING.md', text: 'Contributing: No em dashes anywhere.', scope: { text: true } },
-        { source: 'docs/style.md', text: 'Style: Never a semicolon.', scope: { text: true } },
+        { source: 'CONTRIBUTING.md', text: 'Contributing: Conventional commits, the issue number as the scope.', scope: { text: true, kinds: TEXT_KIND_NAMES } },
+        { source: 'CONTRIBUTING.md', text: 'Contributing: No em dashes anywhere.', scope: { text: true, kinds: TEXT_KIND_NAMES } },
+        { source: 'docs/style.md', text: 'Style: Never a semicolon.', scope: { text: true, kinds: TEXT_KIND_NAMES } },
       ],
       candidates: 5,
       kept: ['CONTRIBUTING.md', 'docs/style.md'],
@@ -106,7 +108,7 @@ describe('rule discovery', () => {
     expect(paragraphs[1]!.document).toEqual({ path: 'docs/style.md', excerpt: '# Style\nA few notes on style.\n- Never a semicolon.', headings: ['Style'] });
     expect(paragraphs.map((p) => p.items.length)).toEqual([3, 2]);
     expect(asked[1]!.instructions[0]).toBe('Read as part of the document in the state, this paragraph directs contributors, a rule a contribution can break, not a description of what the software does: Contributing: Thanks for helping out.');
-    expect(store.map.get('rules:mem')).toMatchObject({ version: 6, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
+    expect(store.map.get('rules:mem')).toMatchObject({ version: 7, docs: ['CONTRIBUTING.md', 'docs/style.md'], kept: ['CONTRIBUTING.md', 'docs/style.md'] });
     // the kept set is in the session log by name; a cached answer logs nothing new
     expect(logged).toEqual(['sift rules mem: 5 candidates, kept CONTRIBUTING.md, docs/style.md; 3 rules from CONTRIBUTING.md, docs/style.md']);
     await discoverRules(memorySource(files), rules(), judgeBy(isRuleDoc, isRule, asked), store, now, (t) => logged.push(t));
@@ -119,7 +121,7 @@ describe('rule discovery', () => {
     const asked: { state: unknown; instructions: string[] }[] = [];
     const found = await discoverRules(memorySource({ '.github/CONTRIBUTING.md': '# Contributing\n\n- Commits must be signed.\n' }), rules(), judgeBy(() => 0, isRule, asked), memoryStore(), now, quiet);
     expect(found.kept).toEqual(['.github/CONTRIBUTING.md']);
-    expect(found.rules).toEqual([{ source: '.github/CONTRIBUTING.md', text: 'Contributing: Commits must be signed.', scope: { text: true } }]);
+    expect(found.rules).toEqual([{ source: '.github/CONTRIBUTING.md', text: 'Contributing: Commits must be signed.', scope: { text: true, kinds: TEXT_KIND_NAMES } }]);
     // no document question was asked, only the paragraphs
     expect(asked).toHaveLength(1);
     expect(asked[0]!.instructions[0]).toMatch(/^Read as part of the document in the state, this paragraph directs contributors/);
@@ -204,7 +206,7 @@ describe('rule discovery', () => {
     expect(found.kept).toEqual(['README.md', 'o/r:MIGRATION.md@v2', 'CONTRIBUTING.md']);
     // README.md holds no rule, so it is not named as used; the remote doc is
     expect(found.docs).toEqual(['o/r:MIGRATION.md@v2', 'CONTRIBUTING.md']);
-    expect(found.rules[0]).toEqual({ source: 'o/r:MIGRATION.md@v2', text: 'Migration: Callers must pass len.', scope: { text: true } });
+    expect(found.rules[0]).toEqual({ source: 'o/r:MIGRATION.md@v2', text: 'Migration: Callers must pass len.', scope: { text: true, kinds: TEXT_KIND_NAMES } });
   });
 
   it('finds nothing in a repository without prose and asks nothing', async () => {
@@ -303,7 +305,7 @@ describe('rule discovery', () => {
     const tree = { 'docs/workflow.md': '# Workflow\n\nHow we work.\n\n## Commits\n\n- Commits must be small.\n', 'SECURITY.md': '# Security\n\nReport privately.\n' };
     const found = await discoverRules(memorySource(tree), rules(), judgeBy((p) => (p === 'docs/workflow.md' ? 0.63 : 0.21), isRule), memoryStore(), now, quiet);
     expect(found.kept).toEqual(['docs/workflow.md']);
-    expect(found.rules).toEqual([{ source: 'docs/workflow.md', text: 'Commits: Commits must be small.', scope: { text: true } }]);
+    expect(found.rules).toEqual([{ source: 'docs/workflow.md', text: 'Commits: Commits must be small.', scope: { text: true, kinds: TEXT_KIND_NAMES } }]);
   });
 
   // #188's pull request body was refused for "breaking" the readme's description of the pack it removed
@@ -320,16 +322,18 @@ describe('rule discovery', () => {
     const config = resolveConfig(undefined);
     const gate = async (text: string) => {
       const subjects = await textRulesSubjects(host, { text, about: 'the title and body of a new pull request' }, config);
-      expect(subjects[0]!.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Contributing: Commits use conventional format.', scope: { text: true } }]);
+      expect(subjects[0]!.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Contributing: Commits use conventional format.', scope: { text: true, kinds: TEXT_KIND_NAMES } }]);
       // a gate judge that holds the removal against any rule naming the removed feature, and a bad commit subject against the format
       const gateJudge: Judge = {
         name: 'fake',
         ask: async (_s, q) => ({ ok: true, backend: 'fake', latencyMs: 1, answers: Object.fromEntries(Object.entries(q).map(([k, x]) => [k, { type: 'noul' as const, p: (/subject: log/.test(x.instructions) && /removes/.test(text)) || (/conventional format/.test(x.instructions) && !/^\w+(\(#\d+\))?!?: /.test(text)) ? 0.1 : 0.9 }])) }),
       };
-      return gateOutbound({ channel: 'github-pr-create', text, kind: 'the title and body of a new pull request' }, subjects, BUILTIN_PACKS['rules']!, gateJudge, config, verdicts());
+      const kept = verdicts();
+      const judged = () => gateOutbound({ channel: 'github-pr-create', text, kind: 'the title and body of a new pull request' }, subjects, BUILTIN_PACKS['rules']!, gateJudge, config, kept);
+      return settleDecision(await judged(), judged);
     };
     expect(await gate('feat(#188)!: remove the ci pack\n\nThis removes the `log` subject kind: a repo pack may no longer declare `subject: log`.')).toMatchObject({ allow: true, reason: 'clear' });
-    expect(await gate('removed the ci pack')).toMatchObject({ allow: false, reason: 'breaks: Contributing: Commits use conventional format.' });
+    expect(await gate('removed the ci pack')).toMatchObject({ allow: false, reason: 'breaks: CONTRIBUTING.md "Contributing: Commits use conventional format.": "removed the ci pack" does not follow it' });
   });
 
   it('reads a checkout from git ls-files and the working tree, a repository from the forge tree', async () => {
@@ -359,7 +363,7 @@ describe('rules subject', () => {
 
   it('carries the discovered rules, names the documents in rules.present, and sends each rule once in its question', async () => {
     const s = (await textRulesSubjects({ source: memorySource(files), discoveries: discoveries(yesJudge()) }, { text: 'hello' }, resolveConfig(undefined)))[0]!;
-    expect(s.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Rules: No em dashes.', scope: { text: true } }, { source: 'CONTRIBUTING.md', text: 'Rules: Tests must pass.', scope: { text: true } }]);
+    expect(s.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Rules: No em dashes.', scope: { text: true, kinds: TEXT_KIND_NAMES } }, { source: 'CONTRIBUTING.md', text: 'Rules: Tests must pass.', scope: { text: true, kinds: TEXT_KIND_NAMES } }]);
     expect(s.facts['docs']).toEqual(['CONTRIBUTING.md']);
     expect(s.judgeError).toBeUndefined();
     const asked: { state: unknown; instructions: string[] }[] = [];
@@ -377,7 +381,7 @@ describe('rules subject', () => {
     const host = { source: memorySource(tree), discoveries: discoveries(judgeBy(() => 0.5, () => 0.9, [], labels)) };
     const config = resolveConfig(undefined);
     const [text] = await textRulesSubjects(host, { text: 'comptime: a union build binds every arm', about: 'the title and body of a new GitHub issue' }, config);
-    expect(text!.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Issues: Titles start with a conventional prefix.', scope: { text: true } }]);
+    expect(text!.facts['rules']).toEqual([{ source: 'CONTRIBUTING.md', text: 'Issues: Titles start with a conventional prefix.', scope: { text: true, kinds: TEXT_KIND_NAMES } }]);
     const asked: { state: unknown; instructions: string[] }[] = [];
     const report = await runPack(BUILTIN_PACKS['rules']!, text!, yesJudge(0.9, asked), config);
     expect(report.mechanical).toEqual([{ check: 'rules.present', severity: 'info', message: '1 rule from CONTRIBUTING.md, 1 that do not govern the subject left out' }]);
@@ -433,8 +437,8 @@ describe('rules subject', () => {
     await Promise.resolve();
     timers.shift()!();
     const s = await first;
-    const pending = 'rule discovery for mem outlasted its 5 s wait and keeps running; the next call on it reuses what it finds';
-    expect(s).toMatchObject({ judgeError: pending, pending });
+    const pending = 'rule discovery for mem is still running';
+    expect(s).toMatchObject({ judgeError: `${pending}, and a later grade reuses what it finds`, pending });
     const report = await runPack(BUILTIN_PACKS['rules']!, s, inner, resolveConfig(undefined));
     expect(report.verdict).toBe('unknown');
     // the second call joins the same run rather than starting another, and answers once it lands
