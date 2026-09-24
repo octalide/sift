@@ -12,7 +12,20 @@ import { pool } from '../pool.ts';
 import { truncate } from '../tokens.ts';
 import { ruleParagraphs } from './paragraphs.ts';
 
-export type Rule = { source: string; text: string };
+// what a rule governs, asked once at discovery. text: whether anything a contribution's text says can follow or break
+// it, false for a rule about labels, milestones, assignees or other metadata set beside the text
+export type RuleScope = { text: boolean };
+
+export type Rule = { source: string; text: string; scope: RuleScope };
+
+// what a subject the rules read carries: metadata when it is an artifact read with its labels and milestone, not when
+// it is text about to be written, which sets none
+export type RuleTarget = { metadata: boolean };
+
+// whether a rule governs a subject: the one place a rule's scope is matched to what the subject carries
+export function governs(rule: Rule, target: RuleTarget): boolean {
+  return rule.scope.text || target.metadata;
+}
 
 // a file a source lists: its path, and when the source has one, an id that changes whenever the content does
 export type SourceFile = { path: string; id?: string };
@@ -46,7 +59,7 @@ export type Discovery = {
 };
 
 // what the store holds per scope; bump when the shape, the key, the questions or the keep policy change
-const VERSION = 5;
+const VERSION = 6;
 type Cached = { version: number; key: string; docs: string[]; rules: Rule[]; candidates: number; kept: string[] };
 
 export const PROSE = new Set(['md', 'mdx', 'markdown', 'txt', 'rst', 'org']);
@@ -78,6 +91,15 @@ export const PARAGRAPH_QUESTION: Questions = {
     criteria: {
       true: 'It tells a contributor what a change, a commit, a branch, an issue, a pull request or a message must or must not do: a convention, a requirement, a prohibition, a review or release process, or the form another project requires of code here (a migration guide\'s old and new forms).',
       false: 'It describes what this repository\'s software does, offers, accepts or refuses (a feature, a command, an option, a config field a user sets for their own repository, a pack, a check), even in words like may, must or is refused, since a contribution may change that behaviour; or it says what the project\'s maintainers or community leaders do, pledge or will do in response (enforcement, consequences, responsibilities); or it explains, introduces, records history or gives setup, build or test steps to run: nothing a contribution could comply with or violate.',
+    },
+  },
+  // what the rule governs: a label convention is kept as a rule, but no text can break it
+  text: {
+    type: 'noul',
+    instructions: 'Read as part of the document in the state, what a contribution\'s text says (a title, a body, a commit message, a comment) can follow or break this paragraph: {text}',
+    criteria: {
+      true: 'The paragraph asks something of the words written: their form, wording, prefixes, sections, what they state, name or link.',
+      false: 'The paragraph asks only for metadata set beside the text: labels, milestones, assignees, reviewers, projects or other sidebar fields. Nothing the text says can follow or break it.',
     },
   },
 };
@@ -190,9 +212,14 @@ export async function discoverRules(source: RuleSource, config: RepoConfig['rule
   for (const { doc, paragraphs, ranked } of ranks) {
     if (!ranked) continue;
     if (!ranked.ok) return failed(kept, failureText(ranked));
-    const unanswered = ranked.items.filter((r) => r.answers['rule'] === undefined);
+    const unanswered = ranked.items.filter((r) => r.answers['rule'] === undefined || r.answers['text'] === undefined);
     if (unanswered.length > 0) return failed(kept, `malformed: no answer for ${unanswered.length} of ${paragraphs.length} paragraphs in ${doc.path}`);
-    for (const r of ranked.items) if (bandOf(r.answers['rule']!, DEFAULT_THRESHOLDS) === 'satisfied') rules.push({ source: doc.path, text: paragraphs[r.index]! });
+    // a rule governs text unless the judge rules text out: an unclear one is still judged against it
+    for (const r of ranked.items) {
+      if (bandOf(r.answers['rule']!, DEFAULT_THRESHOLDS) !== 'satisfied') continue;
+      const text = bandOf(r.answers['text']!, DEFAULT_THRESHOLDS) !== 'violated';
+      rules.push({ source: doc.path, text: paragraphs[r.index]!, scope: { text } });
+    }
   }
   const docs = kept.map((d) => d.path).filter((p) => rules.some((r) => r.source === p));
   const result: Cached = { version: VERSION, key, docs, rules, candidates: candidates.length, kept: kept.map((d) => d.path) };

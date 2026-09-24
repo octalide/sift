@@ -153,7 +153,7 @@ export const BUILTIN_PACKS: Record<string, Pack> = {
             type: 'noul',
             instructions: '{subject} complies with this rule: {text}',
             criteria: {
-              true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply.',
+              true: 'The subject follows the rule, or the rule does not apply to it at all (answer near 0.5 then): a rule written for another kind of artifact, such as a pull request rule read against an issue body or a comment, does not apply. Neither does a requirement on labels, milestones, assignees or other metadata the subject does not carry.',
               false: 'The subject does something the rule forbids or omits something it requires.',
             },
             unless: 'section',
