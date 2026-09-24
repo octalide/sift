@@ -767,7 +767,8 @@ export const register: Register = (on, rawOptions) => {
     }
     if (head === 'clear') {
       await rt.log.clear();
-      return { text: 'decision log cleared' };
+      await rt.verdicts.clear();
+      return { text: 'decision log and kept outbound verdicts cleared' };
     }
     if (head === 'prune') {
       const [action, n] = rest;

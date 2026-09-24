@@ -37,6 +37,11 @@ export class Verdicts {
     await this.store.set(KEY, [...rest, { key, ...verdict }].slice(-MAX));
   }
 
+  // every kept verdict, so text a wrong one met is judged afresh
+  async clear(): Promise<void> {
+    await this.store.set(KEY, []);
+  }
+
   private async entries(): Promise<Entry[]> {
     const got = await this.store.get(KEY);
     return Array.isArray(got) ? (got as Entry[]) : [];
